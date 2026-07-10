@@ -120,6 +120,30 @@ impl Grid {
             None
         }
     }
+
+    /// Recopie la grille `src` dans cette grille, coin haut-gauche en `(x0, y0)`.
+    /// Utilisé par le serveur pour composer plusieurs volets en une seule vue.
+    pub fn blit(&mut self, src: &Grid, x0: u16, y0: u16) {
+        for r in 0..src.rows {
+            for c in 0..src.cols {
+                let cell = src.cells[r as usize * src.cols as usize + c as usize];
+                self.set(x0 + c, y0 + r, cell);
+            }
+        }
+    }
+
+    /// Écrit une chaîne à partir de `(x, y)`, sur une seule ligne, tronquée aux
+    /// limites de la grille. Ne gère pas les caractères larges (usage : bordures
+    /// et barre de statut).
+    pub fn set_str(&mut self, x: u16, y: u16, text: &str, pen: Pen) {
+        for (i, ch) in text.chars().enumerate() {
+            let col = x.saturating_add(i as u16);
+            if col >= self.cols {
+                break;
+            }
+            self.set(col, y, Cell::new(ch, pen, 1));
+        }
+    }
 }
 
 #[cfg(test)]

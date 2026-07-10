@@ -29,9 +29,6 @@ use wimux_vt::{Cell, Color, Pen};
 
 mod console;
 
-/// Octet du préfixe (Ctrl-b), comme tmux.
-const PREFIX: u8 = 0x02;
-
 /// Raison pour laquelle la boucle d'attachement se termine.
 #[derive(Debug, Clone)]
 pub enum ExitReason {
@@ -92,6 +89,10 @@ pub fn run(conn: PipeConn) -> io::Result<ExitReason> {
                         let _ = exit_tx.send(ExitReason::PaneExited(code));
                         break;
                     }
+                    Ok(ServerMessage::Detached) => {
+                        let _ = exit_tx.send(ExitReason::Detached);
+                        break;
+                    }
                     Ok(_) => {}
                     Err(_) => {
                         let _ = exit_tx.send(ExitReason::ServerGone);
@@ -127,11 +128,11 @@ pub fn run(conn: PipeConn) -> io::Result<ExitReason> {
         });
     }
 
-    // Thread d'entrée : lit l'entrée brute et l'envoie (interception du préfixe).
+    // Thread d'entrée : transmet toute l'entrée brute au serveur (qui interprète
+    // le préfixe Ctrl-b lui-même).
     {
         let out_tx = out_tx.clone();
-        let exit_tx = exit_tx.clone();
-        std::thread::spawn(move || input_loop(out_tx, exit_tx));
+        std::thread::spawn(move || input_loop(out_tx));
     }
 
     // Attendre la première raison de sortie.
@@ -145,45 +146,21 @@ pub fn run(conn: PipeConn) -> io::Result<ExitReason> {
     Ok(reason)
 }
 
-/// Boucle d'entrée : transmet l'entrée VT brute, en interceptant `Ctrl-b` suivi
-/// d'une touche (`d` = détacher).
-fn input_loop(out_tx: Sender<ClientMessage>, exit_tx: Sender<ExitReason>) {
+/// Boucle d'entrée : transmet l'entrée VT brute au serveur. Le préfixe `Ctrl-b`
+/// et ses commandes sont décodés côté serveur.
+fn input_loop(out_tx: Sender<ClientMessage>) {
     let mut stdin = io::stdin();
     let mut buf = [0u8; 1024];
-    let mut prefix_armed = false;
 
     loop {
         let n = match stdin.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-
-        let mut pending: Vec<u8> = Vec::with_capacity(n);
-        for &byte in &buf[..n] {
-            if prefix_armed {
-                prefix_armed = false;
-                match byte {
-                    b'd' => {
-                        // Détachement : signaler et tenter d'informer le serveur.
-                        let _ = out_tx.send(ClientMessage::Detach);
-                        let _ = exit_tx.send(ExitReason::Detached);
-                        return;
-                    }
-                    PREFIX => pending.push(PREFIX), // Ctrl-b Ctrl-b -> un vrai Ctrl-b
-                    other => {
-                        // Préfixe non reconnu : on renvoie les deux octets.
-                        pending.push(PREFIX);
-                        pending.push(other);
-                    }
-                }
-            } else if byte == PREFIX {
-                prefix_armed = true;
-            } else {
-                pending.push(byte);
-            }
-        }
-
-        if !pending.is_empty() && out_tx.send(ClientMessage::Input(pending)).is_err() {
+        if out_tx
+            .send(ClientMessage::Input(buf[..n].to_vec()))
+            .is_err()
+        {
             break;
         }
     }

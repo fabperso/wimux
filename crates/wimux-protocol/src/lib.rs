@@ -138,6 +138,9 @@ pub enum ServerMessage {
     PaneExited {
         code: u32,
     },
+    /// Le serveur a détaché ce client (`Ctrl-b d`) ; le client doit quitter le
+    /// mode plein écran. La session survit.
+    Detached,
     /// Erreur applicative.
     Error(String),
     Pong,

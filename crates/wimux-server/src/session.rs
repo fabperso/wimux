@@ -1,257 +1,315 @@
-//! Une session = un volet (pour la phase 2) : une pseudo-console ConPTY exécutant
-//! un shell, plus le terminal virtuel (`wimux-vt`) qui en reflète l'affichage.
-//!
-//! La session est **la source de vérité** : un thread lecteur alimente en continu
-//! le terminal à partir de la sortie du shell, même sans client attaché. Les
-//! clients attachés sont réveillés via une `Condvar` à chaque changement.
+//! Une session : un ensemble de fenêtres, chacune contenant un arbre de volets.
+//! La session est **la source de vérité** : ses volets tournent en continu, et à
+//! chaque changement les clients attachés sont réveillés puis reçoivent une
+//! composition (volets + bordures + barre de statut) rendue par le serveur.
 
-use std::io::{Read, Write};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use anyhow::Result;
 use wimux_protocol::Frame;
-use wimux_vt::Terminal;
+use wimux_vt::{Color, Grid, Pen};
 
-/// État interne mutable d'une session, protégé par un `Mutex`.
-struct State {
-    terminal: Terminal,
-    writer: Box<dyn Write + Send>,
-    master: Box<dyn MasterPty + Send>,
-    child: Option<Box<dyn Child + Send + Sync>>,
+use crate::pane::{Notifier, Pane};
+use crate::window::{Move, Rect, SplitDir, Window};
+
+struct Inner {
+    windows: Vec<Window>,
+    active_window: usize,
     cols: u16,
     rows: u16,
-    /// Incrémenté à chaque changement d'affichage ; les clients comparent leur
-    /// dernière génération vue pour savoir s'il faut renvoyer une frame.
-    generation: u64,
-    /// Code de sortie du shell une fois terminé.
-    exit_code: Option<u32>,
-    /// Nombre de clients actuellement attachés.
-    attached: usize,
 }
 
 pub struct Session {
     pub name: String,
-    state: Mutex<State>,
-    cond: Condvar,
+    notifier: Arc<Notifier>,
+    shell: String,
+    inner: Mutex<Inner>,
+    attached: AtomicUsize,
 }
 
 impl Session {
-    /// Crée une session : ouvre une pseudo-console, lance le shell, démarre le
-    /// thread lecteur, et renvoie la session partagée.
     pub fn new(name: String, cols: u16, rows: u16, shell: &str) -> Result<Arc<Session>> {
-        let pty = native_pty_system();
-        let pair = pty
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("ouverture de la pseudo-console")?;
-
-        let cmd = CommandBuilder::new(shell);
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .context("lancement du shell")?;
-
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .context("clonage du lecteur PTY")?;
-        let writer = pair
-            .master
-            .take_writer()
-            .context("prise de l'écrivain PTY")?;
-
-        // Le côté esclave ne doit plus être détenu par le serveur.
-        drop(pair.slave);
+        let notifier = Notifier::new();
+        let pane = Pane::spawn(cols, content_rows(rows), shell, Arc::clone(&notifier))?;
+        let window = Window::new("win".to_string(), pane);
 
         let session = Arc::new(Session {
             name,
-            state: Mutex::new(State {
-                terminal: Terminal::new(cols, rows),
-                writer,
-                master: pair.master,
-                child: Some(child),
+            notifier,
+            shell: shell.to_string(),
+            inner: Mutex::new(Inner {
+                windows: vec![window],
+                active_window: 0,
                 cols,
                 rows,
-                generation: 0,
-                exit_code: None,
-                attached: 0,
             }),
-            cond: Condvar::new(),
+            attached: AtomicUsize::new(0),
         });
-
-        // Thread lecteur : alimente le terminal et réveille les clients.
-        let reader_session = Arc::clone(&session);
-        std::thread::spawn(move || reader_loop(reader_session, reader));
-
+        session.reflow();
         Ok(session)
     }
 
-    /// Transmet des octets (frappes clavier) à l'entrée du shell.
-    pub fn send_input(&self, bytes: &[u8]) {
-        let mut st = self.state.lock().unwrap();
-        let _ = st.writer.write_all(bytes);
-        let _ = st.writer.flush();
-    }
-
-    /// Redimensionne la pseudo-console et le terminal.
-    pub fn resize(&self, cols: u16, rows: u16) {
-        let mut st = self.state.lock().unwrap();
-        if st.cols == cols && st.rows == rows {
-            return;
-        }
-        let _ = st.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
-        st.terminal.resize(cols, rows);
-        st.cols = cols;
-        st.rows = rows;
-        st.generation += 1;
-        drop(st);
-        self.cond.notify_all();
-    }
-
-    /// Instantané courant de l'affichage, à envoyer à un client.
-    pub fn snapshot(&self) -> Frame {
-        let st = self.state.lock().unwrap();
-        build_frame(&st)
-    }
-
-    pub fn is_alive(&self) -> bool {
-        self.state.lock().unwrap().exit_code.is_none()
-    }
-
-    /// Réveille les clients en attente (par ex. pour les faire réévaluer un
-    /// drapeau d'arrêt).
-    pub fn notify(&self) {
-        self.cond.notify_all();
+    pub fn notifier(&self) -> Arc<Notifier> {
+        Arc::clone(&self.notifier)
     }
 
     pub fn attached_count(&self) -> usize {
-        self.state.lock().unwrap().attached
+        self.attached.load(Ordering::Relaxed)
     }
 
-    fn incr_attached(&self) {
-        self.state.lock().unwrap().attached += 1;
+    pub fn incr_attached(&self) {
+        self.attached.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn decr_attached(&self) {
-        let mut st = self.state.lock().unwrap();
-        st.attached = st.attached.saturating_sub(1);
-    }
-
-    /// Termine le shell de la session (utilisé par `kill-session`).
-    pub fn kill(&self) {
-        let mut st = self.state.lock().unwrap();
-        if let Some(child) = st.child.as_mut() {
-            let _ = child.kill();
+    pub fn decr_attached(&self) {
+        let prev = self.attached.load(Ordering::Relaxed);
+        if prev > 0 {
+            self.attached.store(prev - 1, Ordering::Relaxed);
         }
     }
 
-    /// Bloque jusqu'à ce que la génération d'affichage dépasse `last_seen` (ou
-    /// que la session se termine / que `keep_going` passe à faux). Renvoie la
-    /// nouvelle génération et l'éventuel code de sortie.
-    pub fn wait_change(
-        &self,
-        last_seen: u64,
-        keep_going: &std::sync::atomic::AtomicBool,
-    ) -> (u64, Frame, Option<u32>) {
-        use std::sync::atomic::Ordering;
-        use std::time::Duration;
+    fn reflow(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let area = content_area(inner.cols, inner.rows);
+        let aw = inner.active_window;
+        if let Some(win) = inner.windows.get_mut(aw) {
+            win.reflow(area);
+        }
+    }
 
-        let mut st = self.state.lock().unwrap();
-        while st.generation == last_seen
-            && st.exit_code.is_none()
-            && keep_going.load(Ordering::Relaxed)
+    /// Transmet des octets au volet actif de la fenêtre active.
+    pub fn send_input(&self, bytes: &[u8]) {
+        let pane = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .windows
+                .get(inner.active_window)
+                .map(|w| w.active_pane())
+        };
+        if let Some(pane) = pane {
+            pane.send_input(bytes);
+        }
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) {
         {
-            let (guard, _timeout) = self
-                .cond
-                .wait_timeout(st, Duration::from_millis(200))
-                .unwrap();
-            st = guard;
+            let mut inner = self.inner.lock().unwrap();
+            if inner.cols == cols && inner.rows == rows {
+                return;
+            }
+            inner.cols = cols;
+            inner.rows = rows;
         }
-        (st.generation, build_frame(&st), st.exit_code)
+        self.reflow();
+        self.notifier.bump();
+    }
+
+    pub fn split(&self, dir: SplitDir) {
+        // Ne pas tenir le verrou pendant le spawn (qui lance un processus).
+        let new_pane = Pane::spawn(1, 1, &self.shell, Arc::clone(&self.notifier));
+        if let Ok(pane) = new_pane {
+            let mut inner = self.inner.lock().unwrap();
+            let aw = inner.active_window;
+            if let Some(win) = inner.windows.get_mut(aw) {
+                win.split(dir, pane);
+                let area = content_area(inner.cols, inner.rows);
+                inner.windows[aw].reflow(area);
+            }
+            drop(inner);
+            self.notifier.bump();
+        }
+    }
+
+    pub fn select(&self, mv: Move) {
+        let mut inner = self.inner.lock().unwrap();
+        let aw = inner.active_window;
+        if let Some(win) = inner.windows.get_mut(aw) {
+            win.select(mv);
+        }
+        drop(inner);
+        self.notifier.bump();
+    }
+
+    pub fn next_pane(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let aw = inner.active_window;
+        if let Some(win) = inner.windows.get_mut(aw) {
+            win.next_pane();
+        }
+        drop(inner);
+        self.notifier.bump();
+    }
+
+    /// Ferme le volet actif ; retire la fenêtre si elle devient vide.
+    pub fn close_active_pane(&self) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let aw = inner.active_window;
+            let empty = inner.windows.get_mut(aw).map(|w| w.close_active());
+            if empty == Some(true) {
+                inner.windows.remove(aw);
+                if inner.active_window >= inner.windows.len() && !inner.windows.is_empty() {
+                    inner.active_window = inner.windows.len() - 1;
+                }
+            }
+        }
+        self.reflow();
+        self.notifier.bump();
+    }
+
+    pub fn new_window(&self) {
+        if let Ok(pane) = Pane::spawn(1, 1, &self.shell, Arc::clone(&self.notifier)) {
+            let mut inner = self.inner.lock().unwrap();
+            let n = inner.windows.len();
+            inner.windows.push(Window::new(format!("win{n}"), pane));
+            inner.active_window = inner.windows.len() - 1;
+            let area = content_area(inner.cols, inner.rows);
+            let aw = inner.active_window;
+            inner.windows[aw].reflow(area);
+            drop(inner);
+            self.notifier.bump();
+        }
+    }
+
+    pub fn next_window(&self) {
+        self.switch_window(1);
+    }
+
+    pub fn prev_window(&self) {
+        self.switch_window(-1);
+    }
+
+    fn switch_window(&self, delta: i32) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let n = inner.windows.len();
+            if n <= 1 {
+                return;
+            }
+            let cur = inner.active_window as i32;
+            inner.active_window = (cur + delta).rem_euclid(n as i32) as usize;
+        }
+        self.reflow();
+        self.notifier.bump();
+    }
+
+    pub fn select_window(&self, index: usize) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if index >= inner.windows.len() {
+                return;
+            }
+            inner.active_window = index;
+        }
+        self.reflow();
+        self.notifier.bump();
+    }
+
+    /// Retire les volets/fenêtres morts. Renvoie `true` s'il reste de la vie.
+    fn reap(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let mut i = 0;
+        while i < inner.windows.len() {
+            if inner.windows[i].reap_dead() {
+                inner.windows.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        if inner.active_window >= inner.windows.len() && !inner.windows.is_empty() {
+            inner.active_window = inner.windows.len() - 1;
+        }
+        !inner.windows.is_empty()
+    }
+
+    pub fn is_alive(&self) -> bool {
+        !self.inner.lock().unwrap().windows.is_empty()
+    }
+
+    pub fn window_count(&self) -> usize {
+        self.inner.lock().unwrap().windows.len()
+    }
+
+    pub fn kill(&self) {
+        let inner = self.inner.lock().unwrap();
+        for win in &inner.windows {
+            win.kill_all();
+        }
+    }
+
+    /// Compose l'état d'affichage courant en une frame pour le client.
+    pub fn composite(&self) -> Frame {
+        self.reap();
+        let mut inner = self.inner.lock().unwrap();
+        let (cols, rows) = (inner.cols.max(1), inner.rows.max(1));
+        let area = content_area(cols, rows);
+
+        let mut grid = Grid::new(cols, rows);
+        let aw = inner.active_window;
+
+        // Redimensionner au cas où (idempotent) puis composer la fenêtre active.
+        let cursor = if let Some(win) = inner.windows.get_mut(aw) {
+            win.reflow(area);
+            win.render(&mut grid)
+        } else {
+            (0, 0)
+        };
+
+        // Barre de statut sur la dernière ligne.
+        if rows >= 2 {
+            draw_status_bar(&mut grid, &self.name, &inner, rows - 1);
+        }
+
+        Frame {
+            cols,
+            rows,
+            cursor_col: cursor.0,
+            cursor_row: cursor.1,
+            cells: grid_cells(&grid),
+        }
     }
 }
 
-fn build_frame(st: &State) -> Frame {
-    let grid = st.terminal.grid();
-    let (cursor_col, cursor_row) = st.terminal.cursor();
-    let mut cells = Vec::with_capacity(st.cols as usize * st.rows as usize);
+/// Nombre de lignes réservées au contenu (hors barre de statut).
+fn content_rows(rows: u16) -> u16 {
+    if rows >= 2 { rows - 1 } else { rows }
+}
+
+fn content_area(cols: u16, rows: u16) -> Rect {
+    Rect {
+        x: 0,
+        y: 0,
+        w: cols.max(1),
+        h: content_rows(rows).max(1),
+    }
+}
+
+fn grid_cells(grid: &Grid) -> Vec<wimux_vt::Cell> {
+    let mut cells = Vec::with_capacity(grid.cols() as usize * grid.rows() as usize);
     for row in 0..grid.rows() {
         cells.extend_from_slice(grid.row(row));
     }
-    Frame {
-        cols: grid.cols(),
-        rows: grid.rows(),
-        cursor_col,
-        cursor_row,
-        cells,
-    }
+    cells
 }
 
-/// Boucle du thread lecteur : lit la sortie du shell, la fait passer dans le
-/// terminal, renvoie les réponses aux requêtes (DSR/CPR...) et réveille les
-/// clients. À la fin du shell, enregistre le code de sortie.
-fn reader_loop(session: Arc<Session>, mut reader: Box<dyn Read + Send>) {
-    let mut buf = [0u8; 8192];
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let mut st = session.state.lock().unwrap();
-                st.terminal.advance(&buf[..n]);
-                let responses = st.terminal.take_responses();
-                if !responses.is_empty() {
-                    let _ = st.writer.write_all(&responses);
-                    let _ = st.writer.flush();
-                }
-                st.generation += 1;
-                drop(st);
-                session.cond.notify_all();
-            }
+fn draw_status_bar(grid: &mut Grid, name: &str, inner: &Inner, row: u16) {
+    let bar = Pen {
+        fg: Color::Indexed(0),
+        bg: Color::Indexed(2),
+        ..Pen::default()
+    };
+    // Fond de la barre.
+    for col in 0..grid.cols() {
+        grid.set(col, row, wimux_vt::Cell::blank_with(bar));
+    }
+    let mut text = format!(" [{name}] ");
+    for (i, _win) in inner.windows.iter().enumerate() {
+        if i == inner.active_window {
+            text.push_str(&format!("{i}* "));
+        } else {
+            text.push_str(&format!("{i}  "));
         }
     }
-
-    // Le shell est terminé : récupérer son code de sortie.
-    let child = {
-        let mut st = session.state.lock().unwrap();
-        st.child.take()
-    };
-    let code = child
-        .and_then(|mut c| c.wait().ok())
-        .map(|status| status.exit_code())
-        .unwrap_or(0);
-
-    let mut st = session.state.lock().unwrap();
-    st.exit_code = Some(code);
-    st.generation += 1;
-    drop(st);
-    session.cond.notify_all();
-}
-
-/// Garde RAII d'attachement : incrémente à la création, décrémente au drop.
-/// Détient un `Arc<Session>` pour être utilisable au travers des threads.
-pub struct AttachGuard {
-    session: Arc<Session>,
-}
-
-impl AttachGuard {
-    pub fn new(session: Arc<Session>) -> AttachGuard {
-        session.incr_attached();
-        AttachGuard { session }
-    }
-}
-
-impl Drop for AttachGuard {
-    fn drop(&mut self) {
-        self.session.decr_attached();
-    }
+    grid.set_str(0, row, &text, bar);
 }

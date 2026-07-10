@@ -2,11 +2,11 @@
 
 Multiplexeur de terminal **natif Windows** : sessions persistantes, detach/reattach, fenêtres et volets — les concepts de tmux, l'ergonomie de Zellij, pensé pour PowerShell et Windows Terminal.
 
-**Statut : phase 2 terminée — jalon J2 atteint** (juillet 2026). La fonctionnalité
-qui manquait à Windows fonctionne : une session survit à la fermeture du client.
-`wimux new -s dev` → détacher (`Ctrl-b d`) ou fermer la fenêtre → `wimux attach dev`
-retrouve la session vivante avec son affichage. Serveur détaché, Named Pipe par
-utilisateur, émulation VT côté serveur, client TUI. Validé par test d'intégration.
+**Statut : phase 3 en cours — vrai multiplexeur** (juillet 2026). Sessions
+persistantes (jalon J2), **découpes de volets, fenêtres multiples, navigation et
+barre de statut**. `wimux new -s dev` → détacher (`Ctrl-b d`) ou fermer la fenêtre
+→ `wimux attach dev` retrouve la session vivante. Le serveur compose la vue
+(volets + bordures + statut) et interprète le préfixe `Ctrl-b`, comme tmux.
 
 ## Documents
 
@@ -24,6 +24,20 @@ target/release/wimux new -s dev      # crée une session et s'y attache
 target/release/wimux ls              # liste les sessions
 target/release/wimux attach dev      # se rattache
 ```
+
+### Raccourcis (préfixe `Ctrl-b`)
+
+| Touche | Action |
+|--------|--------|
+| `d` | Se détacher (la session survit) |
+| `%` | Découper le volet (côte à côte) |
+| `"` | Découper le volet (empilé) |
+| `h` `j` `k` `l` | Aller au volet gauche/bas/haut/droite |
+| `o` | Volet suivant |
+| `x` | Fermer le volet actif |
+| `c` | Nouvelle fenêtre |
+| `n` / `p` | Fenêtre suivante / précédente |
+| `0`–`9` | Aller à la fenêtre N |
 
 ## Résumé du plan
 

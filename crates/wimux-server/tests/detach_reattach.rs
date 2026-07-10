@@ -259,3 +259,49 @@ fn liste_reflete_les_sessions() {
     .unwrap();
     std::thread::sleep(Duration::from_millis(200));
 }
+
+#[test]
+fn split_compose_deux_volets_avec_bordure() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-split", std::process::id());
+    start_daemon(&pipe);
+
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::NewSession {
+                name: Some("s".into()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+    }
+    let rx = spawn_reader(Arc::clone(&conn));
+
+    // Consommer l'Attached et attendre l'invite du premier volet.
+    let _ = rx.recv_timeout(Duration::from_secs(5));
+    let (ready, _) = wait_for_marker(&rx, "PS", Duration::from_secs(15));
+    assert!(ready, "invite du premier volet absente");
+
+    // Barre de statut : la dernière frame doit montrer « [s] ».
+    let (status, _) = wait_for_marker(&rx, "[s]", Duration::from_secs(3));
+    assert!(status, "la barre de statut ne montre pas le nom de session");
+
+    // Découpe verticale (Ctrl-b %). Une bordure « │ » doit apparaître.
+    {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::Input(vec![0x02, b'%'])).unwrap();
+    }
+    let (has_border, screen) = wait_for_marker(&rx, "│", Duration::from_secs(8));
+    assert!(
+        has_border,
+        "après split, aucune bordure verticale dans la composition.\nÉcran :\n{screen}"
+    );
+
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::Kill { name: "s".into() }).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+}
