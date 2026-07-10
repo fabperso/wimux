@@ -14,3 +14,5 @@ path = "src/main.rs"
 wimux-protocol.workspace = true
 wimux-vt.workspace = true
 thiserror.workspace = true
+portable-pty = "0.9.0"
+anyhow = "1.0.103"
