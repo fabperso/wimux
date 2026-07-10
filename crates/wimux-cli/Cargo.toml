@@ -13,3 +13,4 @@ path = "src/main.rs"
 [dependencies]
 wimux-protocol.workspace = true
 wimux-client.workspace = true
+crossterm = "0.29.0"

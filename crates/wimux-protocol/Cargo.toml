@@ -7,4 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+postcard = { version = "1.1.3", features = ["use-std"] }
 serde.workspace = true
+wimux-vt = { version = "0.0.1", path = "../wimux-vt" }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_Security"] }

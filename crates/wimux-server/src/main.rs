@@ -14,18 +14,19 @@ use wimux_server::pty::run_capture;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.first().map(String::as_str) == Some("poc") {
-        return run_poc();
+    match args.first().map(String::as_str) {
+        Some("serve") => wimux_server::daemon::run(),
+        Some("poc") => run_poc(),
+        _ => {
+            println!(
+                "wimux-server {} (protocole {})",
+                env!("CARGO_PKG_VERSION"),
+                PROTOCOL_VERSION
+            );
+            println!("Usage : wimux-server serve   (démarre le démon)");
+            Ok(())
+        }
     }
-
-    println!(
-        "wimux-server {} (protocole {})",
-        env!("CARGO_PKG_VERSION"),
-        PROTOCOL_VERSION
-    );
-    // TODO(J2) : créer le Named Pipe, boucle d'acceptation des clients,
-    // gestionnaire de sessions, persistance.
-    Ok(())
 }
 
 /// Démonstration manuelle du PoC ConPTY (phase 1).
