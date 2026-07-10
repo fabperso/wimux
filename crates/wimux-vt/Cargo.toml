@@ -8,3 +8,5 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
+unicode-width = "0.2.2"
+vte = "0.15.0"
