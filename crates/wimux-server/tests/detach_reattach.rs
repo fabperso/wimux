@@ -147,10 +147,15 @@ fn session_survit_au_detachement() {
     };
     assert_eq!(session_name, "dev");
 
-    // Laisser PowerShell démarrer, puis envoyer une commande dont la sortie
-    // « CANARI7788 » n'apparaît QUE si la commande s'exécute (la ligne tapée
-    // montre la concaténation, pas le résultat).
-    std::thread::sleep(Duration::from_millis(1500));
+    // Attendre que l'invite PowerShell soit prête (plutôt qu'un délai fixe, pour
+    // éviter la flakiness sur un runner lent), puis envoyer une commande dont la
+    // sortie « CANARI7788 » n'apparaît QUE si la commande s'exécute (la ligne
+    // tapée montre la concaténation, pas le résultat).
+    let (prompt_ready, prompt_screen) = wait_for_marker(&rx1, "PS", Duration::from_secs(15));
+    assert!(
+        prompt_ready,
+        "l'invite PowerShell n'est pas apparue.\nÉcran :\n{prompt_screen}"
+    );
     {
         let mut w: &PipeConn = &conn1;
         send(
@@ -160,7 +165,7 @@ fn session_survit_au_detachement() {
         .unwrap();
     }
 
-    let (found, screen) = wait_for_marker(&rx1, "CANARI7788", Duration::from_secs(8));
+    let (found, screen) = wait_for_marker(&rx1, "CANARI7788", Duration::from_secs(12));
     assert!(
         found,
         "la sortie de la commande n'est pas apparue.\nÉcran :\n{screen}"
