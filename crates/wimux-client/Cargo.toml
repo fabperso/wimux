@@ -1,0 +1,12 @@
+[package]
+name = "wimux-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wimux-protocol.workspace = true
+wimux-vt.workspace = true
+thiserror.workspace = true

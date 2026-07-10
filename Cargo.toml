@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/wimux-protocol",
+    "crates/wimux-vt",
+    "crates/wimux-server",
+    "crates/wimux-client",
+    "crates/wimux-cli",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/fabrice/wimux"
+authors = ["Fabrice"]
+
+[workspace.dependencies]
+# Crates internes
+wimux-protocol = { path = "crates/wimux-protocol" }
+wimux-vt = { path = "crates/wimux-vt" }
+wimux-client = { path = "crates/wimux-client" }
+
+# Dépendances externes partagées
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[profile.release]
+lto = "thin"
+strip = true

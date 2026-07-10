@@ -1,0 +1,15 @@
+[package]
+name = "wimux-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "wimux"
+path = "src/main.rs"
+
+[dependencies]
+wimux-protocol.workspace = true
+wimux-client.workspace = true

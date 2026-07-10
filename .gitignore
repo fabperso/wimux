@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock.orig
+
+# Éditeurs / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Divers Windows
+Thumbs.db
+Desktop.ini

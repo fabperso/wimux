@@ -1,0 +1,16 @@
+[package]
+name = "wimux-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "wimux-server"
+path = "src/main.rs"
+
+[dependencies]
+wimux-protocol.workspace = true
+wimux-vt.workspace = true
+thiserror.workspace = true
