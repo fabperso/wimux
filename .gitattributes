@@ -1,0 +1,11 @@
+# Normalise les fins de ligne : LF dans le dépôt pour tous les fichiers texte.
+* text=auto eol=lf
+
+# Fichiers Windows qui doivent rester en CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binaire : ne jamais convertir.
+*.png binary
+*.ico binary
