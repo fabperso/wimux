@@ -15,3 +15,8 @@ Desktop.ini
 
 # Maquettes du companion de brainstorming
 .superpowers/
+
+# App GUI (Tauri)
+wimux-gui/node_modules/
+wimux-gui/dist/
+wimux-gui/src-tauri/target/
