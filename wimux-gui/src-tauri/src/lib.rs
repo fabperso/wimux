@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
 use wimux_protocol::transport::{PipeConn, connect, user_pipe_name};
 use wimux_protocol::{
-    ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, recv, send,
+    ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, SplitDir, recv, send,
 };
 
 /// Connexion partagée au serveur wimux (écrivain).
@@ -64,6 +64,9 @@ fn attach_session(session: String, app: AppHandle, bridge: State<Bridge>) -> Res
                         }
                         ServerMessage::PaneOutput { pane_id, bytes } => {
                             let _ = app2.emit("pane-output", (pane_id, bytes));
+                        }
+                        ServerMessage::WindowLayout { tree, active } => {
+                            let _ = app2.emit("window-layout", (tree, active));
                         }
                         ServerMessage::Error(m) => {
                             let _ = app2.emit("pane-error", m);
@@ -149,6 +152,58 @@ fn pane_input(pane_id: u64, bytes: Vec<u8>, bridge: State<Bridge>) -> Result<(),
     Ok(())
 }
 
+#[tauri::command]
+fn split_pane(pane_id: u64, dir: String, bridge: State<Bridge>) -> Result<(), String> {
+    let dir = match dir.as_str() {
+        "LeftRight" => SplitDir::LeftRight,
+        "TopBottom" => SplitDir::TopBottom,
+        other => return Err(format!("direction inconnue : {other}")),
+    };
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::SplitPane { pane_id, dir }).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn close_pane(pane_id: u64, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::ClosePane { pane_id }).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn focus_pane(pane_id: u64, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::FocusPane { pane_id }).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_split_ratio(node_id: u32, ratio: f32, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::SetSplitRatio { node_id, ratio })
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn pane_resize(pane_id: u64, cols: u16, rows: u16, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::PaneResize { pane_id, cols, rows })
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -156,6 +211,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             attach_session,
             pane_input,
+            pane_resize,
+            split_pane,
+            close_pane,
+            focus_pane,
+            set_split_ratio,
             list_sessions,
             create_session,
             kill_session,
