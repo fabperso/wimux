@@ -18,6 +18,7 @@ use wimux_protocol::{
     ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, SessionInfo, recv, send,
 };
 
+use crate::pane::CopyAction;
 use crate::session::Session;
 use crate::window::{Move, SplitDir};
 
@@ -292,8 +293,12 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
             }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
-                    let detach = route_input(&a.session, &mut prefix, &bytes);
-                    if detach {
+                    let outcome = route_input(&a.session, &mut prefix, &bytes);
+                    if let Some(text) = outcome.clipboard {
+                        let mut wr: &PipeConn = &conn;
+                        let _ = send(&mut wr, &ServerMessage::SetClipboard(text));
+                    }
+                    if outcome.detach {
                         let mut wr: &PipeConn = &conn;
                         let _ = send(&mut wr, &ServerMessage::Detached);
                         attachment = None;
@@ -328,11 +333,29 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
     Ok(())
 }
 
-/// Décode le flux d'entrée : route vers le volet actif, ou exécute une commande
-/// de préfixe. Renvoie `true` si l'utilisateur demande un détachement.
-fn route_input(session: &Session, prefix: &mut PrefixState, bytes: &[u8]) -> bool {
-    let mut forward: Vec<u8> = Vec::with_capacity(bytes.len());
+/// Résultat du routage d'un fragment d'entrée.
+#[derive(Default)]
+struct RouteOutcome {
+    detach: bool,
+    clipboard: Option<String>,
+}
 
+/// Décode le flux d'entrée : mode copie, commande de préfixe, ou frappe vers le
+/// volet actif.
+fn route_input(session: &Session, prefix: &mut PrefixState, bytes: &[u8]) -> RouteOutcome {
+    let mut outcome = RouteOutcome::default();
+
+    // En mode copie, les touches pilotent la vue et ne vont pas au shell.
+    if session.active_in_copy_mode() {
+        for &b in bytes {
+            if let CopyAction::Copied(text) = session.copy_key(b) {
+                outcome.clipboard = Some(text);
+            }
+        }
+        return outcome;
+    }
+
+    let mut forward: Vec<u8> = Vec::with_capacity(bytes.len());
     for &byte in bytes {
         if prefix.armed {
             prefix.armed = false;
@@ -342,7 +365,12 @@ fn route_input(session: &Session, prefix: &mut PrefixState, bytes: &[u8]) -> boo
                 forward.clear();
             }
             match byte {
-                b'd' => return true,
+                b'd' => {
+                    outcome.detach = true;
+                    return outcome;
+                }
+                b'[' => session.enter_copy_mode(),
+                b']' => session.paste(),
                 b'%' => session.split(SplitDir::LeftRight),
                 b'"' => session.split(SplitDir::TopBottom),
                 b'o' => session.next_pane(),
@@ -368,5 +396,5 @@ fn route_input(session: &Session, prefix: &mut PrefixState, bytes: &[u8]) -> boo
     if !forward.is_empty() {
         session.send_input(&forward);
     }
-    false
+    outcome
 }

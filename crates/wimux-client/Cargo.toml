@@ -12,3 +12,4 @@ wimux-vt.workspace = true
 thiserror.workspace = true
 crossterm = "0.29.0"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Console"] }
+clipboard-win = "5.4.1"

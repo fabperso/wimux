@@ -141,6 +141,8 @@ pub enum ServerMessage {
     /// Le serveur a détaché ce client (`Ctrl-b d`) ; le client doit quitter le
     /// mode plein écran. La session survit.
     Detached,
+    /// Texte à placer dans le presse-papiers du système (suite à une copie).
+    SetClipboard(String),
     /// Erreur applicative.
     Error(String),
     Pong,

@@ -10,7 +10,7 @@ use anyhow::Result;
 use wimux_protocol::Frame;
 use wimux_vt::{Color, Grid, Pen};
 
-use crate::pane::{Notifier, Pane};
+use crate::pane::{CopyAction, Notifier, Pane};
 use crate::window::{Move, Rect, SplitDir, Window};
 
 struct Inner {
@@ -26,6 +26,7 @@ pub struct Session {
     shell: String,
     inner: Mutex<Inner>,
     attached: AtomicUsize,
+    paste_buffer: Mutex<String>,
 }
 
 impl Session {
@@ -45,9 +46,57 @@ impl Session {
                 rows,
             }),
             attached: AtomicUsize::new(0),
+            paste_buffer: Mutex::new(String::new()),
         });
         session.reflow();
         Ok(session)
+    }
+
+    fn active_pane(&self) -> Option<Arc<Pane>> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .windows
+            .get(inner.active_window)
+            .map(|w| w.active_pane())
+    }
+
+    /// Entre en mode copie sur le volet actif.
+    pub fn enter_copy_mode(&self) {
+        if let Some(p) = self.active_pane() {
+            p.enter_copy_mode();
+        }
+    }
+
+    pub fn active_in_copy_mode(&self) -> bool {
+        self.active_pane()
+            .map(|p| p.in_copy_mode())
+            .unwrap_or(false)
+    }
+
+    /// Traite une touche de mode copie. Une copie remplit le tampon de collage.
+    pub fn copy_key(&self, byte: u8) -> CopyAction {
+        let Some(pane) = self.active_pane() else {
+            return CopyAction::None;
+        };
+        let action = pane.copy_key(byte);
+        if let CopyAction::Copied(text) = &action {
+            *self.paste_buffer.lock().unwrap() = text.clone();
+        }
+        action
+    }
+
+    /// Colle le tampon dans le volet actif.
+    pub fn paste(&self) {
+        let buffer = self.paste_buffer.lock().unwrap().clone();
+        if !buffer.is_empty()
+            && let Some(pane) = self.active_pane()
+        {
+            pane.send_input(buffer.as_bytes());
+        }
+    }
+
+    fn active_copy_status(&self) -> Option<String> {
+        self.active_pane().and_then(|p| p.copy_status())
     }
 
     pub fn notifier(&self) -> Arc<Notifier> {
@@ -241,6 +290,8 @@ impl Session {
     /// Compose l'état d'affichage courant en une frame pour le client.
     pub fn composite(&self) -> Frame {
         self.reap();
+        // Calculé avant le verrou principal (évite un verrouillage réentrant).
+        let copy_status = self.active_copy_status();
         let mut inner = self.inner.lock().unwrap();
         let (cols, rows) = (inner.cols.max(1), inner.rows.max(1));
         let area = content_area(cols, rows);
@@ -258,7 +309,13 @@ impl Session {
 
         // Barre de statut sur la dernière ligne.
         if rows >= 2 {
-            draw_status_bar(&mut grid, &self.name, &inner, rows - 1);
+            draw_status_bar(
+                &mut grid,
+                &self.name,
+                &inner,
+                rows - 1,
+                copy_status.as_deref(),
+            );
         }
 
         Frame {
@@ -293,7 +350,13 @@ fn grid_cells(grid: &Grid) -> Vec<wimux_vt::Cell> {
     cells
 }
 
-fn draw_status_bar(grid: &mut Grid, name: &str, inner: &Inner, row: u16) {
+fn draw_status_bar(
+    grid: &mut Grid,
+    name: &str,
+    inner: &Inner,
+    row: u16,
+    copy_status: Option<&str>,
+) {
     let bar = Pen {
         fg: Color::Indexed(0),
         bg: Color::Indexed(2),
@@ -312,4 +375,10 @@ fn draw_status_bar(grid: &mut Grid, name: &str, inner: &Inner, row: u16) {
         }
     }
     grid.set_str(0, row, &text, bar);
+
+    // Indicateur de mode copie, aligné à droite.
+    if let Some(status) = copy_status {
+        let x = grid.cols().saturating_sub(status.len() as u16 + 1);
+        grid.set_str(x, row, status, bar);
+    }
 }

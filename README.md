@@ -38,6 +38,22 @@ target/release/wimux attach dev      # se rattache
 | `c` | Nouvelle fenêtre |
 | `n` / `p` | Fenêtre suivante / précédente |
 | `0`–`9` | Aller à la fenêtre N |
+| `[` | Entrer en **mode copie** (défilement de l'historique) |
+| `]` | Coller le dernier texte copié |
+
+### Mode copie (après `Ctrl-b [`)
+
+Navigation façon vi dans le scrollback :
+
+| Touche | Action |
+|--------|--------|
+| `j` / `k` | Descendre / monter d'une ligne |
+| `Ctrl-u` / `Ctrl-d` | Demi-page haut / bas |
+| `g` / `G` | Début / fin du scrollback |
+| `h` / `l` / `0` / `$` | Déplacer le curseur dans la ligne |
+| `Espace` | Démarrer la sélection |
+| `y` ou `Entrée` | Copier (→ presse-papiers Windows) et quitter |
+| `q` ou `Échap` | Quitter sans copier |
 
 ## Résumé du plan
 

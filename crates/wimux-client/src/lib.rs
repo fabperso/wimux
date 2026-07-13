@@ -93,6 +93,9 @@ pub fn run(conn: PipeConn) -> io::Result<ExitReason> {
                         let _ = exit_tx.send(ExitReason::Detached);
                         break;
                     }
+                    Ok(ServerMessage::SetClipboard(text)) => {
+                        let _ = clipboard_win::set_clipboard_string(&text);
+                    }
                     Ok(_) => {}
                     Err(_) => {
                         let _ = exit_tx.send(ExitReason::ServerGone);

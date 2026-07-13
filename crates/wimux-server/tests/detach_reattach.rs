@@ -84,6 +84,17 @@ fn spawn_reader(conn: Arc<PipeConn>) -> Receiver<ServerMessage> {
     rx
 }
 
+/// Attend un message `SetClipboard`, dans la limite du délai.
+fn wait_for_clipboard(rx: &Receiver<ServerMessage>, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(ServerMessage::SetClipboard(text)) = rx.recv_timeout(Duration::from_millis(200)) {
+            return Some(text);
+        }
+    }
+    None
+}
+
 /// Attend qu'une frame contienne `marker`, dans la limite du délai. Renvoie le
 /// dernier texte de frame observé.
 fn wait_for_marker(
@@ -303,5 +314,70 @@ fn split_compose_deux_volets_avec_bordure() {
 
     let mut w: &PipeConn = &conn;
     send(&mut w, &ClientMessage::Kill { name: "s".into() }).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn mode_copie_selectionne_et_copie() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-copie", std::process::id());
+    start_daemon(&pipe);
+
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::NewSession {
+                name: Some("c".into()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+    }
+    let rx = spawn_reader(Arc::clone(&conn));
+    let _ = rx.recv_timeout(Duration::from_secs(5)); // Attached
+
+    let (ready, _) = wait_for_marker(&rx, "PS", Duration::from_secs(15));
+    assert!(ready, "invite absente");
+
+    // Produire une sortie reconnaissable (n'apparaît qu'à l'exécution).
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::Input(b"Write-Output ('COPY' + 'MARK99')\r".to_vec()),
+        )
+        .unwrap();
+    }
+    let (printed, _) = wait_for_marker(&rx, "COPYMARK99", Duration::from_secs(10));
+    assert!(printed, "la sortie n'est pas apparue");
+
+    // Entrer en mode copie (Ctrl-b [). La barre de statut doit montrer « COPIE ».
+    {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::Input(vec![0x02, b'['])).unwrap();
+    }
+    let (in_copy, _) = wait_for_marker(&rx, "COPIE", Duration::from_secs(5));
+    assert!(in_copy, "l'indicateur de mode copie n'apparaît pas");
+
+    // Sélectionner tout le buffer et copier :
+    // g (haut), 0 (début), espace (ancre), G (bas), $ (fin), y (copier).
+    for key in [b'g', b'0', b' ', b'G', b'$', b'y'] {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::Input(vec![key])).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+
+    let clip = wait_for_clipboard(&rx, Duration::from_secs(5));
+    let clip = clip.expect("aucun message SetClipboard reçu après la copie");
+    assert!(
+        clip.contains("COPYMARK99"),
+        "le presse-papiers ne contient pas le marqueur.\nContenu :\n{clip}"
+    );
+
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::Kill { name: "c".into() }).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 }
