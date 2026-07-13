@@ -110,6 +110,21 @@ pub enum ClientMessage {
     },
     /// Frappe(s) clavier à transmettre au volet actif.
     Input(Vec<u8>),
+    /// S'attacher en mode GUI (flux bruts par volet).
+    AttachGui {
+        session: String,
+    },
+    /// Frappe(s) vers un volet précis (mode GUI).
+    PaneInput {
+        pane_id: u64,
+        bytes: Vec<u8>,
+    },
+    /// Un volet a changé de taille dans la GUI.
+    PaneResize {
+        pane_id: u64,
+        cols: u16,
+        rows: u16,
+    },
     /// Commande scriptable : injecte des octets dans le volet actif d'une session
     /// nommée (comme `tmux send-keys -t <session>`).
     SendKeys {
@@ -152,6 +167,16 @@ pub enum ServerMessage {
     /// Le serveur a détaché ce client (`Ctrl-b d`) ; le client doit quitter le
     /// mode plein écran. La session survit.
     Detached,
+    /// Contenu initial d'un volet (mode GUI), pour restaurer l'affichage.
+    PaneSnapshot {
+        pane_id: u64,
+        bytes: Vec<u8>,
+    },
+    /// Flux brut d'un volet (mode GUI).
+    PaneOutput {
+        pane_id: u64,
+        bytes: Vec<u8>,
+    },
     /// Texte à placer dans le presse-papiers du système (suite à une copie).
     SetClipboard(String),
     /// Résultat textuel d'une commande scriptable.
@@ -242,5 +267,37 @@ mod tests {
         let mut cursor = io::Cursor::new(Vec::new());
         let res: io::Result<ClientMessage> = recv(&mut cursor);
         assert_eq!(res.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn aller_retour_attach_gui() {
+        let msg = ClientMessage::AttachGui {
+            session: "dev".into(),
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ClientMessage>(&mut cur).unwrap() {
+            ClientMessage::AttachGui { session } => assert_eq!(session, "dev"),
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_pane_output() {
+        let msg = ServerMessage::PaneOutput {
+            pane_id: 7,
+            bytes: b"hello".to_vec(),
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ServerMessage>(&mut cur).unwrap() {
+            ServerMessage::PaneOutput { pane_id, bytes } => {
+                assert_eq!(pane_id, 7);
+                assert_eq!(bytes, b"hello");
+            }
+            _ => panic!("mauvais variant"),
+        }
     }
 }
