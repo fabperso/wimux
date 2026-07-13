@@ -51,6 +51,9 @@ Navigation façon vi dans le scrollback :
 | `Ctrl-u` / `Ctrl-d` | Demi-page haut / bas |
 | `g` / `G` | Début / fin du scrollback |
 | `h` / `l` / `0` / `$` | Déplacer le curseur dans la ligne |
+| `w` / `b` | Mot suivant / précédent |
+| `/` / `?` | Rechercher vers l'avant / l'arrière |
+| `n` / `N` | Correspondance suivante / précédente |
 | `Espace` | Démarrer la sélection |
 | `y` ou `Entrée` | Copier (→ presse-papiers Windows) et quitter |
 | `q` ou `Échap` | Quitter sans copier |

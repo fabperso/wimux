@@ -25,6 +25,13 @@ pub enum CopyAction {
     Copied(String),
 }
 
+/// Recherche en cours dans le scrollback.
+#[derive(Clone)]
+struct Search {
+    backward: bool,
+    query: String,
+}
+
 /// État du mode copie d'un volet : vue défilée + curseur + sélection.
 struct CopyMode {
     /// Ligne logique (historique puis écran) en haut de la vue.
@@ -33,6 +40,10 @@ struct CopyMode {
     cursor_col: u16,
     /// Ancre de sélection (ligne, colonne), si une sélection est en cours.
     anchor: Option<(usize, u16)>,
+    /// Saisie de recherche en cours (après `/` ou `?`).
+    search_input: Option<Search>,
+    /// Dernière recherche exécutée (pour `n` / `N`).
+    last_search: Option<Search>,
 }
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
@@ -195,12 +206,19 @@ impl Pane {
         self.state.lock().unwrap().copy.is_some()
     }
 
-    /// Indicateur de statut du mode copie, ex. « COPIE 12/340 ».
+    /// Indicateur de statut du mode copie : « COPIE n/total », ou la saisie de
+    /// recherche en cours (« /motif »).
     pub fn copy_status(&self) -> Option<String> {
         let st = self.state.lock().unwrap();
-        st.copy.as_ref().map(|cm| {
-            let total = total_lines(&st.terminal);
-            format!("COPIE {}/{}", cm.cursor_line + 1, total)
+        st.copy.as_ref().map(|cm| match &cm.search_input {
+            Some(si) => {
+                let prefix = if si.backward { '?' } else { '/' };
+                format!("{prefix}{}", si.query)
+            }
+            None => {
+                let total = total_lines(&st.terminal);
+                format!("COPIE {}/{}", cm.cursor_line + 1, total)
+            }
         })
     }
 
@@ -220,6 +238,8 @@ impl Pane {
             cursor_line,
             cursor_col: ccol,
             anchor: None,
+            search_input: None,
+            last_search: None,
         });
         self.notifier.bump();
     }
@@ -236,6 +256,31 @@ impl Pane {
         let Some(cm) = st.copy.as_mut() else {
             return CopyAction::None;
         };
+
+        // --- Saisie d'une recherche (après `/` ou `?`) ---
+        if cm.search_input.is_some() {
+            match byte {
+                0x0d => {
+                    // Entrée : exécuter la recherche.
+                    let search = cm.search_input.take().unwrap();
+                    if !search.query.is_empty() {
+                        run_search(cm, &st.terminal, &search);
+                        cm.last_search = Some(search);
+                    }
+                }
+                0x1b => cm.search_input = None, // Échap : annuler
+                0x08 | 0x7f => {
+                    cm.search_input.as_mut().unwrap().query.pop();
+                }
+                b if (0x20..0x7f).contains(&b) => {
+                    cm.search_input.as_mut().unwrap().query.push(b as char);
+                }
+                _ => {}
+            }
+            keep_cursor_visible(cm, rows);
+            self.notifier.bump();
+            return CopyAction::None;
+        }
 
         match byte {
             b'q' | 0x1b => {
@@ -255,6 +300,37 @@ impl Pane {
             0x04 => {
                 cm.cursor_line = (cm.cursor_line + rows / 2).min(total.saturating_sub(1)); // Ctrl-d
             }
+            b'w' => {
+                cm.cursor_col = word_forward(
+                    &logical_line(&st.terminal, cm.cursor_line),
+                    cm.cursor_col,
+                    cols,
+                )
+            }
+            b'b' => {
+                cm.cursor_col =
+                    word_backward(&logical_line(&st.terminal, cm.cursor_line), cm.cursor_col)
+            }
+            b'/' => {
+                cm.search_input = Some(Search {
+                    backward: false,
+                    query: String::new(),
+                })
+            }
+            b'?' => {
+                cm.search_input = Some(Search {
+                    backward: true,
+                    query: String::new(),
+                })
+            }
+            b'n' | b'N' => {
+                if let Some(mut search) = cm.last_search.clone() {
+                    if byte == b'N' {
+                        search.backward = !search.backward;
+                    }
+                    run_search(cm, &st.terminal, &search);
+                }
+            }
             b' ' => cm.anchor = Some((cm.cursor_line, cm.cursor_col)),
             b'y' | 0x0d => {
                 let text = extract_selection(cm, &st.terminal, cols);
@@ -265,13 +341,8 @@ impl Pane {
             _ => return CopyAction::None,
         }
 
-        // Réajuster la fenêtre pour garder le curseur visible.
         if let Some(cm) = st.copy.as_mut() {
-            if cm.cursor_line < cm.view_top {
-                cm.view_top = cm.cursor_line;
-            } else if cm.cursor_line >= cm.view_top + rows {
-                cm.view_top = cm.cursor_line + 1 - rows;
-            }
+            keep_cursor_visible(cm, rows);
         }
         self.notifier.bump();
         CopyAction::None
@@ -421,6 +492,112 @@ fn extract_selection(cm: &CopyMode, term: &Terminal, cols: u16) -> String {
         lines.push(line_text(&cells, from, to));
     }
     lines.join("\r\n")
+}
+
+/// Réajuste `view_top` pour garder le curseur de copie visible.
+fn keep_cursor_visible(cm: &mut CopyMode, rows: usize) {
+    if cm.cursor_line < cm.view_top {
+        cm.view_top = cm.cursor_line;
+    } else if rows > 0 && cm.cursor_line >= cm.view_top + rows {
+        cm.view_top = cm.cursor_line + 1 - rows;
+    }
+}
+
+fn is_word(c: char) -> bool {
+    !c.is_whitespace()
+}
+
+/// Colonne du début du mot suivant sur la ligne.
+fn word_forward(cells: &[Cell], col: u16, cols: u16) -> u16 {
+    let n = cells.len().min(cols as usize);
+    let mut i = col as usize;
+    while i < n && is_word(cells[i].ch) {
+        i += 1;
+    }
+    while i < n && !is_word(cells[i].ch) {
+        i += 1;
+    }
+    i.min(n.saturating_sub(1)) as u16
+}
+
+/// Colonne du début du mot précédent sur la ligne.
+fn word_backward(cells: &[Cell], col: u16) -> u16 {
+    let mut i = col as usize;
+    if i == 0 {
+        return 0;
+    }
+    i -= 1;
+    while i > 0 && !is_word(cells[i].ch) {
+        i -= 1;
+    }
+    while i > 0 && is_word(cells[i - 1].ch) {
+        i -= 1;
+    }
+    i as u16
+}
+
+/// Exécute une recherche depuis le curseur ; déplace le curseur sur la première
+/// correspondance trouvée (sinon le laisse en place).
+fn run_search(cm: &mut CopyMode, term: &Terminal, search: &Search) {
+    let total = total_lines(term);
+    let needle: Vec<char> = search.query.chars().collect();
+    if needle.is_empty() {
+        return;
+    }
+    let chars_of = |idx: usize| -> Vec<char> {
+        logical_line(term, idx)
+            .iter()
+            .filter(|c| c.width != 0)
+            .map(|c| c.ch)
+            .collect()
+    };
+
+    if !search.backward {
+        for line in cm.cursor_line..total {
+            let hay = chars_of(line);
+            let from = if line == cm.cursor_line {
+                cm.cursor_col as usize + 1
+            } else {
+                0
+            };
+            if let Some(pos) = find_sub(&hay, &needle, from) {
+                cm.cursor_line = line;
+                cm.cursor_col = pos as u16;
+                return;
+            }
+        }
+    } else {
+        for line in (0..=cm.cursor_line).rev() {
+            let hay = chars_of(line);
+            let upto = if line == cm.cursor_line {
+                cm.cursor_col as usize
+            } else {
+                hay.len()
+            };
+            if let Some(pos) = rfind_sub(&hay, &needle, upto) {
+                cm.cursor_line = line;
+                cm.cursor_col = pos as u16;
+                return;
+            }
+        }
+    }
+}
+
+fn find_sub(hay: &[char], needle: &[char], from: usize) -> Option<usize> {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return None;
+    }
+    (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == *needle)
+}
+
+fn rfind_sub(hay: &[char], needle: &[char], upto: usize) -> Option<usize> {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return None;
+    }
+    let max_start = upto.min(hay.len() - needle.len() + 1);
+    (0..max_start)
+        .rev()
+        .find(|&i| hay[i..i + needle.len()] == *needle)
 }
 
 /// Texte d'une ligne entre les colonnes `from` et `to` (incluses), rogné à droite.

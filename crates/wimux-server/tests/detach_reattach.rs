@@ -381,3 +381,74 @@ fn mode_copie_selectionne_et_copie() {
     send(&mut w, &ClientMessage::Kill { name: "c".into() }).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 }
+
+#[test]
+fn mode_copie_recherche_puis_copie() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-search", std::process::id());
+    start_daemon(&pipe);
+
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::NewSession {
+                name: Some("r".into()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+    }
+    let rx = spawn_reader(Arc::clone(&conn));
+    let _ = rx.recv_timeout(Duration::from_secs(5)); // Attached
+
+    let (ready, _) = wait_for_marker(&rx, "PS", Duration::from_secs(15));
+    assert!(ready, "invite absente");
+
+    // Produire une ligne contenant « NEEDLE42 » (uniquement à l'exécution).
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::Input(b"Write-Output ('NEED' + 'LE42')\r".to_vec()),
+        )
+        .unwrap();
+    }
+    let (printed, _) = wait_for_marker(&rx, "NEEDLE42", Duration::from_secs(10));
+    assert!(printed, "la ligne cible n'est pas apparue");
+
+    // Mode copie, aller en haut, rechercher « NEEDLE42 ».
+    {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::Input(b"\x02[".to_vec())).unwrap();
+    }
+    let (in_copy, _) = wait_for_marker(&rx, "COPIE", Duration::from_secs(5));
+    assert!(in_copy, "mode copie non actif");
+
+    {
+        let mut w: &PipeConn = &conn;
+        // g (haut), /NEEDLE42<Entrée> (recherche).
+        send(&mut w, &ClientMessage::Input(b"g/NEEDLE42\r".to_vec())).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Copier la ligne trouvée : 0 (début), espace (ancre), $ (fin), y (copier).
+    for key in *b"0 $y" {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::Input(vec![key])).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+
+    let clip = wait_for_clipboard(&rx, Duration::from_secs(5))
+        .expect("aucun SetClipboard après la recherche+copie");
+    assert!(
+        clip.contains("NEEDLE42"),
+        "la recherche n'a pas positionné le curseur sur la cible.\nContenu :\n{clip}"
+    );
+
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::Kill { name: "r".into() }).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+}
