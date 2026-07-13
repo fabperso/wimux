@@ -47,12 +47,20 @@ function renderRail(sessions: SessionDto[]) {
     const name = document.createElement("span");
     name.className = "name";
     name.textContent = s.name;
-    name.ondblclick = (ev) => { ev.stopPropagation(); startRename(el, s.name); };
+    let clickTimer: number | null = null;
+    name.ondblclick = (ev) => {
+      ev.stopPropagation();
+      if (clickTimer !== null) { clearTimeout(clickTimer); clickTimer = null; }
+      startRename(el, s.name);
+    };
     const close = document.createElement("span");
     close.className = "close";
     close.textContent = "×";
     close.onclick = async (ev) => { ev.stopPropagation(); await invoke("kill_session", { name: s.name }).catch(() => {}); await refresh(); };
-    el.onclick = () => switchTo(s.name);
+    el.onclick = () => {
+      if (clickTimer !== null) return; // 2e clic d'un double-clic : ignore, laisse ondblclick gerer
+      clickTimer = window.setTimeout(() => { clickTimer = null; switchTo(s.name); }, 200);
+    };
     el.append(name, close);
     container.append(el);
   }
@@ -65,7 +73,10 @@ function startRename(el: HTMLElement, oldName: string) {
   el.replaceChildren(input);
   input.focus();
   input.select();
+  let committed = false;
   const commit = async () => {
+    if (committed) return;
+    committed = true;
     const to = input.value.trim();
     if (to && to !== oldName) {
       await invoke("rename_session", { from: oldName, to }).catch(() => {});
@@ -73,17 +84,20 @@ function startRename(el: HTMLElement, oldName: string) {
     }
     await refresh();
   };
-  input.onkeydown = (ev) => { if (ev.key === "Enter") commit(); if (ev.key === "Escape") refresh(); };
+  input.onkeydown = (ev) => {
+    if (ev.key === "Enter") commit();
+    else if (ev.key === "Escape") { committed = true; refresh(); }
+  };
   input.onblur = () => commit();
 }
 
 async function refresh() {
   try {
     const sessions = await invoke<SessionDto[]>("list_sessions");
+    renderRail(sessions); // peuple le rail + lastSessions d'abord
     // Auto-sélection : si aucune session active mais il en existe, prendre la première.
-    if (!activeSession && sessions.length > 0) { await switchTo(sessions[0].name); return; }
-    renderRail(sessions);
-  } catch { /* serveur absent : rail vide */ }
+    if (!activeSession && sessions.length > 0) { await switchTo(sessions[0].name); }
+  } catch { /* serveur absent : on garde l'affichage precedent (rail non modifie) */ }
 }
 
 document.getElementById("new-session")!.onclick = async () => {
