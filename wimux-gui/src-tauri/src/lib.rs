@@ -48,6 +48,9 @@ fn gui_attach(session: String, app: AppHandle, bridge: State<Bridge>) -> Result<
                 ServerMessage::PaneOutput { pane_id, bytes } => {
                     let _ = app.emit("pane-output", (pane_id, bytes));
                 }
+                ServerMessage::Error(msg) => {
+                    let _ = app.emit("pane-error", msg);
+                }
                 _ => {}
             }
         }

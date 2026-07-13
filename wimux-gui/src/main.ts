@@ -23,11 +23,14 @@ listen<[number, number[]]>("pane-output", (e) => {
   paneId = e.payload[0];
   term.write(new Uint8Array(e.payload[1]));
 });
+listen<string>("pane-error", (e) => {
+  term.write(`\r\n[erreur serveur: ${e.payload}]\r\n`);
+});
 
 // Frappe -> serveur.
 term.onData((data) => {
   const bytes = Array.from(new TextEncoder().encode(data));
-  invoke("pane_input", { paneId, bytes });
+  invoke("pane_input", { paneId, bytes }).catch(() => {});
 });
 
 // S'attacher a la session "dev" au demarrage (G1 : nom fixe).
