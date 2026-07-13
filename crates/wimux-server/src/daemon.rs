@@ -230,6 +230,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
     )?;
 
     let mut attachment: Option<Attachment> = None;
+    let mut gui_session: Option<Arc<Session>> = None;
     let mut prefix = PrefixState::default();
 
     loop {
@@ -287,11 +288,51 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &ServerMessage::Ok)?;
             }
-            // Mode GUI : bras remplis par la tâche 4 (G1). No-op provisoire pour
-            // que le workspace compile entre les tâches.
-            ClientMessage::AttachGui { .. } => {}
-            ClientMessage::PaneInput { .. } => {}
-            ClientMessage::PaneResize { .. } => {}
+            ClientMessage::AttachGui { session } => {
+                if let Some(s) = server.get(&session) {
+                    if let Some((pane_id, snapshot, rx)) = s.gui_attach() {
+                        let mut wr: &PipeConn = &conn;
+                        send(
+                            &mut wr,
+                            &ServerMessage::PaneSnapshot {
+                                pane_id,
+                                bytes: snapshot,
+                            },
+                        )?;
+                        // Thread de retransmission du flux brut.
+                        let conn_out = Arc::clone(&conn);
+                        std::thread::spawn(move || {
+                            for chunk in rx {
+                                let mut w: &PipeConn = &conn_out;
+                                if send(
+                                    &mut w,
+                                    &ServerMessage::PaneOutput {
+                                        pane_id,
+                                        bytes: chunk,
+                                    },
+                                )
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                        gui_session = Some(s);
+                    }
+                } else {
+                    let mut wr: &PipeConn = &conn;
+                    send(
+                        &mut wr,
+                        &ServerMessage::Error(format!("session introuvable : {session}")),
+                    )?;
+                }
+            }
+            ClientMessage::PaneInput { pane_id, bytes } => {
+                if let Some(s) = &gui_session {
+                    s.gui_input(pane_id, &bytes);
+                }
+            }
+            ClientMessage::PaneResize { .. } => {} // G1 : ignoré (voir G3)
             ClientMessage::SendKeys { session, keys } => {
                 let reply = match server.get(&session) {
                     Some(s) => {
