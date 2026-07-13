@@ -5,10 +5,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use wimux_vt::{Cell, Color, Grid, Pen};
 
 use crate::pane::{Pane, PaneId};
+
+/// Attribue un identifiant stable à chaque nœud de découpe (par processus).
+static NEXT_NODE_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Sens d'une découpe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +43,7 @@ pub struct Rect {
 enum Node {
     Leaf(PaneId),
     Split {
+        node_id: u32,
         dir: SplitDir,
         ratio: f32,
         a: Box<Node>,
@@ -129,6 +134,28 @@ impl Window {
         self.panes.len()
     }
 
+    /// Traduit l'arbre interne en `LayoutNode` sérialisable pour la GUI.
+    pub fn layout_tree(&self) -> wimux_protocol::LayoutNode {
+        node_to_layout(&self.root)
+    }
+
+    /// Identifiant du volet actif.
+    pub fn active_pane_id(&self) -> PaneId {
+        self.active
+    }
+
+    /// Fixe le ratio du nœud de découpe `node_id` (borné `[0.1, 0.9]`).
+    pub fn set_ratio(&mut self, node_id: u32, ratio: f32) {
+        set_ratio_walk(&mut self.root, node_id, ratio.clamp(0.1, 0.9));
+    }
+
+    /// Identifiants des volets, triés.
+    pub fn pane_ids(&self) -> Vec<PaneId> {
+        let mut ids: Vec<PaneId> = self.panes.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Termine tous les volets de la fenêtre (pour `kill-session`).
     pub fn kill_all(&self) {
         for pane in self.panes.values() {
@@ -151,10 +178,17 @@ impl Window {
 
     /// Découpe le volet actif, en y insérant `new_pane` qui devient actif.
     pub fn split(&mut self, dir: SplitDir, new_pane: Arc<Pane>) {
+        let active = self.active;
+        self.split_pane(active, dir, new_pane);
+    }
+
+    /// Découpe le volet DÉSIGNÉ `target` ; le nouveau volet devient actif.
+    pub fn split_pane(&mut self, target: PaneId, dir: SplitDir, new_pane: Arc<Pane>) {
         self.zoomed = false;
         let new_id = new_pane.id;
-        let active = self.active;
-        Self::replace_leaf(&mut self.root, active, |old| Node::Split {
+        let node_id = NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed);
+        Self::replace_leaf(&mut self.root, target, |old| Node::Split {
+            node_id,
             dir,
             ratio: 0.5,
             a: Box::new(old),
@@ -166,17 +200,23 @@ impl Window {
 
     /// Ferme le volet actif. Renvoie `true` si la fenêtre est désormais vide.
     pub fn close_active(&mut self) -> bool {
+        let active = self.active;
+        self.close_pane(active)
+    }
+
+    /// Ferme le volet DÉSIGNÉ `target`. Renvoie `true` si la fenêtre est vide.
+    pub fn close_pane(&mut self, target: PaneId) -> bool {
         self.zoomed = false;
-        let closing = self.active;
-        if let Some(pane) = self.panes.remove(&closing) {
+        if let Some(pane) = self.panes.remove(&target) {
             pane.kill();
         }
         if self.panes.is_empty() {
             return true;
         }
-        Self::remove_leaf(&mut self.root, closing);
-        // Nouvel actif : un volet quelconque encore présent.
-        self.active = *self.panes.keys().next().unwrap();
+        Self::remove_leaf(&mut self.root, target);
+        if !self.panes.contains_key(&self.active) {
+            self.active = *self.panes.keys().next().unwrap();
+        }
         false
     }
 
@@ -355,7 +395,9 @@ fn contains_leaf(node: &Node, target: PaneId) -> bool {
 fn resize_walk(node: &mut Node, target: PaneId, horizontal: bool, grow: f32) -> Option<bool> {
     match node {
         Node::Leaf(id) => (*id == target).then_some(false),
-        Node::Split { dir, ratio, a, b } => {
+        Node::Split {
+            dir, ratio, a, b, ..
+        } => {
             let matches = axis_matches(*dir, horizontal);
             if let Some(done) = resize_walk(a, target, horizontal, grow) {
                 if !done && matches {
@@ -397,7 +439,9 @@ fn layout(node: &Node, area: Rect, rects: &mut HashMap<PaneId, Rect>, borders: &
         Node::Leaf(id) => {
             rects.insert(*id, area);
         }
-        Node::Split { dir, ratio, a, b } => match dir {
+        Node::Split {
+            dir, ratio, a, b, ..
+        } => match dir {
             SplitDir::LeftRight => {
                 if area.w < 3 {
                     // Trop étroit pour une bordure : on empile sans découper.
@@ -461,17 +505,157 @@ fn layout(node: &Node, area: Rect, rects: &mut HashMap<PaneId, Rect>, borders: &
     }
 }
 
+/// Traduit un `Node` interne en `LayoutNode` de protocole.
+fn node_to_layout(node: &Node) -> wimux_protocol::LayoutNode {
+    match node {
+        Node::Leaf(id) => wimux_protocol::LayoutNode::Leaf { pane_id: *id },
+        Node::Split {
+            node_id,
+            dir,
+            ratio,
+            a,
+            b,
+        } => wimux_protocol::LayoutNode::Split {
+            node_id: *node_id,
+            dir: match dir {
+                SplitDir::LeftRight => wimux_protocol::SplitDir::LeftRight,
+                SplitDir::TopBottom => wimux_protocol::SplitDir::TopBottom,
+            },
+            ratio: *ratio,
+            a: Box::new(node_to_layout(a)),
+            b: Box::new(node_to_layout(b)),
+        },
+    }
+}
+
+/// Fixe le ratio du nœud `target`. Renvoie `true` si trouvé.
+fn set_ratio_walk(node: &mut Node, target: u32, ratio: f32) -> bool {
+    match node {
+        Node::Leaf(_) => false,
+        Node::Split {
+            node_id,
+            ratio: r,
+            a,
+            b,
+            ..
+        } => {
+            if *node_id == target {
+                *r = ratio;
+                true
+            } else {
+                set_ratio_walk(a, target, ratio) || set_ratio_walk(b, target, ratio)
+            }
+        }
+    }
+}
+
+impl From<wimux_protocol::SplitDir> for SplitDir {
+    fn from(d: wimux_protocol::SplitDir) -> Self {
+        match d {
+            wimux_protocol::SplitDir::LeftRight => SplitDir::LeftRight,
+            wimux_protocol::SplitDir::TopBottom => SplitDir::TopBottom,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn split_lr() -> Node {
         Node::Split {
+            node_id: 1,
             dir: SplitDir::LeftRight,
             ratio: 0.5,
             a: Box::new(Node::Leaf(1)),
             b: Box::new(Node::Leaf(2)),
         }
+    }
+
+    fn dummy_pane() -> Arc<Pane> {
+        Pane::spawn(10, 5, "cmd.exe", crate::pane::Notifier::new()).unwrap()
+    }
+
+    #[test]
+    fn layout_tree_dun_split() {
+        let root = Node::Split {
+            node_id: 7,
+            dir: SplitDir::LeftRight,
+            ratio: 0.5,
+            a: Box::new(Node::Leaf(1)),
+            b: Box::new(Node::Leaf(2)),
+        };
+        match node_to_layout(&root) {
+            wimux_protocol::LayoutNode::Split { node_id, a, b, .. } => {
+                assert_eq!(node_id, 7);
+                assert!(matches!(
+                    *a,
+                    wimux_protocol::LayoutNode::Leaf { pane_id: 1 }
+                ));
+                assert!(matches!(
+                    *b,
+                    wimux_protocol::LayoutNode::Leaf { pane_id: 2 }
+                ));
+            }
+            _ => panic!("attendu un Split"),
+        }
+    }
+
+    #[test]
+    fn set_ratio_walk_change_le_bon_noeud() {
+        let mut root = Node::Split {
+            node_id: 42,
+            dir: SplitDir::LeftRight,
+            ratio: 0.5,
+            a: Box::new(Node::Leaf(1)),
+            b: Box::new(Node::Leaf(2)),
+        };
+        assert!(set_ratio_walk(&mut root, 42, 0.7));
+        match root {
+            Node::Split { ratio, .. } => assert!((ratio - 0.7).abs() < 1e-6),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn split_et_close_par_id() {
+        let p1 = dummy_pane();
+        let id1 = p1.id;
+        let mut win = Window::new("w".into(), p1);
+        let p2 = dummy_pane();
+        let id2 = p2.id;
+        win.split_pane(id1, SplitDir::LeftRight, p2);
+        assert_eq!(win.pane_ids().len(), 2);
+        assert!(win.pane_ids().contains(&id1) && win.pane_ids().contains(&id2));
+        assert!(matches!(
+            win.layout_tree(),
+            wimux_protocol::LayoutNode::Split { .. }
+        ));
+        assert!(!win.close_pane(id2));
+        assert_eq!(win.pane_ids(), vec![id1]);
+        assert!(matches!(
+            win.layout_tree(),
+            wimux_protocol::LayoutNode::Leaf { pane_id } if pane_id == id1
+        ));
+        win.kill_all();
+    }
+
+    #[test]
+    fn set_ratio_borne() {
+        let p1 = dummy_pane();
+        let id1 = p1.id;
+        let mut win = Window::new("w".into(), p1);
+        win.split_pane(id1, SplitDir::TopBottom, dummy_pane());
+        let node_id = match win.layout_tree() {
+            wimux_protocol::LayoutNode::Split { node_id, .. } => node_id,
+            _ => panic!(),
+        };
+        win.set_ratio(node_id, 5.0);
+        match win.layout_tree() {
+            wimux_protocol::LayoutNode::Split { ratio, .. } => assert!((ratio - 0.9).abs() < 1e-6),
+            _ => panic!(),
+        }
+        win.kill_all();
     }
 
     #[test]
