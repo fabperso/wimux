@@ -13,7 +13,7 @@ barre de statut**. `wimux new -s dev` → détacher (`Ctrl-b d`) ou fermer la fe
 1. [État des lieux](docs/01-etat-des-lieux.md) — ce qui existe (ou pas) sur Windows et le positionnement du projet.
 2. [Cahier des charges fonctionnel](docs/02-fonctionnalites.md) — inventaire des fonctionnalités tmux/Screen/Zellij, priorisées P0 → P3.
 3. [Plan de développement](docs/03-plan-developpement.md) — choix techniques (Rust, ConPTY, Named Pipes), architecture client/serveur, phases et jalons.
-4. [Décisions d'architecture (ADR)](docs/adr/) — [0001 choix de Rust](docs/adr/0001-choix-langage-rust.md), [0002 leçons du PoC ConPTY](docs/adr/0002-conpty-lecons-du-poc.md), [0003 crate d'émulation VT](docs/adr/0003-crate-emulation-vt.md), [0004 IPC overlapped](docs/adr/0004-ipc-overlapped-io.md).
+4. [Décisions d'architecture (ADR)](docs/adr/) — [0001 choix de Rust](docs/adr/0001-choix-langage-rust.md), [0002 leçons du PoC ConPTY](docs/adr/0002-conpty-lecons-du-poc.md), [0003 crate d'émulation VT](docs/adr/0003-crate-emulation-vt.md), [0004 IPC overlapped](docs/adr/0004-ipc-overlapped-io.md), [0005 format de configuration](docs/adr/0005-format-configuration.md).
 
 ## Essayer
 
@@ -23,6 +23,21 @@ target/release/wimux new -s dev      # crée une session et s'y attache
 #   … travailler dans le shell, puis Ctrl-b d pour se détacher …
 target/release/wimux ls              # liste les sessions
 target/release/wimux attach dev      # se rattache
+
+# Scriptable (sans s'attacher) — le point fort côté automatisation :
+target/release/wimux send-keys -t dev "npm test" Enter
+```
+
+## Configuration
+
+wimux lit `%USERPROFILE%\.wimux.conf` au démarrage (syntaxe façon tmux). Voir
+[l'exemple commenté](docs/wimux.conf.example) :
+
+```text
+set prefix C-a
+set default-shell pwsh.exe
+bind | split-window -h
+bind - split-window -v
 ```
 
 ### Raccourcis (préfixe `Ctrl-b`)

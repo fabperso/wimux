@@ -28,6 +28,7 @@ fn main() -> std::process::ExitCode {
         Some("new") => cmd_new(session_name_arg(&args[1..])),
         Some("attach") | Some("a") => cmd_attach(args.get(1).cloned()),
         Some("ls") | Some("list-sessions") => cmd_list(),
+        Some("send-keys") => cmd_send_keys(&args[1..]),
         Some("kill-session") => cmd_kill(args.get(1).cloned()),
         Some("kill-server") => cmd_shutdown(),
         Some("--help") | Some("-h") | None => {
@@ -199,6 +200,68 @@ fn cmd_list() -> io::Result<()> {
     Ok(())
 }
 
+/// `wimux send-keys -t <session> <touches...>` : injecte des frappes dans une
+/// session sans s'y attacher (scriptable). Les jetons spéciaux sont traduits :
+/// `Enter`, `Tab`, `Space`, `Escape`, `C-<lettre>` ; le reste est envoyé littéralement.
+fn cmd_send_keys(args: &[String]) -> io::Result<()> {
+    let mut session = None;
+    let mut keys_args = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-t" | "--target" => {
+                session = args.get(i + 1).cloned();
+                i += 2;
+            }
+            other => {
+                keys_args.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    let session = session
+        .ok_or_else(|| io::Error::other("usage : wimux send-keys -t <session> <touches...>"))?;
+    if keys_args.is_empty() {
+        return Err(io::Error::other("aucune touche à envoyer"));
+    }
+
+    let keys = translate_keys(&keys_args);
+    let conn =
+        connect(&user_pipe_name()).map_err(|_| io::Error::other("aucun serveur en cours"))?;
+    handshake(&conn)?;
+
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::SendKeys { session, keys })?;
+
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::Ok => Ok(()),
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+/// Traduit des jetons de touches en octets.
+fn translate_keys(args: &[String]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "Enter" => out.push(b'\r'),
+            "Tab" => out.push(b'\t'),
+            "Space" => out.push(b' '),
+            "Escape" => out.push(0x1b),
+            s if s.len() == 3 && s.starts_with("C-") => {
+                let c = s.as_bytes()[2].to_ascii_lowercase();
+                if c.is_ascii_lowercase() {
+                    out.push(c - b'a' + 1);
+                }
+            }
+            s => out.extend_from_slice(s.as_bytes()),
+        }
+    }
+    out
+}
+
 fn cmd_kill(name: Option<String>) -> io::Result<()> {
     let name = name.ok_or_else(|| io::Error::other("usage : wimux kill-session <nom>"))?;
     let conn =
@@ -249,6 +312,7 @@ fn print_help() {
              new [-s <nom>]      Crée une session et s'y attache\n    \
              attach <nom>        S'attache à une session existante (alias : a)\n    \
              ls                  Liste les sessions (alias : list-sessions)\n    \
+             send-keys -t <nom> <touches...>  Injecte des frappes (scriptable)\n    \
              kill-session <nom>  Termine une session\n    \
              kill-server         Arrête le serveur et toutes les sessions\n\
          \n\

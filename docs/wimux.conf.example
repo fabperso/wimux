@@ -1,0 +1,20 @@
+# Exemple de configuration wimux.
+# Copier vers %USERPROFILE%\.wimux.conf (ou %APPDATA%\wimux\wimux.conf).
+# Syntaxe façon tmux : une directive par ligne, « # » pour les commentaires.
+
+# --- Général ---
+
+# Touche de préfixe (Ctrl-b par défaut). Ex. pour Ctrl-a :
+# set prefix C-a
+
+# Shell lancé dans les nouveaux volets (powershell.exe par défaut).
+# set default-shell pwsh.exe
+
+# --- Raccourcis personnalisés ---
+# bind <touche> <action>
+# Actions : split-window -h/-v, new-window, next-window, previous-window,
+#           next-pane, kill-pane, copy-mode, paste-buffer, detach-client.
+
+# Découper avec | et - (plus intuitif que % et ") :
+bind | split-window -h
+bind - split-window -v

@@ -18,25 +18,21 @@ use wimux_protocol::{
     ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, SessionInfo, recv, send,
 };
 
+use crate::config::{Action, Config};
 use crate::pane::CopyAction;
 use crate::session::Session;
 use crate::window::{Move, SplitDir};
 
-/// Octet du préfixe (Ctrl-b).
-const PREFIX: u8 = 0x02;
-
-fn default_shell() -> String {
-    std::env::var("WIMUX_SHELL").unwrap_or_else(|_| "powershell.exe".to_string())
-}
-
 pub struct Server {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    config: Config,
 }
 
 impl Server {
     fn new() -> Arc<Server> {
         Arc::new(Server {
             sessions: Mutex::new(HashMap::new()),
+            config: Config::load(),
         })
     }
 
@@ -102,7 +98,7 @@ impl Server {
             }
         };
 
-        let session = Session::new(name.clone(), cols, rows, &default_shell())
+        let session = Session::new(name.clone(), cols, rows, &self.config.default_shell)
             .map_err(|e| format!("création de la session : {e}"))?;
         sessions.insert(name, Arc::clone(&session));
         Ok(session)
@@ -291,9 +287,20 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &ServerMessage::Ok)?;
             }
+            ClientMessage::SendKeys { session, keys } => {
+                let reply = match server.get(&session) {
+                    Some(s) => {
+                        s.send_input(&keys);
+                        ServerMessage::Ok
+                    }
+                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
-                    let outcome = route_input(&a.session, &mut prefix, &bytes);
+                    let outcome = route_input(&a.session, &server.config, &mut prefix, &bytes);
                     if let Some(text) = outcome.clipboard {
                         let mut wr: &PipeConn = &conn;
                         let _ = send(&mut wr, &ServerMessage::SetClipboard(text));
@@ -340,9 +347,35 @@ struct RouteOutcome {
     clipboard: Option<String>,
 }
 
-/// Décode le flux d'entrée : mode copie, commande de préfixe, ou frappe vers le
-/// volet actif.
-fn route_input(session: &Session, prefix: &mut PrefixState, bytes: &[u8]) -> RouteOutcome {
+/// Exécute une action de préfixe. Renvoie `true` pour un détachement.
+fn execute_action(session: &Session, action: Action) -> bool {
+    match action {
+        Action::Detach => return true,
+        Action::SplitH => session.split(SplitDir::LeftRight),
+        Action::SplitV => session.split(SplitDir::TopBottom),
+        Action::NextPane => session.next_pane(),
+        Action::SelectLeft => session.select(Move::Left),
+        Action::SelectDown => session.select(Move::Down),
+        Action::SelectUp => session.select(Move::Up),
+        Action::SelectRight => session.select(Move::Right),
+        Action::KillPane => session.close_active_pane(),
+        Action::NewWindow => session.new_window(),
+        Action::NextWindow => session.next_window(),
+        Action::PrevWindow => session.prev_window(),
+        Action::CopyMode => session.enter_copy_mode(),
+        Action::Paste => session.paste(),
+    }
+    false
+}
+
+/// Décode le flux d'entrée : mode copie, commande de préfixe (selon la config),
+/// ou frappe vers le volet actif.
+fn route_input(
+    session: &Session,
+    config: &Config,
+    prefix: &mut PrefixState,
+    bytes: &[u8],
+) -> RouteOutcome {
     let mut outcome = RouteOutcome::default();
 
     // En mode copie, les touches pilotent la vue et ne vont pas au shell.
@@ -364,29 +397,17 @@ fn route_input(session: &Session, prefix: &mut PrefixState, bytes: &[u8]) -> Rou
                 session.send_input(&forward);
                 forward.clear();
             }
-            match byte {
-                b'd' => {
+            if byte == config.prefix {
+                forward.push(config.prefix); // préfixe deux fois -> préfixe littéral
+            } else if byte.is_ascii_digit() {
+                session.select_window((byte - b'0') as usize);
+            } else if let Some(&action) = config.bindings.get(&byte) {
+                if execute_action(session, action) {
                     outcome.detach = true;
                     return outcome;
                 }
-                b'[' => session.enter_copy_mode(),
-                b']' => session.paste(),
-                b'%' => session.split(SplitDir::LeftRight),
-                b'"' => session.split(SplitDir::TopBottom),
-                b'o' => session.next_pane(),
-                b'h' => session.select(Move::Left),
-                b'j' => session.select(Move::Down),
-                b'k' => session.select(Move::Up),
-                b'l' => session.select(Move::Right),
-                b'x' => session.close_active_pane(),
-                b'c' => session.new_window(),
-                b'n' => session.next_window(),
-                b'p' => session.prev_window(),
-                b'0'..=b'9' => session.select_window((byte - b'0') as usize),
-                PREFIX => forward.push(PREFIX), // Ctrl-b Ctrl-b -> vrai Ctrl-b
-                _ => {}
             }
-        } else if byte == PREFIX {
+        } else if byte == config.prefix {
             prefix.armed = true;
         } else {
             forward.push(byte);

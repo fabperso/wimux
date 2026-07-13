@@ -452,3 +452,60 @@ fn mode_copie_recherche_puis_copie() {
     send(&mut w, &ClientMessage::Kill { name: "r".into() }).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 }
+
+#[test]
+fn send_keys_injecte_dans_une_session() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-sendkeys", std::process::id());
+    start_daemon(&pipe);
+
+    // Client attaché à la session.
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::NewSession {
+                name: Some("sk".into()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+    }
+    let rx = spawn_reader(Arc::clone(&conn));
+    let _ = rx.recv_timeout(Duration::from_secs(5)); // Attached
+    let (ready, _) = wait_for_marker(&rx, "PS", Duration::from_secs(15));
+    assert!(ready, "invite absente");
+
+    // Connexion SÉPARÉE (scriptable) qui injecte une commande via send-keys.
+    let scripter = connect_retry(&pipe);
+    handshake(&scripter);
+    {
+        let mut w: &PipeConn = &scripter;
+        send(
+            &mut w,
+            &ClientMessage::SendKeys {
+                session: "sk".into(),
+                keys: b"Write-Output ('SENT' + 'KEYS')\r".to_vec(),
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &PipeConn = &scripter;
+    match recv::<_, ServerMessage>(&mut r).unwrap() {
+        ServerMessage::Ok => {}
+        other => panic!("send-keys : réponse inattendue {other:?}"),
+    }
+
+    // La commande injectée doit s'exécuter dans la session attachée.
+    let (executed, screen) = wait_for_marker(&rx, "SENTKEYS", Duration::from_secs(10));
+    assert!(
+        executed,
+        "la commande injectée via send-keys ne s'est pas exécutée.\nÉcran :\n{screen}"
+    );
+
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::Kill { name: "sk".into() }).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+}

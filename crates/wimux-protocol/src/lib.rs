@@ -110,6 +110,12 @@ pub enum ClientMessage {
     },
     /// Frappe(s) clavier à transmettre au volet actif.
     Input(Vec<u8>),
+    /// Commande scriptable : injecte des octets dans le volet actif d'une session
+    /// nommée (comme `tmux send-keys -t <session>`).
+    SendKeys {
+        session: String,
+        keys: Vec<u8>,
+    },
     /// Le client (donc le volet actif) a changé de taille.
     Resize {
         cols: u16,
