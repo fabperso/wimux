@@ -104,6 +104,7 @@ struct PaneState {
     rows: u16,
     exit_code: Option<u32>,
     copy: Option<CopyMode>,
+    subscribers: Vec<std::sync::mpsc::Sender<Vec<u8>>>,
 }
 
 pub struct Pane {
@@ -153,6 +154,7 @@ impl Pane {
                 rows,
                 exit_code: None,
                 copy: None,
+                subscribers: Vec::new(),
             }),
             notifier,
         });
@@ -200,6 +202,20 @@ impl Pane {
     pub fn size(&self) -> (u16, u16) {
         let st = self.state.lock().unwrap();
         (st.cols, st.rows)
+    }
+
+    /// Reconstruit le contenu visible du volet en octets (pour PaneSnapshot).
+    pub fn snapshot_bytes(&self) -> Vec<u8> {
+        let st = self.state.lock().unwrap();
+        grid_to_bytes(&st.terminal)
+    }
+
+    /// S'abonne au flux brut de sortie du volet. Chaque fragment lu depuis
+    /// ConPTY sera envoyé sur le récepteur retourné.
+    pub fn subscribe(&self) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.state.lock().unwrap().subscribers.push(tx);
+        rx
     }
 
     /// Contenu visible du volet sous forme de texte (pour `capture-pane`).
@@ -426,6 +442,9 @@ fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
                         let _ = st.writer.write_all(&responses);
                         let _ = st.writer.flush();
                     }
+                    // Diffuser le flux brut aux clients GUI abonnés.
+                    st.subscribers
+                        .retain(|tx| tx.send(buf[..n].to_vec()).is_ok());
                 }
                 pane.notifier.bump();
             }
@@ -663,4 +682,41 @@ fn line_text(cells: &[Cell], from: u16, to: u16) -> String {
         }
     }
     s.trim_end().to_string()
+}
+
+/// Reconstruit une séquence d'octets rejouable (écran visible) depuis la grille.
+/// Version G1 : texte brut, une ligne par rangée, séparé par CRLF, précédé d'un
+/// effacement d'écran. Les couleurs suivront (G2+).
+fn grid_to_bytes(term: &Terminal) -> Vec<u8> {
+    let grid = term.grid();
+    let mut out = Vec::new();
+    out.extend_from_slice(b"\x1b[2J\x1b[H"); // effacer + curseur en haut à gauche
+    for row in 0..grid.rows() {
+        let line: String = grid
+            .row(row)
+            .iter()
+            .filter(|c| c.width != 0)
+            .map(|c| c.ch)
+            .collect();
+        out.extend_from_slice(line.trim_end().as_bytes());
+        if row + 1 < grid.rows() {
+            out.extend_from_slice(b"\r\n");
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_reproduit_le_texte_visible() {
+        let mut term = wimux_vt::Terminal::new(20, 3);
+        term.advance(b"abc\r\ndef");
+        let bytes = grid_to_bytes(&term);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("abc"));
+        assert!(text.contains("def"));
+    }
 }
