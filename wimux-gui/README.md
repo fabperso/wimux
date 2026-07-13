@@ -66,3 +66,14 @@ xterm.js, frappe fonctionnelle, persistance via le serveur wimux.
    selon l'arbre (proportions = ratios), **en couleur** dès l'attache, curseur au
    bon endroit. Taper dans chaque volet route l'entrée vers ce volet (chaque
    xterm porte son `pane_id`). Redimensionner la fenêtre reflow les volets.
+
+## Vérification manuelle des volets (G3c — opérations)
+
+1. GUI lancée sur une session (`npm run tauri dev`).
+2. Survoler un volet : une barre apparaît en haut à droite (⬍ ⬌ ✕).
+3. **Attendu :**
+   - ⬍ découpe le volet en haut/bas, ⬌ en gauche/droite (nouveau volet créé,
+     shell démarré, snapshot coloré) ;
+   - ✕ ferme le volet ; l'espace est repris par le volet frère ;
+   - cliquer dans un volet le focalise (bordure bleue `.pane.active`) et la
+     frappe va à ce volet.

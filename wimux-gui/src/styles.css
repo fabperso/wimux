@@ -20,6 +20,13 @@ body { margin: 0; }
 .split-child { display: flex; min-width: 0; min-height: 0; overflow: hidden; }
 .pane { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .pane.active { outline: 1px solid #0a84ff; outline-offset: -1px; }
+.pane-bar { position: absolute; top: 2px; right: 2px; z-index: 5; display: none; gap: 2px; }
+.pane:hover .pane-bar { display: flex; }
+.pane-bar button {
+  border: none; background: #2d2d2dcc; color: #ddd; cursor: pointer;
+  width: 22px; height: 20px; font-size: 12px; line-height: 1; border-radius: 3px;
+}
+.pane-bar button:hover { background: #0a84ff; color: #fff; }
 .separator { background: #333; flex: 0 0 4px; }
 .separator:hover { background: #0a84ff; }
 .sep-v { width: 4px; cursor: col-resize; }

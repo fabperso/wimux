@@ -18,6 +18,9 @@ export type LayoutNode =
 export interface PaneCallbacks {
   onInput: (paneId: number, bytes: number[]) => void;
   onResize: (paneId: number, cols: number, rows: number) => void;
+  onFocus: (paneId: number) => void;
+  onSplit: (paneId: number, dir: "LeftRight" | "TopBottom") => void;
+  onClose: (paneId: number) => void;
 }
 
 interface PaneView {
@@ -98,6 +101,35 @@ export class PaneManager {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(el);
+    const bar = document.createElement("div");
+    bar.className = "pane-bar";
+    const bSplitV = document.createElement("button");
+    bSplitV.textContent = "⬍";
+    bSplitV.title = "Découper haut/bas";
+    bSplitV.onclick = (ev) => {
+      ev.stopPropagation();
+      this.cb.onSplit(paneId, "TopBottom");
+    };
+    const bSplitH = document.createElement("button");
+    bSplitH.textContent = "⬌";
+    bSplitH.title = "Découper gauche/droite";
+    bSplitH.onclick = (ev) => {
+      ev.stopPropagation();
+      this.cb.onSplit(paneId, "LeftRight");
+    };
+    const bClose = document.createElement("button");
+    bClose.textContent = "✕";
+    bClose.title = "Fermer le volet";
+    bClose.onclick = (ev) => {
+      ev.stopPropagation();
+      this.cb.onClose(paneId);
+    };
+    bar.append(bSplitV, bSplitH, bClose);
+    el.appendChild(bar);
+    el.addEventListener("mousedown", () => {
+      this.cb.onFocus(paneId);
+      term.focus();
+    });
     term.onData((data) => {
       const bytes = Array.from(new TextEncoder().encode(data));
       this.cb.onInput(paneId, bytes);

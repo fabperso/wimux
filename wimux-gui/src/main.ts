@@ -10,6 +10,15 @@ const paneManager = new PaneManager(mount, {
   onResize: (paneId, cols, rows) => {
     invoke("pane_resize", { paneId, cols, rows }).catch(() => {});
   },
+  onFocus: (paneId) => {
+    invoke("focus_pane", { paneId }).catch(() => {});
+  },
+  onSplit: (paneId, dir) => {
+    invoke("split_pane", { paneId, dir }).catch(() => {});
+  },
+  onClose: (paneId) => {
+    invoke("close_pane", { paneId }).catch(() => {});
+  },
 });
 
 let activeSession: string | null = null;
