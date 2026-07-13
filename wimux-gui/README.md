@@ -51,3 +51,18 @@ xterm.js, frappe fonctionnelle, persistance via le serveur wimux.
 4. Le rail se met à jour tout seul (sondage 1 s) si une session est
    créée/fermée depuis un autre terminal (ex. `wimux new -s c` dans une
    fenêtre TUI).
+
+## Vérification manuelle des volets (G3b — rendu)
+
+1. Construire le workspace et lancer un serveur avec une session découpée en TUI :
+   ```bash
+   cargo build --release
+   target/release/wimux.exe new -s dev
+   ```
+   Dans la fenêtre TUI, découper : `Ctrl-b %` (gauche/droite) puis `Ctrl-b "`
+   (haut/bas), puis se détacher `Ctrl-b d`.
+2. Lancer la GUI : `cd wimux-gui && npm run tauri dev`.
+3. **Attendu :** la session `dev` s'affiche avec UN xterm par volet, disposés
+   selon l'arbre (proportions = ratios), **en couleur** dès l'attache, curseur au
+   bon endroit. Taper dans chaque volet route l'entrée vers ce volet (chaque
+   xterm porte son `pane_id`). Redimensionner la fenêtre reflow les volets.

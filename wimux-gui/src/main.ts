@@ -1,28 +1,31 @@
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { PaneManager, type LayoutNode } from "./panes";
 
-const term = new Terminal({ fontFamily: "Cascadia Mono, Consolas, monospace", fontSize: 14 });
-const fit = new FitAddon();
-term.loadAddon(fit);
-term.open(document.getElementById("terminal")!);
-fit.fit();
-window.addEventListener("resize", () => fit.fit());
+const mount = document.getElementById("terminal")!;
+const paneManager = new PaneManager(mount, {
+  onInput: (paneId, bytes) => {
+    invoke("pane_input", { paneId, bytes }).catch(() => {});
+  },
+  onResize: (paneId, cols, rows) => {
+    invoke("pane_resize", { paneId, cols, rows }).catch(() => {});
+  },
+});
 
 let activeSession: string | null = null;
-let activePane = 0;
 
-// Sortie serveur -> terminal.
-listen<[number, number[]]>("pane-snapshot", (e) => { activePane = e.payload[0]; term.write(new Uint8Array(e.payload[1])); });
-listen<[number, number[]]>("pane-output", (e) => { activePane = e.payload[0]; term.write(new Uint8Array(e.payload[1])); });
-listen<string>("pane-error", (e) => { term.write(`\r\n[erreur serveur: ${e.payload}]\r\n`); });
-
-// Frappe -> serveur.
-term.onData((data) => {
-  const bytes = Array.from(new TextEncoder().encode(data));
-  invoke("pane_input", { paneId: activePane, bytes }).catch(() => {});
+// Disposition + flux serveur -> volets.
+listen<[LayoutNode, number]>("window-layout", (e) => {
+  paneManager.renderLayout(e.payload[0], e.payload[1]);
+});
+listen<[number, number[]]>("pane-snapshot", (e) => {
+  paneManager.write(e.payload[0], new Uint8Array(e.payload[1]));
+});
+listen<[number, number[]]>("pane-output", (e) => {
+  paneManager.write(e.payload[0], new Uint8Array(e.payload[1]));
+});
+listen<string>("pane-error", (e) => {
+  console.error("erreur serveur:", e.payload);
 });
 
 type SessionDto = { name: string; attached: boolean };
@@ -30,8 +33,10 @@ type SessionDto = { name: string; attached: boolean };
 async function switchTo(name: string) {
   if (name === activeSession) return;
   activeSession = name;
-  term.clear();
-  await invoke("attach_session", { session: name }).catch((e) => term.write(`\r\n[${e}]\r\n`));
+  paneManager.reset();
+  await invoke("attach_session", { session: name }).catch((e) =>
+    console.error("attach:", e),
+  );
   renderRail(lastSessions);
 }
 
