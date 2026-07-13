@@ -37,10 +37,29 @@ export class PaneManager {
   private cb: PaneCallbacks;
   private ratioTimer: number | null = null;
   private pendingRatio: { nodeId: number; ratio: number } | null = null;
+  // Focus clavier : mémorise le dernier volet actif pour ne poser le focus
+  // que lors d'un vrai changement (pas à chaque redraw / drag de ratio).
+  private lastActive: number | null = null;
+  // Anti-spam pane_resize : dernière taille (cols,rows) déjà notifiée au serveur par volet.
+  private lastSizes = new Map<number, { cols: number; rows: number }>();
+  // Anti-rebuild : signature structurelle (sans ratio) + ensemble des pane_id
+  // du dernier rendu, pour détecter une topologie inchangée (ex. FocusPane).
+  private lastSignature: string | null = null;
+  private lastPaneIds: Set<number> | null = null;
+  // Élements .split-child (a/b) de chaque noeud de split, indexés par node_id,
+  // pour pouvoir mettre à jour flexGrow sans reconstruire le DOM.
+  private splitChildren = new Map<number, { a: HTMLElement; b: HTMLElement }>();
 
   constructor(mount: HTMLElement, cb: PaneCallbacks) {
     this.mount = mount;
     this.cb = cb;
+  }
+
+  private emitResize(paneId: number, cols: number, rows: number) {
+    const prev = this.lastSizes.get(paneId);
+    if (prev && prev.cols === cols && prev.rows === rows) return;
+    this.lastSizes.set(paneId, { cols, rows });
+    this.cb.onResize(paneId, cols, rows);
   }
 
   private emitRatio(nodeId: number, ratio: number) {
@@ -67,6 +86,11 @@ export class PaneManager {
     }
     this.views.clear();
     this.mount.replaceChildren();
+    this.lastSizes.clear();
+    this.lastSignature = null;
+    this.lastPaneIds = null;
+    this.lastActive = null;
+    this.splitChildren.clear();
   }
 
   renderLayout(tree: LayoutNode, active: number) {
@@ -78,20 +102,51 @@ export class PaneManager {
         v.observer.disconnect();
         v.term.dispose();
         this.views.delete(id);
+        this.lastSizes.delete(id);
       }
     }
-    // Reconstruire l'arbre DOM en RÉUTILISANT les wrappers existants.
-    const root = this.buildNode(tree);
-    this.mount.replaceChildren(root);
-    // Marquer le volet actif + réajuster les tailles après reparentage.
+
+    const signature = this.computeSignature(tree);
+    const idsUnchanged =
+      this.lastPaneIds !== null &&
+      this.lastPaneIds.size === wanted.size &&
+      [...wanted].every((id) => this.lastPaneIds!.has(id));
+    const structureUnchanged = idsUnchanged && this.lastSignature === signature;
+
+    if (structureUnchanged) {
+      // Topologie (et ensemble de pane_id) identique à celle du dernier rendu :
+      // pas de replaceChildren, on se contente de refléter un ratio éventuel
+      // via flexGrow sur les .split-child déjà en place.
+      this.updateRatios(tree);
+    } else {
+      // Reconstruire les conteneurs .split ; seules les feuilles .pane
+      // existantes (récupérées via ensureView) sont réutilisées.
+      this.splitChildren.clear();
+      const root = this.buildNode(tree);
+      this.mount.replaceChildren(root);
+      // Réajuster les tailles après reparentage.
+      for (const [id, v] of this.views) {
+        try {
+          v.fit.fit();
+          this.emitResize(id, v.term.cols, v.term.rows);
+        } catch {
+          /* conteneur non mesurable (détaché) : ignoré */
+        }
+      }
+    }
+    this.lastSignature = signature;
+    this.lastPaneIds = wanted;
+
+    // Marquer le volet actif.
     for (const [id, v] of this.views) {
       v.el.classList.toggle("active", id === active);
-      try {
-        v.fit.fit();
-        this.cb.onResize(id, v.term.cols, v.term.rows);
-      } catch {
-        /* conteneur non mesurable (détaché) : ignoré */
-      }
+    }
+    // Focus clavier uniquement si le volet actif a changé depuis le dernier
+    // rendu (évite de voler le focus pendant un drag de ratio ou un simple
+    // redraw sans changement de volet actif).
+    if (active !== this.lastActive) {
+      this.views.get(active)?.term.focus();
+      this.lastActive = active;
     }
   }
 
@@ -101,6 +156,24 @@ export class PaneManager {
       this.collectIds(tree.Split.a, into);
       this.collectIds(tree.Split.b, into);
     }
+  }
+
+  private computeSignature(tree: LayoutNode): string {
+    if ("Leaf" in tree) return `L${tree.Leaf.pane_id}`;
+    const s = tree.Split;
+    return `S${s.node_id}:${s.dir}:(${this.computeSignature(s.a)},${this.computeSignature(s.b)})`;
+  }
+
+  private updateRatios(tree: LayoutNode) {
+    if ("Leaf" in tree) return;
+    const s = tree.Split;
+    const children = this.splitChildren.get(s.node_id);
+    if (children) {
+      children.a.style.flexGrow = String(s.ratio);
+      children.b.style.flexGrow = String(1 - s.ratio);
+    }
+    this.updateRatios(s.a);
+    this.updateRatios(s.b);
   }
 
   private ensureView(paneId: number): PaneView {
@@ -152,7 +225,7 @@ export class PaneManager {
     const observer = new ResizeObserver(() => {
       try {
         fit.fit();
-        this.cb.onResize(paneId, term.cols, term.rows);
+        this.emitResize(paneId, term.cols, term.rows);
       } catch {
         /* non mesurable : ignoré */
       }
@@ -203,6 +276,7 @@ export class PaneManager {
       window.addEventListener("mouseup", onUp);
     });
     container.append(a, sep, b);
+    this.splitChildren.set(s.node_id, { a, b });
     return container;
   }
 }
