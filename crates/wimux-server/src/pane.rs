@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use wimux_vt::{Cell, Grid, Terminal};
+use wimux_vt::{Cell, Color, Grid, Pen, Terminal};
 
 /// Résultat du traitement d'une touche en mode copie.
 pub enum CopyAction {
@@ -209,7 +209,7 @@ impl Pane {
     /// ni dupliqué. C'est le point d'entrée d'un attachement GUI.
     pub fn snapshot_and_subscribe(&self) -> (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
         let mut st = self.state.lock().unwrap();
-        let snapshot = grid_to_bytes(&st.terminal);
+        let snapshot = grid_to_ansi(st.terminal.grid(), st.terminal.cursor());
         let (tx, rx) = std::sync::mpsc::channel();
         st.subscribers.push(tx);
         (snapshot, rx)
@@ -681,26 +681,70 @@ fn line_text(cells: &[Cell], from: u16, to: u16) -> String {
     s.trim_end().to_string()
 }
 
-/// Reconstruit une séquence d'octets rejouable (écran visible) depuis la grille.
-/// Version G1 : texte brut, une ligne par rangée, séparé par CRLF, précédé d'un
-/// effacement d'écran. Les couleurs suivront (G2+).
-fn grid_to_bytes(term: &Terminal) -> Vec<u8> {
-    let grid = term.grid();
+/// Reconstruit une séquence d'octets rejouable et FIDÈLE (écran visible) depuis
+/// la grille : efface l'écran, puis émet chaque ligne en groupant les runs de
+/// `Pen` identique (couleurs SGR + attributs), avec reset avant chaque changement
+/// de pen et en fin de ligne, puis positionne le curseur.
+fn grid_to_ansi(grid: &Grid, cursor: (u16, u16)) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"\x1b[2J\x1b[H"); // effacer + curseur en haut à gauche
+    out.extend_from_slice(b"\x1b[2J\x1b[H");
     for row in 0..grid.rows() {
-        let line: String = grid
-            .row(row)
-            .iter()
-            .filter(|c| c.width != 0)
-            .map(|c| c.ch)
-            .collect();
-        out.extend_from_slice(line.trim_end().as_bytes());
+        let mut cur_pen: Option<Pen> = None;
+        for cell in grid.row(row) {
+            if cell.width == 0 {
+                continue; // colonne de continuation d'un caractère large
+            }
+            if cur_pen != Some(cell.pen) {
+                out.extend_from_slice(b"\x1b[0m");
+                let sgr = pen_to_sgr(&cell.pen);
+                if !sgr.is_empty() {
+                    out.extend_from_slice(format!("\x1b[{sgr}m").as_bytes());
+                }
+                cur_pen = Some(cell.pen);
+            }
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(cell.ch.encode_utf8(&mut buf).as_bytes());
+        }
+        out.extend_from_slice(b"\x1b[0m");
         if row + 1 < grid.rows() {
             out.extend_from_slice(b"\r\n");
         }
     }
+    let (col, row) = cursor;
+    out.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
     out
+}
+
+/// Construit la liste de paramètres SGR (sans les `ESC[` / `m`) pour un `Pen`.
+fn pen_to_sgr(pen: &Pen) -> String {
+    let mut codes: Vec<String> = Vec::new();
+    if pen.attrs.bold {
+        codes.push("1".into());
+    }
+    if pen.attrs.italic {
+        codes.push("3".into());
+    }
+    if pen.attrs.underline {
+        codes.push("4".into());
+    }
+    if pen.attrs.reverse {
+        codes.push("7".into());
+    }
+    match pen.fg {
+        Color::Default => {}
+        Color::Indexed(n @ 0..=7) => codes.push((30 + n as u16).to_string()),
+        Color::Indexed(n @ 8..=15) => codes.push((90 + n as u16 - 8).to_string()),
+        Color::Indexed(n) => codes.push(format!("38;5;{n}")),
+        Color::Rgb(r, g, b) => codes.push(format!("38;2;{r};{g};{b}")),
+    }
+    match pen.bg {
+        Color::Default => {}
+        Color::Indexed(n @ 0..=7) => codes.push((40 + n as u16).to_string()),
+        Color::Indexed(n @ 8..=15) => codes.push((100 + n as u16 - 8).to_string()),
+        Color::Indexed(n) => codes.push(format!("48;5;{n}")),
+        Color::Rgb(r, g, b) => codes.push(format!("48;2;{r};{g};{b}")),
+    }
+    codes.join(";")
 }
 
 #[cfg(test)]
@@ -711,9 +755,23 @@ mod tests {
     fn snapshot_reproduit_le_texte_visible() {
         let mut term = wimux_vt::Terminal::new(20, 3);
         term.advance(b"abc\r\ndef");
-        let bytes = grid_to_bytes(&term);
+        let bytes = grid_to_ansi(term.grid(), term.cursor());
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("abc"));
         assert!(text.contains("def"));
+    }
+
+    #[test]
+    fn grid_to_ansi_preserve_couleur_et_curseur() {
+        let mut term = wimux_vt::Terminal::new(20, 3);
+        term.advance(b"\x1b[31mRED\x1b[0m");
+        let bytes = grid_to_ansi(term.grid(), term.cursor());
+
+        let mut term2 = wimux_vt::Terminal::new(20, 3);
+        term2.advance(&bytes);
+        let cell = term2.grid().cell(0, 0).unwrap();
+        assert_eq!(cell.ch, 'R');
+        assert_eq!(cell.pen.fg, wimux_vt::Color::Indexed(1));
+        assert_eq!(term2.cursor(), term.cursor());
     }
 }
