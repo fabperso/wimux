@@ -151,10 +151,42 @@ fn bascule_gui_arrete_le_flux_precedent() {
     }
     let rx = common::spawn_reader(std::sync::Arc::clone(&gui));
 
-    // Attendre le snapshot de A.
-    common::wait_for(&rx, std::time::Duration::from_secs(5), |m| {
-        matches!(m, wimux_protocol::ServerMessage::PaneSnapshot { .. })
+    // Attendre le snapshot de A et capturer son pane_id.
+    let pane_id_a = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(wimux_protocol::ServerMessage::PaneSnapshot { pane_id, .. }) => break pane_id,
+                Ok(_) => {}
+                Err(_) if Instant::now() < deadline => {}
+                Err(_) => panic!("pas de PaneSnapshot pour A"),
+            }
+        }
+    };
+
+    // Faire produire à A une sortie continue pendant plusieurs secondes, pour
+    // pouvoir vérifier après la bascule qu'elle ne fuit plus vers le client GUI.
+    {
+        let mut w: &wimux_protocol::transport::PipeConn = &gui;
+        wimux_protocol::send(
+            &mut w,
+            &wimux_protocol::ClientMessage::PaneInput {
+                pane_id: pane_id_a,
+                bytes: b"1..40 | ForEach-Object { $_; Start-Sleep -Milliseconds 100 }\r".to_vec(),
+            },
+        )
+        .unwrap();
+    }
+
+    // Attendre au moins un PaneOutput de A : preuve que le flux de A est bien
+    // en train de diffuser avant la bascule.
+    let a_diffuse = common::wait_for(&rx, Duration::from_secs(5), |m| {
+        matches!(
+            m,
+            wimux_protocol::ServerMessage::PaneOutput { pane_id, .. } if *pane_id == pane_id_a
+        )
     });
+    assert!(a_diffuse, "A n'a produit aucun PaneOutput avant la bascule");
 
     // Basculer sur B.
     {
@@ -167,11 +199,48 @@ fn bascule_gui_arrete_le_flux_precedent() {
         )
         .unwrap();
     }
-    // On doit recevoir un nouveau PaneSnapshot (celui de B).
-    let got_b_snapshot = common::wait_for(&rx, std::time::Duration::from_secs(5), |m| {
-        matches!(m, wimux_protocol::ServerMessage::PaneSnapshot { .. })
-    });
-    assert!(got_b_snapshot, "pas de snapshot après bascule sur B");
+    // On doit recevoir un nouveau PaneSnapshot (celui de B) et son pane_id doit
+    // différer de celui de A (volets distincts).
+    let pane_id_b = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(wimux_protocol::ServerMessage::PaneSnapshot { pane_id, .. }) => break pane_id,
+                Ok(_) => {}
+                Err(_) if Instant::now() < deadline => {}
+                Err(_) => panic!("pas de snapshot après bascule sur B"),
+            }
+        }
+    };
+    assert_ne!(pane_id_a, pane_id_b, "A et B partagent le même pane_id");
+
+    // Fenêtre de grâce : le design peut laisser passer un dernier chunk de A
+    // « en vol » au moment du join de l'ancien thread de diffusion. On l'absorbe
+    // sans l'évaluer.
+    let grace_deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < grace_deadline {
+        let _ = rx.recv_timeout(Duration::from_millis(50));
+    }
+
+    // A continue de produire sa sortie côté serveur (sa boucle PowerShell tourne
+    // encore). On draine ensuite pendant ~1,5 s et on vérifie qu'AUCUN
+    // PaneOutput { pane_id == pane_id_a } n'arrive : preuve que le flux de A a
+    // bien été coupé par la bascule.
+    let strict_deadline = Instant::now() + Duration::from_millis(1500);
+    let mut leaked_a = None;
+    while Instant::now() < strict_deadline {
+        if let Ok(wimux_protocol::ServerMessage::PaneOutput { pane_id, bytes }) =
+            rx.recv_timeout(Duration::from_millis(100))
+            && pane_id == pane_id_a
+        {
+            leaked_a = Some(String::from_utf8_lossy(&bytes).into_owned());
+            break;
+        }
+    }
+    assert!(
+        leaked_a.is_none(),
+        "le flux de A a continué après la bascule sur B : {leaked_a:?}"
+    );
 
     // Nettoyage.
     for name in ["A", "B"] {
