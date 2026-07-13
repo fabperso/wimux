@@ -92,6 +92,19 @@ impl Window {
         }
     }
 
+    /// Description des volets (pour `list-panes`).
+    pub fn pane_list(&self) -> Vec<String> {
+        let mut ids: Vec<PaneId> = self.panes.keys().copied().collect();
+        ids.sort_unstable();
+        ids.iter()
+            .map(|id| {
+                let (c, r) = self.panes[id].size();
+                let active = if *id == self.active { " (actif)" } else { "" };
+                format!("volet {id}: {c}x{r}{active}")
+            })
+            .collect()
+    }
+
     /// Découpe le volet actif, en y insérant `new_pane` qui devient actif.
     pub fn split(&mut self, dir: SplitDir, new_pane: Arc<Pane>) {
         let new_id = new_pane.id;

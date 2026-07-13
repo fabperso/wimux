@@ -298,6 +298,19 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
+            ClientMessage::Command { session, command } => {
+                let reply = match server.get(&session) {
+                    Some(s) => match crate::commands::run(&s, &command) {
+                        crate::commands::CommandResult::Text(t) => ServerMessage::CommandResult(t),
+                        crate::commands::CommandResult::None => {
+                            ServerMessage::CommandResult(String::new())
+                        }
+                    },
+                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
                     let outcome = route_input(&a.session, &server.config, &mut prefix, &bytes);
@@ -388,6 +401,16 @@ fn route_input(
         return outcome;
     }
 
+    // Invite de commande : les touches construisent la ligne ; Entrée l'exécute.
+    if session.in_command_prompt() {
+        for &b in bytes {
+            if let Some(cmd) = session.command_key(b) {
+                let _ = crate::commands::run(session, &cmd);
+            }
+        }
+        return outcome;
+    }
+
     let mut forward: Vec<u8> = Vec::with_capacity(bytes.len());
     for &byte in bytes {
         if prefix.armed {
@@ -399,6 +422,8 @@ fn route_input(
             }
             if byte == config.prefix {
                 forward.push(config.prefix); // préfixe deux fois -> préfixe littéral
+            } else if byte == b':' {
+                session.enter_command_prompt();
             } else if byte.is_ascii_digit() {
                 session.select_window((byte - b'0') as usize);
             } else if let Some(&action) = config.bindings.get(&byte) {

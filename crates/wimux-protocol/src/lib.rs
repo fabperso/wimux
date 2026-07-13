@@ -116,6 +116,11 @@ pub enum ClientMessage {
         session: String,
         keys: Vec<u8>,
     },
+    /// Commande textuelle scriptable (split-window, list-panes, capture-pane...).
+    Command {
+        session: String,
+        command: String,
+    },
     /// Le client (donc le volet actif) a changé de taille.
     Resize {
         cols: u16,
@@ -149,6 +154,8 @@ pub enum ServerMessage {
     Detached,
     /// Texte à placer dans le presse-papiers du système (suite à une copie).
     SetClipboard(String),
+    /// Résultat textuel d'une commande scriptable.
+    CommandResult(String),
     /// Erreur applicative.
     Error(String),
     Pong,

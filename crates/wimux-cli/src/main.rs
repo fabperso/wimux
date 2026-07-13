@@ -29,6 +29,9 @@ fn main() -> std::process::ExitCode {
         Some("attach") | Some("a") => cmd_attach(args.get(1).cloned()),
         Some("ls") | Some("list-sessions") => cmd_list(),
         Some("send-keys") => cmd_send_keys(&args[1..]),
+        Some(c @ ("split-window" | "new-window" | "list-panes" | "capture-pane")) => {
+            cmd_control(c, &args[1..])
+        }
         Some("kill-session") => cmd_kill(args.get(1).cloned()),
         Some("kill-server") => cmd_shutdown(),
         Some("--help") | Some("-h") | None => {
@@ -236,6 +239,58 @@ fn cmd_send_keys(args: &[String]) -> io::Result<()> {
     let mut r: &PipeConn = &conn;
     match recv::<_, ServerMessage>(&mut r)? {
         ServerMessage::Ok => Ok(()),
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+/// `wimux <commande> -t <session> [flags]` : exécute une commande textuelle sur
+/// une session (split-window, new-window, list-panes, capture-pane) et affiche
+/// son éventuel résultat.
+fn cmd_control(command: &str, args: &[String]) -> io::Result<()> {
+    let mut session = None;
+    let mut extra = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-t" | "--target" => {
+                session = args.get(i + 1).cloned();
+                i += 2;
+            }
+            other => {
+                extra.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    let session = session
+        .ok_or_else(|| io::Error::other(format!("usage : wimux {command} -t <session> [flags]")))?;
+    let full = if extra.is_empty() {
+        command.to_string()
+    } else {
+        format!("{command} {}", extra.join(" "))
+    };
+
+    let conn =
+        connect(&user_pipe_name()).map_err(|_| io::Error::other("aucun serveur en cours"))?;
+    handshake(&conn)?;
+    let mut w: &PipeConn = &conn;
+    send(
+        &mut w,
+        &ClientMessage::Command {
+            session,
+            command: full,
+        },
+    )?;
+
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::CommandResult(text) => {
+            if !text.is_empty() {
+                println!("{text}");
+            }
+            Ok(())
+        }
         ServerMessage::Error(e) => Err(io::Error::other(e)),
         _ => Err(io::Error::other("réponse inattendue du serveur")),
     }

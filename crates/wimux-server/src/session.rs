@@ -18,6 +18,8 @@ struct Inner {
     active_window: usize,
     cols: u16,
     rows: u16,
+    /// Ligne de commande en cours de saisie (`Ctrl-b :`), sans le `:`.
+    command_line: Option<String>,
 }
 
 pub struct Session {
@@ -44,6 +46,7 @@ impl Session {
                 active_window: 0,
                 cols,
                 rows,
+                command_line: None,
             }),
             attached: AtomicUsize::new(0),
             paste_buffer: Mutex::new(String::new()),
@@ -97,6 +100,67 @@ impl Session {
 
     fn active_copy_status(&self) -> Option<String> {
         self.active_pane().and_then(|p| p.copy_status())
+    }
+
+    // --- Invite de commande (Ctrl-b :) ---------------------------------------
+
+    pub fn enter_command_prompt(&self) {
+        self.inner.lock().unwrap().command_line = Some(String::new());
+        self.notifier.bump();
+    }
+
+    pub fn in_command_prompt(&self) -> bool {
+        self.inner.lock().unwrap().command_line.is_some()
+    }
+
+    /// Traite une touche de l'invite. Renvoie la commande à exécuter sur Entrée.
+    pub fn command_key(&self, byte: u8) -> Option<String> {
+        let mut result = None;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(line) = inner.command_line.as_mut() {
+                match byte {
+                    0x0d => {
+                        result = Some(std::mem::take(line));
+                        inner.command_line = None;
+                    }
+                    0x1b => inner.command_line = None,
+                    0x08 | 0x7f => {
+                        line.pop();
+                    }
+                    b if (0x20..0x7f).contains(&b) => line.push(b as char),
+                    _ => {}
+                }
+            }
+        }
+        self.notifier.bump();
+        result
+    }
+
+    fn command_status(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .command_line
+            .as_ref()
+            .map(|l| format!(":{l}"))
+    }
+
+    /// Contenu visible du volet actif (pour `capture-pane`).
+    pub fn capture_active_pane(&self) -> String {
+        self.active_pane()
+            .map(|p| p.capture_text())
+            .unwrap_or_default()
+    }
+
+    /// Description des volets de la fenêtre active (pour `list-panes`).
+    pub fn list_panes_text(&self) -> String {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .windows
+            .get(inner.active_window)
+            .map(|w| w.pane_list().join("\r\n"))
+            .unwrap_or_default()
     }
 
     pub fn notifier(&self) -> Arc<Notifier> {
@@ -290,8 +354,9 @@ impl Session {
     /// Compose l'état d'affichage courant en une frame pour le client.
     pub fn composite(&self) -> Frame {
         self.reap();
-        // Calculé avant le verrou principal (évite un verrouillage réentrant).
+        // Calculés avant le verrou principal (évite un verrouillage réentrant).
         let copy_status = self.active_copy_status();
+        let command_status = self.command_status();
         let mut inner = self.inner.lock().unwrap();
         let (cols, rows) = (inner.cols.max(1), inner.rows.max(1));
         let area = content_area(cols, rows);
@@ -315,6 +380,7 @@ impl Session {
                 &inner,
                 rows - 1,
                 copy_status.as_deref(),
+                command_status.as_deref(),
             );
         }
 
@@ -356,6 +422,7 @@ fn draw_status_bar(
     inner: &Inner,
     row: u16,
     copy_status: Option<&str>,
+    command_status: Option<&str>,
 ) {
     let bar = Pen {
         fg: Color::Indexed(0),
@@ -366,6 +433,13 @@ fn draw_status_bar(
     for col in 0..grid.cols() {
         grid.set(col, row, wimux_vt::Cell::blank_with(bar));
     }
+
+    // L'invite de commande, si active, occupe toute la barre.
+    if let Some(prompt) = command_status {
+        grid.set_str(0, row, prompt, bar);
+        return;
+    }
+
     let mut text = format!(" [{name}] ");
     for (i, _win) in inner.windows.iter().enumerate() {
         if i == inner.active_window {

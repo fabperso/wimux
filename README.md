@@ -26,6 +26,9 @@ target/release/wimux attach dev      # se rattache
 
 # Scriptable (sans s'attacher) — le point fort côté automatisation :
 target/release/wimux send-keys -t dev "npm test" Enter
+target/release/wimux split-window -t dev -h    # découpe la session dev
+target/release/wimux capture-pane -t dev       # récupère le contenu du volet
+target/release/wimux list-panes -t dev         # liste les volets
 ```
 
 ## Configuration
@@ -55,6 +58,7 @@ bind - split-window -v
 | `0`–`9` | Aller à la fenêtre N |
 | `[` | Entrer en **mode copie** (défilement de l'historique) |
 | `]` | Coller le dernier texte copié |
+| `:` | Invite de commande (`split-window -h`, `new-window`, ...) |
 
 ### Mode copie (après `Ctrl-b [`)
 

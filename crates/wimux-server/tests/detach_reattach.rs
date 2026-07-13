@@ -509,3 +509,67 @@ fn send_keys_injecte_dans_une_session() {
     send(&mut w, &ClientMessage::Kill { name: "sk".into() }).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 }
+
+#[test]
+fn capture_pane_renvoie_le_contenu() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-capture", std::process::id());
+    start_daemon(&pipe);
+
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::NewSession {
+                name: Some("cap".into()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+    }
+    let rx = spawn_reader(Arc::clone(&conn));
+    let _ = rx.recv_timeout(Duration::from_secs(5));
+    let (ready, _) = wait_for_marker(&rx, "PS", Duration::from_secs(15));
+    assert!(ready, "invite absente");
+
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::Input(b"Write-Output ('GRAB' + 'BED')\r".to_vec()),
+        )
+        .unwrap();
+    }
+    let (printed, _) = wait_for_marker(&rx, "GRABBED", Duration::from_secs(10));
+    assert!(printed, "sortie absente");
+
+    // Commande scriptable capture-pane depuis une connexion séparée.
+    let scripter = connect_retry(&pipe);
+    handshake(&scripter);
+    {
+        let mut w: &PipeConn = &scripter;
+        send(
+            &mut w,
+            &ClientMessage::Command {
+                session: "cap".into(),
+                command: "capture-pane".into(),
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &PipeConn = &scripter;
+    let captured = match recv::<_, ServerMessage>(&mut r).unwrap() {
+        ServerMessage::CommandResult(text) => text,
+        other => panic!("réponse inattendue : {other:?}"),
+    };
+    assert!(
+        captured.contains("GRABBED"),
+        "capture-pane ne contient pas la sortie.\nCapture :\n{captured}"
+    );
+
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::Kill { name: "cap".into() }).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+}

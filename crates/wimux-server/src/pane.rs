@@ -202,6 +202,26 @@ impl Pane {
         (st.cols, st.rows)
     }
 
+    /// Contenu visible du volet sous forme de texte (pour `capture-pane`).
+    pub fn capture_text(&self) -> String {
+        let st = self.state.lock().unwrap();
+        let grid = st.terminal.grid();
+        let mut lines = Vec::with_capacity(grid.rows() as usize);
+        for row in 0..grid.rows() {
+            let line: String = grid
+                .row(row)
+                .iter()
+                .filter(|c| c.width != 0)
+                .map(|c| c.ch)
+                .collect();
+            lines.push(line.trim_end().to_string());
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\r\n")
+    }
+
     pub fn in_copy_mode(&self) -> bool {
         self.state.lock().unwrap().copy.is_some()
     }
