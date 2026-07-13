@@ -36,6 +36,7 @@ async function switchTo(name: string) {
 }
 
 let lastSessions: SessionDto[] = [];
+let renaming = false; // suspend le sondage tant qu'une edition de nom est en cours
 
 function renderRail(sessions: SessionDto[]) {
   lastSessions = sessions;
@@ -67,6 +68,7 @@ function renderRail(sessions: SessionDto[]) {
 }
 
 function startRename(el: HTMLElement, oldName: string) {
+  renaming = true;
   const input = document.createElement("input");
   input.className = "name-edit";
   input.value = oldName;
@@ -77,6 +79,7 @@ function startRename(el: HTMLElement, oldName: string) {
   const commit = async () => {
     if (committed) return;
     committed = true;
+    renaming = false;
     const to = input.value.trim();
     if (to && to !== oldName) {
       await invoke("rename_session", { from: oldName, to }).catch(() => {});
@@ -86,12 +89,13 @@ function startRename(el: HTMLElement, oldName: string) {
   };
   input.onkeydown = (ev) => {
     if (ev.key === "Enter") commit();
-    else if (ev.key === "Escape") { committed = true; refresh(); }
+    else if (ev.key === "Escape") { committed = true; renaming = false; refresh(); }
   };
   input.onblur = () => commit();
 }
 
 async function refresh() {
+  if (renaming) return; // ne pas reconstruire le rail pendant un renommage
   try {
     const sessions = await invoke<SessionDto[]>("list_sessions");
     renderRail(sessions); // peuple le rail + lastSessions d'abord
