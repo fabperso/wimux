@@ -50,7 +50,7 @@ impl Server {
         let mut infos: Vec<SessionInfo> = sessions
             .values()
             .map(|s| SessionInfo {
-                name: s.name.clone(),
+                name: s.name(),
                 windows: s.window_count() as u32,
                 attached: s.attached_count() > 0,
             })
@@ -248,7 +248,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                         send(
                             &mut wr,
                             &ServerMessage::Attached {
-                                name: session.name.clone(),
+                                name: session.name(),
                             },
                         )?;
                         attachment = Some(attach(session, Arc::clone(&conn)));
@@ -266,7 +266,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                     send(
                         &mut wr,
                         &ServerMessage::Attached {
-                            name: session.name.clone(),
+                            name: session.name(),
                         },
                     )?;
                     attachment = Some(attach(session, Arc::clone(&conn)));

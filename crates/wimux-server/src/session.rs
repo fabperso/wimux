@@ -23,7 +23,7 @@ struct Inner {
 }
 
 pub struct Session {
-    pub name: String,
+    name: Mutex<String>,
     notifier: Arc<Notifier>,
     shell: String,
     inner: Mutex<Inner>,
@@ -38,7 +38,7 @@ impl Session {
         let window = Window::new("win".to_string(), pane);
 
         let session = Arc::new(Session {
-            name,
+            name: Mutex::new(name),
             notifier,
             shell: shell.to_string(),
             inner: Mutex::new(Inner {
@@ -53,6 +53,14 @@ impl Session {
         });
         session.reflow();
         Ok(session)
+    }
+
+    pub fn name(&self) -> String {
+        self.name.lock().unwrap().clone()
+    }
+
+    pub fn set_name(&self, new: String) {
+        *self.name.lock().unwrap() = new;
     }
 
     fn active_pane(&self) -> Option<Arc<Pane>> {
@@ -444,6 +452,7 @@ impl Session {
         let copy_status = self.active_copy_status();
         let command_status = self.command_status();
         let zoomed = self.active_zoomed();
+        let name = self.name();
         let mut inner = self.inner.lock().unwrap();
         let (cols, rows) = (inner.cols.max(1), inner.rows.max(1));
         let area = content_area(cols, rows);
@@ -463,7 +472,7 @@ impl Session {
         if rows >= 2 {
             draw_status_bar(
                 &mut grid,
-                &self.name,
+                &name,
                 &inner,
                 rows - 1,
                 copy_status.as_deref(),
