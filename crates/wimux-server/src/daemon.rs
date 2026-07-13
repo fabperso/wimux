@@ -340,12 +340,12 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                             let handle = std::thread::spawn(move || {
                                 while kg.load(Ordering::Relaxed) {
                                     match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                                        Ok(chunk) => {
+                                        Ok((pid, chunk)) => {
                                             let mut w: &PipeConn = &conn_out;
                                             if send(
                                                 &mut w,
                                                 &ServerMessage::PaneOutput {
-                                                    pane_id,
+                                                    pane_id: pid,
                                                     bytes: chunk,
                                                 },
                                             )

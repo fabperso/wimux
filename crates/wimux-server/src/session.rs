@@ -73,7 +73,8 @@ impl Session {
 
     /// Prépare un attachement GUI : renvoie le volet actif, son instantané et un
     /// abonnement à son flux brut (opération atomique côté volet).
-    pub fn gui_attach(&self) -> Option<(u64, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>)> {
+    #[allow(clippy::type_complexity)]
+    pub fn gui_attach(&self) -> Option<(u64, Vec<u8>, std::sync::mpsc::Receiver<(u64, Vec<u8>)>)> {
         let pane = self.active_pane()?;
         let (snapshot, rx) = pane.snapshot_and_subscribe();
         Some((pane.id, snapshot, rx))

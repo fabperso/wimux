@@ -104,7 +104,7 @@ struct PaneState {
     rows: u16,
     exit_code: Option<u32>,
     copy: Option<CopyMode>,
-    subscribers: Vec<std::sync::mpsc::Sender<Vec<u8>>>,
+    subscribers: Vec<std::sync::mpsc::Sender<(PaneId, Vec<u8>)>>,
 }
 
 pub struct Pane {
@@ -204,15 +204,28 @@ impl Pane {
         (st.cols, st.rows)
     }
 
-    /// Sous un seul verrou : reconstruit l'instantané visible ET inscrit un
-    /// abonné au flux brut. Atomique — aucun octet entre les deux n'est perdu
-    /// ni dupliqué. C'est le point d'entrée d'un attachement GUI.
-    pub fn snapshot_and_subscribe(&self) -> (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
+    /// Sous un seul verrou : reconstruit l'instantané FIDÈLE ET inscrit un abonné
+    /// au flux brut tagué `pane_id`. Atomique. Crée son propre canal.
+    pub fn snapshot_and_subscribe(
+        &self,
+    ) -> (Vec<u8>, std::sync::mpsc::Receiver<(PaneId, Vec<u8>)>) {
         let mut st = self.state.lock().unwrap();
         let snapshot = grid_to_ansi(st.terminal.grid(), st.terminal.cursor());
         let (tx, rx) = std::sync::mpsc::channel();
         st.subscribers.push(tx);
         (snapshot, rx)
+    }
+
+    /// Comme `snapshot_and_subscribe`, mais inscrit un `tx` FOURNI (canal fusionné
+    /// multi-volets). Renvoie le snapshot fidèle du volet.
+    pub fn snapshot_and_subscribe_into(
+        &self,
+        tx: std::sync::mpsc::Sender<(PaneId, Vec<u8>)>,
+    ) -> Vec<u8> {
+        let mut st = self.state.lock().unwrap();
+        let snapshot = grid_to_ansi(st.terminal.grid(), st.terminal.cursor());
+        st.subscribers.push(tx);
+        snapshot
     }
 
     /// Contenu visible du volet sous forme de texte (pour `capture-pane`).
@@ -441,7 +454,7 @@ fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
                     }
                     // Diffuser le flux brut aux clients GUI abonnés.
                     st.subscribers
-                        .retain(|tx| tx.send(buf[..n].to_vec()).is_ok());
+                        .retain(|tx| tx.send((pane.id, buf[..n].to_vec())).is_ok());
                 }
                 pane.notifier.bump();
             }
