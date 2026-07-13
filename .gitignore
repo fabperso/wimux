@@ -12,3 +12,6 @@ Cargo.lock.orig
 # Divers Windows
 Thumbs.db
 Desktop.ini
+
+# Maquettes du companion de brainstorming
+.superpowers/
