@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::style::{
     Attribute, Color as CtColor, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
@@ -53,7 +54,7 @@ pub fn run(conn: PipeConn) -> io::Result<ExitReason> {
 
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, cursor::Hide)?;
+    execute!(out, EnterAlternateScreen, cursor::Hide, EnableMouseCapture)?;
     let _stdin_mode = console::RawStdinGuard::set();
 
     let (exit_tx, exit_rx) = channel::<ExitReason>();
@@ -143,7 +144,7 @@ pub fn run(conn: PipeConn) -> io::Result<ExitReason> {
 
     // Restauration du terminal.
     let mut out = io::stdout();
-    let _ = execute!(out, cursor::Show, LeaveAlternateScreen);
+    let _ = execute!(out, cursor::Show, DisableMouseCapture, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 
     Ok(reason)

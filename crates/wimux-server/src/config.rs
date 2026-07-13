@@ -42,6 +42,8 @@ pub struct Config {
     /// Octet de la touche de préfixe (Ctrl-b = 0x02 par défaut).
     pub prefix: u8,
     pub default_shell: String,
+    /// Support de la souris (molette -> scrollback, clic -> sélection de volet).
+    pub mouse: bool,
     /// Table des raccourcis de préfixe (octet -> action).
     pub bindings: HashMap<u8, Action>,
 }
@@ -72,6 +74,7 @@ impl Default for Config {
             prefix: 0x02,
             default_shell: std::env::var("WIMUX_SHELL")
                 .unwrap_or_else(|_| "powershell.exe".to_string()),
+            mouse: true,
             bindings,
         }
     }
@@ -104,6 +107,7 @@ impl Config {
                     }
                 }
                 ["set", "default-shell", shell] => self.default_shell = shell.to_string(),
+                ["set", "mouse", value] => self.mouse = matches!(*value, "on" | "true" | "1"),
                 ["bind", key, rest @ ..] => {
                     if let (Some(b), Some(action)) = (parse_key(key), parse_action(rest)) {
                         self.bindings.insert(b, action);

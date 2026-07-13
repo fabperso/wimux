@@ -368,6 +368,38 @@ impl Pane {
         CopyAction::None
     }
 
+    /// Défilement molette : entre en mode copie si nécessaire et déplace la vue.
+    pub fn scroll(&self, up: bool, lines: u16) {
+        let mut guard = self.state.lock().unwrap();
+        let st = &mut *guard;
+        if st.copy.is_none() {
+            let history = st.terminal.history().len();
+            let (ccol, crow) = st.terminal.cursor();
+            let cursor_line = history + crow as usize;
+            let view_top = (history + st.rows as usize).saturating_sub(st.rows as usize);
+            st.copy = Some(CopyMode {
+                view_top,
+                cursor_line,
+                cursor_col: ccol,
+                anchor: None,
+                search_input: None,
+                last_search: None,
+            });
+        }
+        let total = total_lines(&st.terminal);
+        let rows = st.rows as usize;
+        if let Some(cm) = st.copy.as_mut() {
+            if up {
+                cm.cursor_line = cm.cursor_line.saturating_sub(lines as usize);
+            } else {
+                cm.cursor_line = (cm.cursor_line + lines as usize).min(total.saturating_sub(1));
+            }
+            keep_cursor_visible(cm, rows);
+        }
+        drop(guard);
+        self.notifier.bump();
+    }
+
     pub fn is_alive(&self) -> bool {
         self.state.lock().unwrap().exit_code.is_none()
     }

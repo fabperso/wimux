@@ -360,6 +360,70 @@ struct RouteOutcome {
     clipboard: Option<String>,
 }
 
+/// Évènement souris décodé (protocole SGR 1006).
+struct MouseEvent {
+    button: u16,
+    col: u16,
+    row: u16,
+    pressed: bool,
+}
+
+/// Extrait les séquences souris SGR (`ESC[<b;x;y M|m`) du flux d'entrée et
+/// renvoie les évènements décodés ainsi que les octets restants.
+fn extract_mouse_events(bytes: &[u8]) -> (Vec<MouseEvent>, Vec<u8>) {
+    let mut events = Vec::new();
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 2 < bytes.len() && bytes[i + 1] == b'[' && bytes[i + 2] == b'<' {
+            let start = i + 3;
+            let mut j = start;
+            while j < bytes.len() && bytes[j] != b'M' && bytes[j] != b'm' {
+                j += 1;
+            }
+            if j < bytes.len() {
+                if let Some(ev) = parse_mouse(&bytes[start..j], bytes[j] == b'M') {
+                    events.push(ev);
+                }
+                i = j + 1;
+                continue;
+            }
+            // Séquence incomplète : conserver telle quelle.
+            rest.extend_from_slice(&bytes[i..]);
+            break;
+        }
+        rest.push(bytes[i]);
+        i += 1;
+    }
+    (events, rest)
+}
+
+fn parse_mouse(params: &[u8], pressed: bool) -> Option<MouseEvent> {
+    let s = std::str::from_utf8(params).ok()?;
+    let mut it = s.split(';');
+    let button = it.next()?.parse().ok()?;
+    let col = it.next()?.parse().ok()?;
+    let row = it.next()?.parse().ok()?;
+    Some(MouseEvent {
+        button,
+        col,
+        row,
+        pressed,
+    })
+}
+
+/// Traite un évènement souris : molette -> scrollback, clic gauche -> sélection.
+fn handle_mouse(session: &Session, ev: &MouseEvent) {
+    let col = ev.col.saturating_sub(1);
+    let row = ev.row.saturating_sub(1);
+    match ev.button {
+        64 => session.mouse_scroll_at(col, row, true),
+        65 => session.mouse_scroll_at(col, row, false),
+        0 if ev.pressed => session.select_pane_at(col, row),
+        _ => {}
+    }
+}
+
 /// Exécute une action de préfixe. Renvoie `true` pour un détachement.
 fn execute_action(session: &Session, action: Action) -> bool {
     match action {
@@ -395,6 +459,19 @@ fn route_input(
     bytes: &[u8],
 ) -> RouteOutcome {
     let mut outcome = RouteOutcome::default();
+
+    // Souris : extraire et traiter les évènements SGR avant tout le reste.
+    let owned;
+    let bytes: &[u8] = if config.mouse {
+        let (events, rest) = extract_mouse_events(bytes);
+        for ev in &events {
+            handle_mouse(session, ev);
+        }
+        owned = rest;
+        &owned
+    } else {
+        bytes
+    };
 
     // En mode copie, les touches pilotent la vue et ne vont pas au shell.
     if session.active_in_copy_mode() {
@@ -448,4 +525,35 @@ fn route_input(
         session.send_input(&forward);
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_molette_haut() {
+        let (events, rest) = extract_mouse_events(b"\x1b[<64;10;5M");
+        assert!(rest.is_empty());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].button, 64);
+        assert_eq!(events[0].col, 10);
+        assert_eq!(events[0].row, 5);
+        assert!(events[0].pressed);
+    }
+
+    #[test]
+    fn separe_souris_et_texte() {
+        let (events, rest) = extract_mouse_events(b"ab\x1b[<0;3;4Mcd");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].button, 0);
+        assert_eq!(rest, b"abcd");
+    }
+
+    #[test]
+    fn flux_sans_souris_intact() {
+        let (events, rest) = extract_mouse_events(b"bonjour\r");
+        assert!(events.is_empty());
+        assert_eq!(rest, b"bonjour\r");
+    }
 }

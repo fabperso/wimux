@@ -107,6 +107,24 @@ impl Window {
         Arc::clone(&self.panes[&self.active])
     }
 
+    /// Volet situé à la position `(col, row)` (coordonnées de contenu, 0-based).
+    pub fn pane_at(&self, col: u16, row: u16) -> Option<PaneId> {
+        self.rects
+            .iter()
+            .find(|(_, r)| col >= r.x && col < r.x + r.w && row >= r.y && row < r.y + r.h)
+            .map(|(&id, _)| id)
+    }
+
+    pub fn pane(&self, id: PaneId) -> Option<Arc<Pane>> {
+        self.panes.get(&id).map(Arc::clone)
+    }
+
+    pub fn set_active(&mut self, id: PaneId) {
+        if self.panes.contains_key(&id) {
+            self.active = id;
+        }
+    }
+
     pub fn pane_count(&self) -> usize {
         self.panes.len()
     }

@@ -189,6 +189,42 @@ impl Session {
         self.notifier.bump();
     }
 
+    // --- Souris (phase 6) ----------------------------------------------------
+
+    /// Rend actif le volet situé sous le clic (coordonnées de contenu 0-based).
+    pub fn select_pane_at(&self, col: u16, row: u16) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let aw = inner.active_window;
+            if let Some(win) = inner.windows.get_mut(aw)
+                && let Some(id) = win.pane_at(col, row)
+            {
+                win.set_active(id);
+            }
+        }
+        self.notifier.bump();
+    }
+
+    /// Molette : fait défiler (et active) le volet sous le curseur.
+    pub fn mouse_scroll_at(&self, col: u16, row: u16, up: bool) {
+        let pane = {
+            let mut inner = self.inner.lock().unwrap();
+            let aw = inner.active_window;
+            let Some(win) = inner.windows.get_mut(aw) else {
+                return;
+            };
+            let Some(id) = win.pane_at(col, row) else {
+                return;
+            };
+            win.set_active(id);
+            win.pane(id)
+        };
+        if let Some(p) = pane {
+            p.scroll(up, 3);
+        }
+        self.notifier.bump();
+    }
+
     fn active_zoomed(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner

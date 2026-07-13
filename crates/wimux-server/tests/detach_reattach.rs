@@ -621,3 +621,43 @@ fn zoom_affiche_l_indicateur() {
     send(&mut w, &ClientMessage::Kill { name: "z".into() }).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 }
+
+#[test]
+fn molette_active_le_mode_copie() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-mouse", std::process::id());
+    start_daemon(&pipe);
+
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::NewSession {
+                name: Some("m".into()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+    }
+    let rx = spawn_reader(Arc::clone(&conn));
+    let _ = rx.recv_timeout(Duration::from_secs(5));
+    let (ready, _) = wait_for_marker(&rx, "PS", Duration::from_secs(15));
+    assert!(ready, "invite absente");
+
+    // Molette vers le haut (SGR 1006) au milieu du volet -> mode copie.
+    {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::Input(b"\x1b[<64;10;5M".to_vec())).unwrap();
+    }
+    let (in_copy, screen) = wait_for_marker(&rx, "COPIE", Duration::from_secs(5));
+    assert!(
+        in_copy,
+        "la molette n'a pas activé le mode copie.\nÉcran :\n{screen}"
+    );
+
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::Kill { name: "m".into() }).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+}

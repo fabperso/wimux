@@ -62,6 +62,13 @@ bind - split-window -v
 | `]` | Coller le dernier texte copié |
 | `:` | Invite de commande (`split-window -h`, `new-window`, ...) |
 
+### Souris
+
+Activée par défaut (désactivable avec `set mouse off` dans la config) :
+
+- **Molette** dans un volet → entre en mode copie et fait défiler l'historique.
+- **Clic gauche** sur un volet → le rend actif.
+
 ### Mode copie (après `Ctrl-b [`)
 
 Navigation façon vi dans le scrollback :
