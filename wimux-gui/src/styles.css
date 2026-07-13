@@ -1,10 +1,15 @@
-:root {
-  background: #1e1e1e;
-}
-body {
-  margin: 0;
-}
-#terminal {
-  width: 100vw;
-  height: 100vh;
-}
+:root { background: #1e1e1e; color: #d4d4d4; font-family: "Segoe UI", sans-serif; }
+body { margin: 0; }
+#app { display: flex; height: 100vh; }
+#rail { width: 180px; background: #252526; border-right: 1px solid #333; display: flex; flex-direction: column; }
+#sessions { flex: 1; overflow-y: auto; }
+.session { display: flex; align-items: center; gap: 6px; padding: 8px 10px; cursor: pointer; color: #ccc; border-left: 3px solid transparent; }
+.session:hover { background: #2a2d2e; }
+.session.active { background: #37373d; border-left-color: #0a84ff; color: #fff; }
+.session .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session .close { visibility: hidden; color: #999; }
+.session:hover .close { visibility: visible; }
+.session .name-edit { flex: 1; background: #1e1e1e; color: #fff; border: 1px solid #0a84ff; }
+#new-session { border: none; background: #2d2d2d; color: #ccc; padding: 8px; cursor: pointer; font-size: 16px; }
+#new-session:hover { background: #37373d; }
+#terminal { flex: 1; }
