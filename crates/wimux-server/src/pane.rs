@@ -204,18 +204,15 @@ impl Pane {
         (st.cols, st.rows)
     }
 
-    /// Reconstruit le contenu visible du volet en octets (pour PaneSnapshot).
-    pub fn snapshot_bytes(&self) -> Vec<u8> {
-        let st = self.state.lock().unwrap();
-        grid_to_bytes(&st.terminal)
-    }
-
-    /// S'abonne au flux brut de sortie du volet. Chaque fragment lu depuis
-    /// ConPTY sera envoyé sur le récepteur retourné.
-    pub fn subscribe(&self) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    /// Sous un seul verrou : reconstruit l'instantané visible ET inscrit un
+    /// abonné au flux brut. Atomique — aucun octet entre les deux n'est perdu
+    /// ni dupliqué. C'est le point d'entrée d'un attachement GUI.
+    pub fn snapshot_and_subscribe(&self) -> (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let mut st = self.state.lock().unwrap();
+        let snapshot = grid_to_bytes(&st.terminal);
         let (tx, rx) = std::sync::mpsc::channel();
-        self.state.lock().unwrap().subscribers.push(tx);
-        rx
+        st.subscribers.push(tx);
+        (snapshot, rx)
     }
 
     /// Contenu visible du volet sous forme de texte (pour `capture-pane`).

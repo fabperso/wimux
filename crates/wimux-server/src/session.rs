@@ -63,6 +63,21 @@ impl Session {
             .map(|w| w.active_pane())
     }
 
+    /// Prépare un attachement GUI : renvoie le volet actif, son instantané et un
+    /// abonnement à son flux brut (opération atomique côté volet).
+    pub fn gui_attach(&self) -> Option<(u64, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>)> {
+        let pane = self.active_pane()?;
+        let (snapshot, rx) = pane.snapshot_and_subscribe();
+        Some((pane.id, snapshot, rx))
+    }
+
+    /// Frappe GUI vers le volet actif (G1 : `pane_id` ignoré).
+    pub fn gui_input(&self, _pane_id: u64, bytes: &[u8]) {
+        if let Some(pane) = self.active_pane() {
+            pane.send_input(bytes);
+        }
+    }
+
     /// Entre en mode copie sur le volet actif.
     pub fn enter_copy_mode(&self) {
         if let Some(p) = self.active_pane() {
