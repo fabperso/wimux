@@ -393,3 +393,124 @@ fn attach_gui_session_inexistante_renvoie_erreur() {
         "attach GUI vers session inexistante aurait dû renvoyer Error"
     );
 }
+
+#[test]
+fn rename_vers_nom_existant_renvoie_error() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-renameerr", std::process::id());
+    start_daemon(&pipe);
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+
+    // Créer "a".
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::CreateSession {
+                name: Some("a".into()),
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &PipeConn = &conn;
+    let _ = wimux_protocol::recv::<_, ServerMessage>(&mut r).unwrap(); // SessionCreated a
+
+    // Créer "b".
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::CreateSession {
+                name: Some("b".into()),
+            },
+        )
+        .unwrap();
+    }
+    let mut r2: &PipeConn = &conn;
+    let _ = wimux_protocol::recv::<_, ServerMessage>(&mut r2).unwrap(); // SessionCreated b
+
+    // Renommer "a" vers "b" (déjà pris) : doit renvoyer Error, pas Ok.
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::RenameSession {
+                from: "a".into(),
+                to: "b".into(),
+            },
+        )
+        .unwrap();
+    }
+    let mut r3: &PipeConn = &conn;
+    assert!(
+        matches!(
+            wimux_protocol::recv::<_, ServerMessage>(&mut r3).unwrap(),
+            ServerMessage::Error(_)
+        ),
+        "rename vers un nom déjà pris doit répondre Error"
+    );
+
+    // Nettoyage.
+    let mut w: &PipeConn = &conn;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "a".into() });
+    let _ = send(&mut w, &ClientMessage::Kill { name: "b".into() });
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn create_nom_existant_renvoie_error() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-createerr", std::process::id());
+    start_daemon(&pipe);
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+
+    // Créer "dup" une première fois.
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::CreateSession {
+                name: Some("dup".into()),
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &PipeConn = &conn;
+    assert!(
+        matches!(
+            wimux_protocol::recv::<_, ServerMessage>(&mut r).unwrap(),
+            ServerMessage::SessionCreated { .. }
+        ),
+        "la première création de 'dup' doit répondre SessionCreated"
+    );
+
+    // Recréer "dup" : doit renvoyer Error, pas Ok/SessionCreated.
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::CreateSession {
+                name: Some("dup".into()),
+            },
+        )
+        .unwrap();
+    }
+    let mut r2: &PipeConn = &conn;
+    assert!(
+        matches!(
+            wimux_protocol::recv::<_, ServerMessage>(&mut r2).unwrap(),
+            ServerMessage::Error(_)
+        ),
+        "créer une session avec un nom déjà pris doit répondre Error"
+    );
+
+    // Nettoyage.
+    let mut w: &PipeConn = &conn;
+    let _ = send(
+        &mut w,
+        &ClientMessage::Kill {
+            name: "dup".into(),
+        },
+    );
+    std::thread::sleep(Duration::from_millis(200));
+}
