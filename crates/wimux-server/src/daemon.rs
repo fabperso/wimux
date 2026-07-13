@@ -318,6 +318,14 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                             }
                         });
                         gui_session = Some(s);
+                    } else {
+                        let mut wr: &PipeConn = &conn;
+                        send(
+                            &mut wr,
+                            &ServerMessage::Error(format!(
+                                "aucun volet actif dans la session : {session}"
+                            )),
+                        )?;
                     }
                 } else {
                     let mut wr: &PipeConn = &conn;

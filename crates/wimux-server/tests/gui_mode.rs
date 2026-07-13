@@ -111,3 +111,37 @@ fn attach_gui_recoit_snapshot_puis_flux() {
     send(&mut w, &ClientMessage::Kill { name: "g".into() }).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 }
+
+#[test]
+fn attach_gui_session_inexistante_renvoie_erreur() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-guierr", std::process::id());
+    start_daemon(&pipe);
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::AttachGui {
+                session: "inexistante".into(),
+            },
+        )
+        .unwrap();
+    }
+    let rx = spawn_reader(Arc::clone(&conn));
+    let got_error = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ServerMessage::Error(_)) => break true,
+                Ok(_) => {}
+                Err(_) if Instant::now() < deadline => {}
+                Err(_) => break false,
+            }
+        }
+    };
+    assert!(
+        got_error,
+        "attach GUI vers session inexistante aurait dû renvoyer Error"
+    );
+}
