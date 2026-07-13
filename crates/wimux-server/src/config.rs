@@ -29,6 +29,11 @@ pub enum Action {
     PrevWindow,
     CopyMode,
     Paste,
+    Zoom,
+    ResizeLeft,
+    ResizeDown,
+    ResizeUp,
+    ResizeRight,
 }
 
 /// Configuration résolue.
@@ -58,6 +63,11 @@ impl Default for Config {
         bindings.insert(b'p', Action::PrevWindow);
         bindings.insert(b'[', Action::CopyMode);
         bindings.insert(b']', Action::Paste);
+        bindings.insert(b'z', Action::Zoom);
+        bindings.insert(b'H', Action::ResizeLeft);
+        bindings.insert(b'J', Action::ResizeDown);
+        bindings.insert(b'K', Action::ResizeUp);
+        bindings.insert(b'L', Action::ResizeRight);
         Config {
             prefix: 0x02,
             default_shell: std::env::var("WIMUX_SHELL")
@@ -160,6 +170,11 @@ fn parse_action(tokens: &[&str]) -> Option<Action> {
         ["copy-mode"] => Some(Action::CopyMode),
         ["paste-buffer"] | ["paste"] => Some(Action::Paste),
         ["detach-client"] | ["detach"] => Some(Action::Detach),
+        ["resize-pane", "-Z"] | ["zoom"] => Some(Action::Zoom),
+        ["resize-pane", "-L"] => Some(Action::ResizeLeft),
+        ["resize-pane", "-D"] => Some(Action::ResizeDown),
+        ["resize-pane", "-U"] => Some(Action::ResizeUp),
+        ["resize-pane", "-R"] => Some(Action::ResizeRight),
         _ => None,
     }
 }

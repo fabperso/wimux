@@ -51,6 +51,8 @@ bind - split-window -v
 | `%` | Découper le volet (côte à côte) |
 | `"` | Découper le volet (empilé) |
 | `h` `j` `k` `l` | Aller au volet gauche/bas/haut/droite |
+| `H` `J` `K` `L` | Redimensionner le volet (gauche/bas/haut/droite) |
+| `z` | Zoom du volet actif (plein écran, `Z` dans la barre) |
 | `o` | Volet suivant |
 | `x` | Fermer le volet actif |
 | `c` | Nouvelle fenêtre |

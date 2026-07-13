@@ -163,6 +163,41 @@ impl Session {
             .unwrap_or_default()
     }
 
+    // --- Zoom & redimensionnement (phase 6) ----------------------------------
+
+    pub fn toggle_zoom(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let area = content_area(inner.cols, inner.rows);
+        let aw = inner.active_window;
+        if let Some(win) = inner.windows.get_mut(aw) {
+            win.toggle_zoom();
+            win.reflow(area);
+        }
+        drop(inner);
+        self.notifier.bump();
+    }
+
+    pub fn resize_pane(&self, mv: Move) {
+        let mut inner = self.inner.lock().unwrap();
+        let area = content_area(inner.cols, inner.rows);
+        let aw = inner.active_window;
+        if let Some(win) = inner.windows.get_mut(aw) {
+            win.resize_active(mv);
+            win.reflow(area);
+        }
+        drop(inner);
+        self.notifier.bump();
+    }
+
+    fn active_zoomed(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .windows
+            .get(inner.active_window)
+            .map(|w| w.is_zoomed())
+            .unwrap_or(false)
+    }
+
     pub fn notifier(&self) -> Arc<Notifier> {
         Arc::clone(&self.notifier)
     }
@@ -357,6 +392,7 @@ impl Session {
         // Calculés avant le verrou principal (évite un verrouillage réentrant).
         let copy_status = self.active_copy_status();
         let command_status = self.command_status();
+        let zoomed = self.active_zoomed();
         let mut inner = self.inner.lock().unwrap();
         let (cols, rows) = (inner.cols.max(1), inner.rows.max(1));
         let area = content_area(cols, rows);
@@ -381,6 +417,7 @@ impl Session {
                 rows - 1,
                 copy_status.as_deref(),
                 command_status.as_deref(),
+                zoomed,
             );
         }
 
@@ -423,6 +460,7 @@ fn draw_status_bar(
     row: u16,
     copy_status: Option<&str>,
     command_status: Option<&str>,
+    zoomed: bool,
 ) {
     let bar = Pen {
         fg: Color::Indexed(0),
@@ -440,7 +478,8 @@ fn draw_status_bar(
         return;
     }
 
-    let mut text = format!(" [{name}] ");
+    let zoom_flag = if zoomed { "Z " } else { "" };
+    let mut text = format!(" [{name}] {zoom_flag}");
     for (i, _win) in inner.windows.iter().enumerate() {
         if i == inner.active_window {
             text.push_str(&format!("{i}* "));

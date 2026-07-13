@@ -573,3 +573,51 @@ fn capture_pane_renvoie_le_contenu() {
     send(&mut w, &ClientMessage::Kill { name: "cap".into() }).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 }
+
+#[test]
+fn zoom_affiche_l_indicateur() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-zoom", std::process::id());
+    start_daemon(&pipe);
+
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::NewSession {
+                name: Some("z".into()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+    }
+    let rx = spawn_reader(Arc::clone(&conn));
+    let _ = rx.recv_timeout(Duration::from_secs(5));
+    let (ready, _) = wait_for_marker(&rx, "PS", Duration::from_secs(15));
+    assert!(ready, "invite absente");
+
+    // Découper (il faut >1 volet pour zoomer), puis Ctrl-b z.
+    {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::Input(b"\x02%".to_vec())).unwrap();
+    }
+    let (split_ok, _) = wait_for_marker(&rx, "│", Duration::from_secs(8));
+    assert!(split_ok, "découpe absente");
+
+    {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::Input(b"\x02z".to_vec())).unwrap();
+    }
+    // La barre de statut doit montrer l'indicateur de zoom « ] Z ».
+    let (zoomed, screen) = wait_for_marker(&rx, "] Z", Duration::from_secs(5));
+    assert!(
+        zoomed,
+        "l'indicateur de zoom n'apparaît pas.\nÉcran :\n{screen}"
+    );
+
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::Kill { name: "z".into() }).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+}

@@ -377,6 +377,11 @@ fn execute_action(session: &Session, action: Action) -> bool {
         Action::PrevWindow => session.prev_window(),
         Action::CopyMode => session.enter_copy_mode(),
         Action::Paste => session.paste(),
+        Action::Zoom => session.toggle_zoom(),
+        Action::ResizeLeft => session.resize_pane(Move::Left),
+        Action::ResizeDown => session.resize_pane(Move::Down),
+        Action::ResizeUp => session.resize_pane(Move::Up),
+        Action::ResizeRight => session.resize_pane(Move::Right),
     }
     false
 }

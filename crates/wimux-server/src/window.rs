@@ -60,6 +60,8 @@ pub struct Window {
     active: PaneId,
     rects: HashMap<PaneId, Rect>,
     borders: Vec<Border>,
+    /// Volet actif affiché en plein écran (`Ctrl-b z`).
+    zoomed: bool,
 }
 
 impl Window {
@@ -74,7 +76,31 @@ impl Window {
             active: id,
             rects: HashMap::new(),
             borders: Vec::new(),
+            zoomed: false,
         }
+    }
+
+    pub fn is_zoomed(&self) -> bool {
+        self.zoomed
+    }
+
+    /// Bascule le zoom du volet actif (sans effet s'il n'y a qu'un volet).
+    pub fn toggle_zoom(&mut self) {
+        if self.panes.len() > 1 || self.zoomed {
+            self.zoomed = !self.zoomed;
+        }
+    }
+
+    /// Redimensionne le volet actif dans la direction donnée.
+    pub fn resize_active(&mut self, mv: Move) {
+        let step = 0.05;
+        let (horizontal, grow) = match mv {
+            Move::Right => (true, step),
+            Move::Left => (true, -step),
+            Move::Down => (false, step),
+            Move::Up => (false, -step),
+        };
+        resize_walk(&mut self.root, self.active, horizontal, grow);
     }
 
     pub fn active_pane(&self) -> Arc<Pane> {
@@ -107,6 +133,7 @@ impl Window {
 
     /// Découpe le volet actif, en y insérant `new_pane` qui devient actif.
     pub fn split(&mut self, dir: SplitDir, new_pane: Arc<Pane>) {
+        self.zoomed = false;
         let new_id = new_pane.id;
         let active = self.active;
         Self::replace_leaf(&mut self.root, active, |old| Node::Split {
@@ -121,6 +148,7 @@ impl Window {
 
     /// Ferme le volet actif. Renvoie `true` si la fenêtre est désormais vide.
     pub fn close_active(&mut self) -> bool {
+        self.zoomed = false;
         let closing = self.active;
         if let Some(pane) = self.panes.remove(&closing) {
             pane.kill();
@@ -197,6 +225,16 @@ impl Window {
     pub fn reflow(&mut self, area: Rect) {
         self.rects.clear();
         self.borders.clear();
+
+        // Zoom : seul le volet actif est visible, à pleine taille.
+        if self.zoomed && self.panes.contains_key(&self.active) {
+            if let Some(pane) = self.panes.get(&self.active) {
+                pane.resize(area.w, area.h);
+            }
+            self.rects.insert(self.active, area);
+            return;
+        }
+
         let mut rects = HashMap::new();
         let mut borders = Vec::new();
         layout(&self.root, area, &mut rects, &mut borders);
@@ -294,6 +332,39 @@ fn contains_leaf(node: &Node, target: PaneId) -> bool {
     }
 }
 
+/// Ajuste le ratio de la découpe pertinente pour redimensionner le volet actif.
+/// `horizontal` cible les découpes gauche/droite ; `grow > 0` agrandit le volet.
+fn resize_walk(node: &mut Node, target: PaneId, horizontal: bool, grow: f32) -> Option<bool> {
+    match node {
+        Node::Leaf(id) => (*id == target).then_some(false),
+        Node::Split { dir, ratio, a, b } => {
+            let matches = axis_matches(*dir, horizontal);
+            if let Some(done) = resize_walk(a, target, horizontal, grow) {
+                if !done && matches {
+                    *ratio = (*ratio + grow).clamp(0.1, 0.9);
+                    return Some(true);
+                }
+                return Some(done);
+            }
+            if let Some(done) = resize_walk(b, target, horizontal, grow) {
+                if !done && matches {
+                    *ratio = (*ratio - grow).clamp(0.1, 0.9);
+                    return Some(true);
+                }
+                return Some(done);
+            }
+            None
+        }
+    }
+}
+
+fn axis_matches(dir: SplitDir, horizontal: bool) -> bool {
+    matches!(
+        (dir, horizontal),
+        (SplitDir::LeftRight, true) | (SplitDir::TopBottom, false)
+    )
+}
+
 fn overlaps_v(a: &Rect, b: &Rect) -> bool {
     a.y < b.y + b.h && b.y < a.y + a.h
 }
@@ -369,5 +440,56 @@ fn layout(node: &Node, area: Rect, rects: &mut HashMap<PaneId, Rect>, borders: &
                 layout(b, b_rect, rects, borders);
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn split_lr() -> Node {
+        Node::Split {
+            dir: SplitDir::LeftRight,
+            ratio: 0.5,
+            a: Box::new(Node::Leaf(1)),
+            b: Box::new(Node::Leaf(2)),
+        }
+    }
+
+    #[test]
+    fn resize_agrandit_le_volet_gauche() {
+        let mut root = split_lr();
+        resize_walk(&mut root, 1, true, 0.1);
+        match root {
+            Node::Split { ratio, .. } => assert!((ratio - 0.6).abs() < 1e-6),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn resize_agrandit_le_volet_droit() {
+        let mut root = split_lr();
+        resize_walk(&mut root, 2, true, 0.1);
+        match root {
+            Node::Split { ratio, .. } => assert!((ratio - 0.4).abs() < 1e-6),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn resize_ignore_le_mauvais_axe() {
+        let mut root = split_lr();
+        resize_walk(&mut root, 1, false, 0.1);
+        match root {
+            Node::Split { ratio, .. } => assert!((ratio - 0.5).abs() < 1e-6),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn axis_matches_correct() {
+        assert!(axis_matches(SplitDir::LeftRight, true));
+        assert!(axis_matches(SplitDir::TopBottom, false));
+        assert!(!axis_matches(SplitDir::LeftRight, false));
     }
 }
