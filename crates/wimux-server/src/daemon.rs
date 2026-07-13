@@ -191,6 +191,22 @@ fn sender_loop(session: Arc<Session>, conn: Arc<PipeConn>, keep_going: Arc<Atomi
     }
 }
 
+/// Attachement GUI suivi (une session diffusée sur cette connexion). Arrêt propre
+/// du thread de retransmission au drop (permet la bascule d'une session à l'autre).
+struct GuiAttachment {
+    keep_going: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for GuiAttachment {
+    fn drop(&mut self) {
+        self.keep_going.store(false, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 /// État du décodage du préfixe pour un client.
 #[derive(Default)]
 struct PrefixState {
@@ -230,6 +246,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
     )?;
 
     let mut attachment: Option<Attachment> = None;
+    let mut gui_attach: Option<GuiAttachment> = None;
     let mut gui_session: Option<Arc<Session>> = None;
     let mut prefix = PrefixState::default();
 
@@ -289,50 +306,70 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 send(&mut wr, &ServerMessage::Ok)?;
             }
             ClientMessage::AttachGui { session } => {
-                if let Some(s) = server.get(&session) {
-                    if let Some((pane_id, snapshot, rx)) = s.gui_attach() {
-                        let mut wr: &PipeConn = &conn;
-                        send(
-                            &mut wr,
-                            &ServerMessage::PaneSnapshot {
-                                pane_id,
-                                bytes: snapshot,
-                            },
-                        )?;
-                        // Thread de retransmission du flux brut.
-                        let conn_out = Arc::clone(&conn);
-                        std::thread::spawn(move || {
-                            for chunk in rx {
-                                let mut w: &PipeConn = &conn_out;
-                                if send(
-                                    &mut w,
-                                    &ServerMessage::PaneOutput {
-                                        pane_id,
-                                        bytes: chunk,
-                                    },
-                                )
-                                .is_err()
-                                {
-                                    break;
+                // Arrêter proprement la diffusion précédente avant d'en démarrer une.
+                gui_attach = None;
+                match server.get(&session) {
+                    Some(s) => {
+                        if let Some((pane_id, snapshot, rx)) = s.gui_attach() {
+                            let mut wr: &PipeConn = &conn;
+                            send(
+                                &mut wr,
+                                &ServerMessage::PaneSnapshot {
+                                    pane_id,
+                                    bytes: snapshot,
+                                },
+                            )?;
+                            let keep_going = Arc::new(AtomicBool::new(true));
+                            let conn_out = Arc::clone(&conn);
+                            let kg = Arc::clone(&keep_going);
+                            let handle = std::thread::spawn(move || {
+                                while kg.load(Ordering::Relaxed) {
+                                    match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                                        Ok(chunk) => {
+                                            let mut w: &PipeConn = &conn_out;
+                                            if send(
+                                                &mut w,
+                                                &ServerMessage::PaneOutput {
+                                                    pane_id,
+                                                    bytes: chunk,
+                                                },
+                                            )
+                                            .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                            continue;
+                                        }
+                                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                            break;
+                                        }
+                                    }
                                 }
-                            }
-                        });
-                        gui_session = Some(s);
-                    } else {
+                            });
+                            gui_attach = Some(GuiAttachment {
+                                keep_going,
+                                handle: Some(handle),
+                            });
+                            gui_session = Some(s);
+                        } else {
+                            let mut wr: &PipeConn = &conn;
+                            send(
+                                &mut wr,
+                                &ServerMessage::Error(format!(
+                                    "aucun volet actif dans la session : {session}"
+                                )),
+                            )?;
+                        }
+                    }
+                    None => {
                         let mut wr: &PipeConn = &conn;
                         send(
                             &mut wr,
-                            &ServerMessage::Error(format!(
-                                "aucun volet actif dans la session : {session}"
-                            )),
+                            &ServerMessage::Error(format!("session introuvable : {session}")),
                         )?;
                     }
-                } else {
-                    let mut wr: &PipeConn = &conn;
-                    send(
-                        &mut wr,
-                        &ServerMessage::Error(format!("session introuvable : {session}")),
-                    )?;
                 }
             }
             ClientMessage::PaneInput { pane_id, bytes } => {
@@ -407,6 +444,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
     }
 
     drop(attachment);
+    drop(gui_attach);
     Ok(())
 }
 

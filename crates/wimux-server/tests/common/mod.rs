@@ -59,3 +59,20 @@ pub fn spawn_reader(conn: Arc<PipeConn>) -> Receiver<ServerMessage> {
     });
     rx
 }
+
+/// Attend un message satisfaisant `pred`, dans la limite du délai.
+pub fn wait_for<F: Fn(&wimux_protocol::ServerMessage) -> bool>(
+    rx: &std::sync::mpsc::Receiver<wimux_protocol::ServerMessage>,
+    timeout: std::time::Duration,
+    pred: F,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Ok(m) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            if pred(&m) {
+                return true;
+            }
+        }
+    }
+    false
+}
