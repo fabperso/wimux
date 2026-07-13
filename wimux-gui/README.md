@@ -77,3 +77,16 @@ xterm.js, frappe fonctionnelle, persistance via le serveur wimux.
    - ✕ ferme le volet ; l'espace est repris par le volet frère ;
    - cliquer dans un volet le focalise (bordure bleue `.pane.active`) et la
      frappe va à ce volet.
+
+## Vérification manuelle G3 (récapitulatif complet)
+
+Avec la GUI attachée à une session découpée :
+- **Couleurs à l'attache** : le contenu coloré (ex. `ls` colorisé, prompt) apparaît
+  en couleur immédiatement, curseur au bon endroit.
+- **Découper** : ⬍ (haut/bas) et ⬌ (gauche/droite) créent des volets vivants.
+- **Fermer** : ✕ retire le volet, le frère reprend la place.
+- **Focus** : clic → bordure bleue, la frappe suit le volet cliqué.
+- **Taper dans chaque volet** : chaque volet exécute indépendamment (`whoami`, etc.).
+- **Glisser les bordures** : tirer un séparateur redimensionne en direct (borné
+  10 %–90 %) ; relâcher fixe le ratio côté serveur (le TUI attaché voit le même
+  ratio).

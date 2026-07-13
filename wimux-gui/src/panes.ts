@@ -21,6 +21,7 @@ export interface PaneCallbacks {
   onFocus: (paneId: number) => void;
   onSplit: (paneId: number, dir: "LeftRight" | "TopBottom") => void;
   onClose: (paneId: number) => void;
+  onRatio: (nodeId: number, ratio: number) => void;
 }
 
 interface PaneView {
@@ -34,10 +35,24 @@ export class PaneManager {
   private views = new Map<number, PaneView>();
   private mount: HTMLElement;
   private cb: PaneCallbacks;
+  private ratioTimer: number | null = null;
+  private pendingRatio: { nodeId: number; ratio: number } | null = null;
 
   constructor(mount: HTMLElement, cb: PaneCallbacks) {
     this.mount = mount;
     this.cb = cb;
+  }
+
+  private emitRatio(nodeId: number, ratio: number) {
+    this.pendingRatio = { nodeId, ratio };
+    if (this.ratioTimer !== null) return;
+    this.ratioTimer = window.setTimeout(() => {
+      this.ratioTimer = null;
+      if (this.pendingRatio) {
+        this.cb.onRatio(this.pendingRatio.nodeId, this.pendingRatio.ratio);
+        this.pendingRatio = null;
+      }
+    }, 50);
   }
 
   write(paneId: number, data: Uint8Array) {
@@ -166,6 +181,27 @@ export class PaneManager {
     b.className = "split-child";
     b.style.flexGrow = String(1 - s.ratio);
     b.appendChild(this.buildNode(s.b));
+    sep.addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
+      const isRow = s.dir === "LeftRight";
+      const onMove = (m: MouseEvent) => {
+        const rect = container.getBoundingClientRect();
+        let ratio = isRow
+          ? (m.clientX - rect.left) / rect.width
+          : (m.clientY - rect.top) / rect.height;
+        ratio = Math.max(0.1, Math.min(0.9, ratio));
+        // Mise à jour optimiste locale ; le serveur ré-émettra window-layout.
+        a.style.flexGrow = String(ratio);
+        b.style.flexGrow = String(1 - ratio);
+        this.emitRatio(s.node_id, ratio);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    });
     container.append(a, sep, b);
     return container;
   }

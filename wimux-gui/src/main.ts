@@ -19,6 +19,9 @@ const paneManager = new PaneManager(mount, {
   onClose: (paneId) => {
     invoke("close_pane", { paneId }).catch(() => {});
   },
+  onRatio: (nodeId, ratio) => {
+    invoke("set_split_ratio", { nodeId, ratio }).catch(() => {});
+  },
 });
 
 let activeSession: string | null = null;
