@@ -287,6 +287,11 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &ServerMessage::Ok)?;
             }
+            // Mode GUI : bras remplis par la tâche 4 (G1). No-op provisoire pour
+            // que le workspace compile entre les tâches.
+            ClientMessage::AttachGui { .. } => {}
+            ClientMessage::PaneInput { .. } => {}
+            ClientMessage::PaneResize { .. } => {}
             ClientMessage::SendKeys { session, keys } => {
                 let reply = match server.get(&session) {
                     Some(s) => {

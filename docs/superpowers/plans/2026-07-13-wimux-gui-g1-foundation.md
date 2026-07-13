@@ -459,7 +459,10 @@ Expected: FAIL (le serveur ne gère pas `AttachGui` : pas de `PaneSnapshot`).
 
 - [ ] **Step 3: Handle AttachGui / PaneInput in `handle_client`**
 
-Dans le `match msg` de `handle_client`, ajouter deux bras (après `ClientMessage::Input`) :
+Dans le `match msg` de `handle_client`, il existe déjà des bras **no-op
+provisoires** pour `AttachGui`, `PaneInput` et `PaneResize` (posés lors de la
+tâche 1 pour que le workspace compile). **Remplacer** les no-op `AttachGui` et
+`PaneInput` par la logique ci-dessous (laisser `PaneResize` en no-op) :
 
 ```rust
             ClientMessage::AttachGui { session } => {
