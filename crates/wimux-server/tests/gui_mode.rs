@@ -5,11 +5,12 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use common::*;
 use wimux_protocol::transport::PipeConn;
-use wimux_protocol::{ClientMessage, ServerMessage, send};
+use wimux_protocol::{ClientMessage, LayoutNode, ServerMessage, SplitDir, send};
 
 #[test]
 fn attach_gui_recoit_snapshot_puis_flux() {
@@ -506,11 +507,340 @@ fn create_nom_existant_renvoie_error() {
 
     // Nettoyage.
     let mut w: &PipeConn = &conn;
-    let _ = send(
-        &mut w,
-        &ClientMessage::Kill {
-            name: "dup".into(),
-        },
+    let _ = send(&mut w, &ClientMessage::Kill { name: "dup".into() });
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+fn setup_attached(pipe: &str, name: &str) -> (Arc<PipeConn>, Receiver<ServerMessage>) {
+    let owner = Arc::new(connect_retry(pipe));
+    handshake(&owner);
+    {
+        let mut w: &PipeConn = &owner;
+        send(
+            &mut w,
+            &ClientMessage::NewSession {
+                name: Some(name.into()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+    }
+    let orx = spawn_reader(Arc::clone(&owner));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match orx.recv_timeout(Duration::from_millis(200)) {
+            Ok(ServerMessage::Frame(_)) => break,
+            Ok(_) => {}
+            Err(_) if Instant::now() < deadline => {}
+            Err(_) => panic!("pas de frame (shell non démarré)"),
+        }
+    }
+    std::thread::sleep(Duration::from_millis(1000));
+    // On laisse tomber `owner` : la session survit (détachée).
+    let gui = Arc::new(connect_retry(pipe));
+    handshake(&gui);
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::AttachGui {
+                session: name.into(),
+            },
+        )
+        .unwrap();
+    }
+    let grx = spawn_reader(Arc::clone(&gui));
+    (gui, grx)
+}
+
+fn wait_layout(rx: &Receiver<ServerMessage>, secs: u64) -> (LayoutNode, u64) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(ServerMessage::WindowLayout { tree, active }) => return (tree, active),
+            Ok(_) => {}
+            Err(_) if Instant::now() < deadline => {}
+            Err(_) => panic!("pas de WindowLayout"),
+        }
+    }
+}
+
+fn find_ratio(tree: &LayoutNode, node_id: u32) -> Option<f32> {
+    match tree {
+        LayoutNode::Leaf { .. } => None,
+        LayoutNode::Split {
+            node_id: nid,
+            ratio,
+            a,
+            b,
+            ..
+        } => {
+            if *nid == node_id {
+                Some(*ratio)
+            } else {
+                find_ratio(a, node_id).or_else(|| find_ratio(b, node_id))
+            }
+        }
+    }
+}
+
+fn wait_ratio_near(rx: &Receiver<ServerMessage>, node_id: u32, target: f32, secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        if let Ok(ServerMessage::WindowLayout { tree, .. }) =
+            rx.recv_timeout(Duration::from_millis(200))
+            && let Some(r) = find_ratio(&tree, node_id)
+            && (r - target).abs() < 0.05
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn attach_gui_envoie_layout_et_snapshots() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-g3layout", std::process::id());
+    start_daemon(&pipe);
+    let (gui, grx) = setup_attached(&pipe, "L");
+
+    let mut layout_pane: Option<u64> = None;
+    let mut snap_pane: Option<u64> = None;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while (layout_pane.is_none() || snap_pane.is_none()) && Instant::now() < deadline {
+        match grx.recv_timeout(Duration::from_millis(200)) {
+            Ok(ServerMessage::WindowLayout { tree, active }) => match tree {
+                LayoutNode::Leaf { pane_id } => {
+                    assert_eq!(pane_id, active);
+                    layout_pane = Some(pane_id);
+                }
+                _ => panic!("session neuve : arbre attendu = feuille"),
+            },
+            Ok(ServerMessage::PaneSnapshot { pane_id, .. }) => snap_pane = Some(pane_id),
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    assert!(layout_pane.is_some(), "WindowLayout non reçu");
+    assert_eq!(
+        layout_pane, snap_pane,
+        "layout et snapshot désignent des volets différents"
     );
+
+    let mut w: &PipeConn = &gui;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "L".into() });
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn split_pane_ajoute_une_feuille() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-g3split", std::process::id());
+    start_daemon(&pipe);
+    let (gui, grx) = setup_attached(&pipe, "S");
+
+    let (tree, active) = wait_layout(&grx, 6);
+    let leaf = match tree {
+        LayoutNode::Leaf { pane_id } => pane_id,
+        _ => panic!("attendu une feuille"),
+    };
+    assert_eq!(leaf, active);
+
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::SplitPane {
+                pane_id: leaf,
+                dir: SplitDir::TopBottom,
+            },
+        )
+        .unwrap();
+    }
+
+    let mut new_id: Option<u64> = None;
+    let mut split_ok = false;
+    let mut output_ok = false;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while (!split_ok || !output_ok) && Instant::now() < deadline {
+        match grx.recv_timeout(Duration::from_millis(200)) {
+            Ok(ServerMessage::PaneSnapshot { pane_id, .. }) => {
+                if pane_id != leaf {
+                    new_id = Some(pane_id);
+                }
+            }
+            Ok(ServerMessage::WindowLayout { tree, .. }) => {
+                if let LayoutNode::Split { a, b, .. } = tree {
+                    let mut ids = Vec::new();
+                    if let LayoutNode::Leaf { pane_id } = *a {
+                        ids.push(pane_id);
+                    }
+                    if let LayoutNode::Leaf { pane_id } = *b {
+                        ids.push(pane_id);
+                    }
+                    if ids.contains(&leaf) && ids.iter().any(|&i| Some(i) == new_id) {
+                        split_ok = true;
+                    }
+                }
+            }
+            Ok(ServerMessage::PaneOutput { pane_id, .. }) => {
+                if Some(pane_id) == new_id {
+                    output_ok = true;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    assert!(new_id.is_some(), "pas de snapshot du nouveau volet");
+    assert!(split_ok, "le WindowLayout ne reflète pas le split");
+    assert!(output_ok, "le nouveau volet ne diffuse pas de PaneOutput");
+
+    let mut w: &PipeConn = &gui;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "S".into() });
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn set_split_ratio_change_le_ratio() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-g3ratio", std::process::id());
+    start_daemon(&pipe);
+    let (gui, grx) = setup_attached(&pipe, "R");
+
+    let (tree, _) = wait_layout(&grx, 6);
+    let leaf = match tree {
+        LayoutNode::Leaf { pane_id } => pane_id,
+        _ => panic!("attendu une feuille"),
+    };
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::SplitPane {
+                pane_id: leaf,
+                dir: SplitDir::LeftRight,
+            },
+        )
+        .unwrap();
+    }
+    // Récupérer le node_id du split.
+    let node_id = {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match grx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ServerMessage::WindowLayout { tree, .. }) => {
+                    if let LayoutNode::Split { node_id, .. } = tree {
+                        break node_id;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) if Instant::now() < deadline => {}
+                Err(_) => panic!("pas de WindowLayout à un split"),
+            }
+        }
+    };
+
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::SetSplitRatio {
+                node_id,
+                ratio: 0.75,
+            },
+        )
+        .unwrap();
+    }
+    assert!(
+        wait_ratio_near(&grx, node_id, 0.75, 8),
+        "le ratio n'a pas été fixé à 0.75"
+    );
+
+    // Clamp : 5.0 -> 0.9.
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::SetSplitRatio {
+                node_id,
+                ratio: 5.0,
+            },
+        )
+        .unwrap();
+    }
+    assert!(
+        wait_ratio_near(&grx, node_id, 0.9, 8),
+        "le ratio n'a pas été borné à 0.9"
+    );
+
+    let mut w: &PipeConn = &gui;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "R".into() });
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn close_pane_retire_la_feuille() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-g3close", std::process::id());
+    start_daemon(&pipe);
+    let (gui, grx) = setup_attached(&pipe, "C");
+
+    let (tree, _) = wait_layout(&grx, 6);
+    let leaf = match tree {
+        LayoutNode::Leaf { pane_id } => pane_id,
+        _ => panic!("attendu une feuille"),
+    };
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::SplitPane {
+                pane_id: leaf,
+                dir: SplitDir::LeftRight,
+            },
+        )
+        .unwrap();
+    }
+    // Capturer le nouvel id (snapshot != leaf).
+    let new_id = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match grx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ServerMessage::PaneSnapshot { pane_id, .. }) if pane_id != leaf => {
+                    break pane_id;
+                }
+                Ok(_) => {}
+                Err(_) if Instant::now() < deadline => {}
+                Err(_) => panic!("pas de snapshot du nouveau volet"),
+            }
+        }
+    };
+
+    {
+        let mut w: &PipeConn = &gui;
+        send(&mut w, &ClientMessage::ClosePane { pane_id: new_id }).unwrap();
+    }
+    // Attendre un WindowLayout redevenu une feuille == leaf.
+    let back_to_leaf = {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match grx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ServerMessage::WindowLayout { tree, .. }) => {
+                    if let LayoutNode::Leaf { pane_id } = tree {
+                        break pane_id == leaf;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) if Instant::now() < deadline => {}
+                Err(_) => break false,
+            }
+        }
+    };
+    assert!(
+        back_to_leaf,
+        "après fermeture, l'arbre n'est pas redevenu la feuille restante"
+    );
+
+    let mut w: &PipeConn = &gui;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "C".into() });
     std::thread::sleep(Duration::from_millis(200));
 }

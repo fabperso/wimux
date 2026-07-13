@@ -211,6 +211,8 @@ fn sender_loop(session: Arc<Session>, conn: Arc<PipeConn>, keep_going: Arc<Atomi
 struct GuiAttachment {
     keep_going: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    tx: std::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    session: Arc<Session>,
 }
 
 impl Drop for GuiAttachment {
@@ -323,40 +325,34 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
             ClientMessage::AttachGui { session } => {
                 // Arrêter proprement la diffusion précédente avant d'en démarrer une.
                 gui_attach = None;
+                gui_session = None;
                 match server.get(&session) {
                     Some(s) => {
-                        if let Some((pane_id, snapshot, rx)) = s.gui_attach() {
+                        if let Some((tree, active, snaps, rx, tx)) = s.gui_attach_window() {
                             let mut wr: &PipeConn = &conn;
-                            send(
-                                &mut wr,
-                                &ServerMessage::PaneSnapshot {
-                                    pane_id,
-                                    bytes: snapshot,
-                                },
-                            )?;
+                            send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
+                            for (pane_id, bytes) in snaps {
+                                let mut wr: &PipeConn = &conn;
+                                send(&mut wr, &ServerMessage::PaneSnapshot { pane_id, bytes })?;
+                            }
                             let keep_going = Arc::new(AtomicBool::new(true));
                             let conn_out = Arc::clone(&conn);
                             let kg = Arc::clone(&keep_going);
                             let handle = std::thread::spawn(move || {
                                 while kg.load(Ordering::Relaxed) {
                                     match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                                        Ok((pid, chunk)) => {
+                                        Ok((pane_id, bytes)) => {
                                             let mut w: &PipeConn = &conn_out;
                                             if send(
                                                 &mut w,
-                                                &ServerMessage::PaneOutput {
-                                                    pane_id: pid,
-                                                    bytes: chunk,
-                                                },
+                                                &ServerMessage::PaneOutput { pane_id, bytes },
                                             )
                                             .is_err()
                                             {
                                                 break;
                                             }
                                         }
-                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                            continue;
-                                        }
+                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                             break;
                                         }
@@ -366,6 +362,8 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                             gui_attach = Some(GuiAttachment {
                                 keep_going,
                                 handle: Some(handle),
+                                tx,
+                                session: Arc::clone(&s),
                             });
                             gui_session = Some(s);
                         } else {
@@ -373,7 +371,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                             send(
                                 &mut wr,
                                 &ServerMessage::Error(format!(
-                                    "aucun volet actif dans la session : {session}"
+                                    "aucun volet dans la session : {session}"
                                 )),
                             )?;
                         }
@@ -392,11 +390,56 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                     s.gui_input(pane_id, &bytes);
                 }
             }
-            ClientMessage::PaneResize { .. } => {} // G1 : ignoré (voir G3)
-            ClientMessage::SplitPane { .. } => {}  // Task 6
-            ClientMessage::ClosePane { .. } => {}  // Task 6
-            ClientMessage::FocusPane { .. } => {}  // Task 6
-            ClientMessage::SetSplitRatio { .. } => {} // Task 6
+            ClientMessage::PaneResize {
+                pane_id,
+                cols,
+                rows,
+            } => {
+                if let Some(ga) = &gui_attach {
+                    ga.session.gui_pane_resize(pane_id, cols, rows);
+                }
+            }
+            ClientMessage::SplitPane { pane_id, dir } => {
+                if let Some(ga) = &gui_attach
+                    && let Some((new_id, snapshot, tree, active)) =
+                        ga.session.gui_split(pane_id, dir.into(), ga.tx.clone())
+                {
+                    let mut wr: &PipeConn = &conn;
+                    send(
+                        &mut wr,
+                        &ServerMessage::PaneSnapshot {
+                            pane_id: new_id,
+                            bytes: snapshot,
+                        },
+                    )?;
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
+                }
+            }
+            ClientMessage::ClosePane { pane_id } => {
+                if let Some(ga) = &gui_attach
+                    && let Some((tree, active)) = ga.session.gui_close(pane_id)
+                {
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
+                }
+            }
+            ClientMessage::FocusPane { pane_id } => {
+                if let Some(ga) = &gui_attach
+                    && let Some((tree, active)) = ga.session.gui_focus(pane_id)
+                {
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
+                }
+            }
+            ClientMessage::SetSplitRatio { node_id, ratio } => {
+                if let Some(ga) = &gui_attach
+                    && let Some((tree, active)) = ga.session.gui_set_ratio(node_id, ratio)
+                {
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
+                }
+            }
             ClientMessage::SendKeys { session, keys } => {
                 let reply = match server.get(&session) {
                     Some(s) => {

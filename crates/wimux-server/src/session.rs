@@ -4,13 +4,14 @@
 //! composition (volets + bordures + barre de statut) rendue par le serveur.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use wimux_protocol::Frame;
+use wimux_protocol::{Frame, LayoutNode};
 use wimux_vt::{Color, Grid, Pen};
 
-use crate::pane::{CopyAction, Notifier, Pane};
+use crate::pane::{CopyAction, Notifier, Pane, PaneId};
 use crate::window::{Move, Rect, SplitDir, Window};
 
 struct Inner {
@@ -71,18 +72,137 @@ impl Session {
             .map(|w| w.active_pane())
     }
 
-    /// Prépare un attachement GUI : renvoie le volet actif, son instantané et un
-    /// abonnement à son flux brut (opération atomique côté volet).
+    /// Prépare l'attache GUI de la fenêtre active : crée UN canal fusionné, abonne
+    /// chaque volet, renvoie la disposition, le volet actif, les snapshots par
+    /// volet, le récepteur fusionné ET un `Sender` (pour abonner les futurs volets).
     #[allow(clippy::type_complexity)]
-    pub fn gui_attach(&self) -> Option<(u64, Vec<u8>, std::sync::mpsc::Receiver<(u64, Vec<u8>)>)> {
-        let pane = self.active_pane()?;
-        let (snapshot, rx) = pane.snapshot_and_subscribe();
-        Some((pane.id, snapshot, rx))
+    pub fn gui_attach_window(
+        &self,
+    ) -> Option<(
+        LayoutNode,
+        u64,
+        Vec<(u64, Vec<u8>)>,
+        Receiver<(PaneId, Vec<u8>)>,
+        Sender<(PaneId, Vec<u8>)>,
+    )> {
+        let inner = self.inner.lock().unwrap();
+        let win = inner.windows.get(inner.active_window)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let layout = win.layout_tree();
+        let active = win.active_pane_id();
+        let mut snaps = Vec::new();
+        for id in win.pane_ids() {
+            if let Some(pane) = win.pane(id) {
+                let snap = pane.snapshot_and_subscribe_into(tx.clone());
+                snaps.push((id, snap));
+            }
+        }
+        Some((layout, active, snaps, rx, tx))
     }
 
-    /// Frappe GUI vers le volet actif (G1 : `pane_id` ignoré).
-    pub fn gui_input(&self, _pane_id: u64, bytes: &[u8]) {
-        if let Some(pane) = self.active_pane() {
+    /// Découpe le volet désigné (mode GUI). Spawn hors verrou, puis abonne le
+    /// nouveau volet au canal fusionné `tx`. Renvoie
+    /// `(new_id, snapshot, layout, active)`.
+    pub fn gui_split(
+        &self,
+        pane_id: u64,
+        dir: SplitDir,
+        tx: Sender<(PaneId, Vec<u8>)>,
+    ) -> Option<(u64, Vec<u8>, LayoutNode, u64)> {
+        let new_pane = Pane::spawn(1, 1, &self.shell, Arc::clone(&self.notifier)).ok()?;
+        let new_id = new_pane.id;
+        let (layout, active) = {
+            let mut inner = self.inner.lock().unwrap();
+            let aw = inner.active_window;
+            inner.windows.get(aw)?;
+            let area = content_area(inner.cols, inner.rows);
+            inner.windows[aw].split_pane(pane_id, dir, Arc::clone(&new_pane));
+            inner.windows[aw].reflow(area);
+            (
+                inner.windows[aw].layout_tree(),
+                inner.windows[aw].active_pane_id(),
+            )
+        };
+        let snapshot = new_pane.snapshot_and_subscribe_into(tx);
+        self.notifier.bump();
+        Some((new_id, snapshot, layout, active))
+    }
+
+    /// Ferme le volet désigné (mode GUI). Renvoie la nouvelle disposition, ou
+    /// `None` si plus aucune fenêtre.
+    pub fn gui_close(&self, pane_id: u64) -> Option<(LayoutNode, u64)> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let aw = inner.active_window;
+            let empty = inner.windows.get_mut(aw).map(|w| w.close_pane(pane_id));
+            if empty == Some(true) {
+                inner.windows.remove(aw);
+                if inner.active_window >= inner.windows.len() && !inner.windows.is_empty() {
+                    inner.active_window = inner.windows.len() - 1;
+                }
+            }
+        }
+        self.reflow();
+        self.notifier.bump();
+        self.window_layout()
+    }
+
+    /// Désigne le volet actif (mode GUI).
+    pub fn gui_focus(&self, pane_id: u64) -> Option<(LayoutNode, u64)> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let aw = inner.active_window;
+            if let Some(win) = inner.windows.get_mut(aw) {
+                win.set_active(pane_id);
+            }
+        }
+        self.notifier.bump();
+        self.window_layout()
+    }
+
+    /// Fixe le ratio d'un nœud de découpe (mode GUI, glisser-bordure).
+    pub fn gui_set_ratio(&self, node_id: u32, ratio: f32) -> Option<(LayoutNode, u64)> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let area = content_area(inner.cols, inner.rows);
+            let aw = inner.active_window;
+            if let Some(win) = inner.windows.get_mut(aw) {
+                win.set_ratio(node_id, ratio);
+                win.reflow(area);
+            }
+        }
+        self.notifier.bump();
+        self.window_layout()
+    }
+
+    /// Redimensionne le PTY d'un volet désigné (mode GUI, `PaneResize` honoré).
+    pub fn gui_pane_resize(&self, pane_id: u64, cols: u16, rows: u16) {
+        let pane = {
+            let inner = self.inner.lock().unwrap();
+            let aw = inner.active_window;
+            inner.windows.get(aw).and_then(|w| w.pane(pane_id))
+        };
+        if let Some(pane) = pane {
+            pane.resize(cols, rows);
+        }
+    }
+
+    /// Disposition courante de la fenêtre active.
+    pub fn window_layout(&self) -> Option<(LayoutNode, u64)> {
+        let inner = self.inner.lock().unwrap();
+        let win = inner.windows.get(inner.active_window)?;
+        Some((win.layout_tree(), win.active_pane_id()))
+    }
+
+    /// Frappe GUI vers le volet DÉSIGNÉ de la fenêtre active (repli : volet actif
+    /// si l'id est introuvable, ex. course avec une fermeture).
+    pub fn gui_input(&self, pane_id: u64, bytes: &[u8]) {
+        let pane = {
+            let inner = self.inner.lock().unwrap();
+            let win = inner.windows.get(inner.active_window);
+            win.and_then(|w| w.pane(pane_id).or_else(|| Some(w.active_pane())))
+        };
+        if let Some(pane) = pane {
             pane.send_input(bytes);
         }
     }
@@ -554,5 +674,21 @@ fn draw_status_bar(
     if let Some(status) = copy_status {
         let x = grid.cols().saturating_sub(status.len() as u16 + 1);
         grid.set_str(x, row, status, bar);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_layout_feuille_unique() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        let (tree, active) = s.window_layout().unwrap();
+        match tree {
+            wimux_protocol::LayoutNode::Leaf { pane_id } => assert_eq!(pane_id, active),
+            _ => panic!("attendu une feuille pour une session neuve"),
+        }
+        s.kill();
     }
 }
