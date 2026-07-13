@@ -774,4 +774,26 @@ mod tests {
         assert_eq!(cell.pen.fg, wimux_vt::Color::Indexed(1));
         assert_eq!(term2.cursor(), term.cursor());
     }
+
+    #[test]
+    fn grid_to_ansi_fidelite_couleurs_attributs() {
+        let mut term = wimux_vt::Terminal::new(30, 2);
+        // "AB" : fond bleu (44) + gras (1) ; "C" : retour au defaut ;
+        // "D" : fg 256 couleurs (38;5;200) ; "E" : fg RGB (38;2;10;20;30).
+        term.advance(b"\x1b[44;1mAB\x1b[0mC\x1b[38;5;200mD\x1b[0m\x1b[38;2;10;20;30mE\x1b[0m");
+
+        let bytes = grid_to_ansi(term.grid(), term.cursor());
+        let mut term2 = wimux_vt::Terminal::new(30, 2);
+        term2.advance(&bytes);
+
+        // La sortie re-parsee doit restituer char ET pen a l'identique.
+        let g1 = term.grid();
+        let g2 = term2.grid();
+        for col in 0..5u16 {
+            let c1 = g1.cell(col, 0).unwrap();
+            let c2 = g2.cell(col, 0).unwrap();
+            assert_eq!(c2.ch, c1.ch, "caractere different en colonne {col}");
+            assert_eq!(c2.pen, c1.pen, "pen different en colonne {col}");
+        }
+    }
 }
