@@ -246,25 +246,57 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `crates/wimux-server/src/session.rs`
 
 **Interfaces:**
-- Consumes: `Pane::{subscribe, snapshot_bytes, send_input}`, `Pane::id`.
-- Produces (méthodes publiques de `Session`) :
-  - `fn gui_attach(&self) -> Option<(u64, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>)>`
+- Consumes: `Pane::{send_input, id}`, `grid_to_bytes` (interne à `pane.rs`).
+- Produces :
+  - (dans `pane.rs`) `fn Pane::snapshot_and_subscribe(&self) -> (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>)`
+    — instantané **et** abonnement pris sous **un seul verrou** (atomique : aucun
+    octet perdu ni dupliqué entre les deux).
+  - (dans `session.rs`) `fn Session::gui_attach(&self) -> Option<(u64, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>)>`
     (renvoie `(pane_id actif, snapshot, récepteur de flux)`)
-  - `fn gui_input(&self, pane_id: u64, bytes: &[u8])`
+  - (dans `session.rs`) `fn Session::gui_input(&self, pane_id: u64, bytes: &[u8])`
 
 **Détails :** pour G1, on cible le **volet actif** de la fenêtre active. `gui_input`
 route vers ce volet (on ignore `pane_id` pour G1 mais on garde la signature pour G2+).
+Le combiné snapshot+abonnement est **atomique** (un seul verrou) pour éviter une
+course entre l'instantané et le début du flux.
 
-- [ ] **Step 1: Implement the methods**
+- [ ] **Step 1a: Ajouter `snapshot_and_subscribe` à `Pane` (pane.rs)**
 
-Ajouter dans `impl Session` (près de `active_pane`) :
+Dans `impl Pane` de `crates/wimux-server/src/pane.rs`, remplacer les deux méthodes
+`snapshot_bytes` et `subscribe` par une méthode combinée atomique (garder aussi
+`snapshot_bytes` si elle est utilisée ailleurs — sinon la supprimer). Ajouter :
+
+```rust
+    /// Sous un seul verrou : reconstruit l'instantané visible ET inscrit un
+    /// abonné au flux brut. Atomique — aucun octet entre les deux n'est perdu
+    /// ni dupliqué. C'est le point d'entrée d'un attachement GUI.
+    pub fn snapshot_and_subscribe(&self) -> (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let mut st = self.state.lock().unwrap();
+        let snapshot = grid_to_bytes(&st.terminal);
+        let (tx, rx) = std::sync::mpsc::channel();
+        st.subscribers.push(tx);
+        (snapshot, rx)
+    }
+```
+
+Note : `snapshot_bytes()` et `subscribe()` (tâche 2) ne sont plus utilisées par
+G1 une fois `snapshot_and_subscribe` en place. Les **supprimer** si aucun autre
+appelant (vérifier avec `grep`), pour éviter du code mort (clippy `-D warnings`
+signalera `subscribe`/`snapshot_bytes` inutilisées si `pub` ? non — `pub` n'est
+pas signalé ; les supprimer quand même par propreté puisqu'elles portent la
+course qu'on vient d'éliminer).
+
+- [ ] **Step 1b: Implement the Session methods**
+
+Ajouter dans `impl Session` (près de `active_pane`) de `crates/wimux-server/src/session.rs` :
 
 ```rust
     /// Prépare un attachement GUI : renvoie le volet actif, son instantané et un
-    /// abonnement à son flux brut.
+    /// abonnement à son flux brut (opération atomique côté volet).
     pub fn gui_attach(&self) -> Option<(u64, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>)> {
         let pane = self.active_pane()?;
-        Some((pane.id, pane.snapshot_bytes(), pane.subscribe()))
+        let (snapshot, rx) = pane.snapshot_and_subscribe();
+        Some((pane.id, snapshot, rx))
     }
 
     /// Frappe GUI vers le volet actif (G1 : `pane_id` ignoré).
