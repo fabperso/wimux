@@ -256,6 +256,111 @@ fn bascule_gui_arrete_le_flux_precedent() {
 }
 
 #[test]
+fn create_session_cree_et_liste() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-create", std::process::id());
+    common::start_daemon(&pipe);
+    let conn = std::sync::Arc::new(common::connect_retry(&pipe));
+    common::handshake(&conn);
+    {
+        let mut w: &wimux_protocol::transport::PipeConn = &conn;
+        wimux_protocol::send(
+            &mut w,
+            &wimux_protocol::ClientMessage::CreateSession {
+                name: Some("neuve".into()),
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &wimux_protocol::transport::PipeConn = &conn;
+    let name = match wimux_protocol::recv::<_, wimux_protocol::ServerMessage>(&mut r).unwrap() {
+        wimux_protocol::ServerMessage::SessionCreated { name } => name,
+        other => panic!("attendu SessionCreated, reçu {other:?}"),
+    };
+    assert_eq!(name, "neuve");
+
+    // Elle doit apparaître dans List.
+    {
+        let mut w: &wimux_protocol::transport::PipeConn = &conn;
+        wimux_protocol::send(&mut w, &wimux_protocol::ClientMessage::List).unwrap();
+    }
+    let mut r2: &wimux_protocol::transport::PipeConn = &conn;
+    let listed = matches!(
+        wimux_protocol::recv::<_, wimux_protocol::ServerMessage>(&mut r2).unwrap(),
+        wimux_protocol::ServerMessage::Sessions(v) if v.iter().any(|s| s.name == "neuve"));
+    assert!(listed, "la session créée n'apparaît pas dans List");
+
+    let mut w: &wimux_protocol::transport::PipeConn = &conn;
+    let _ = wimux_protocol::send(
+        &mut w,
+        &wimux_protocol::ClientMessage::Kill {
+            name: "neuve".into(),
+        },
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+#[test]
+fn rename_session_met_a_jour_la_liste() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-rename", std::process::id());
+    common::start_daemon(&pipe);
+    let conn = std::sync::Arc::new(common::connect_retry(&pipe));
+    common::handshake(&conn);
+    // Créer "vieux".
+    {
+        let mut w: &wimux_protocol::transport::PipeConn = &conn;
+        wimux_protocol::send(
+            &mut w,
+            &wimux_protocol::ClientMessage::CreateSession {
+                name: Some("vieux".into()),
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &wimux_protocol::transport::PipeConn = &conn;
+    let _ = wimux_protocol::recv::<_, wimux_protocol::ServerMessage>(&mut r).unwrap(); // SessionCreated
+    // Renommer.
+    {
+        let mut w: &wimux_protocol::transport::PipeConn = &conn;
+        wimux_protocol::send(
+            &mut w,
+            &wimux_protocol::ClientMessage::RenameSession {
+                from: "vieux".into(),
+                to: "nouveau".into(),
+            },
+        )
+        .unwrap();
+    }
+    let mut r2: &wimux_protocol::transport::PipeConn = &conn;
+    assert!(
+        matches!(
+            wimux_protocol::recv::<_, wimux_protocol::ServerMessage>(&mut r2).unwrap(),
+            wimux_protocol::ServerMessage::Ok
+        ),
+        "rename doit répondre Ok"
+    );
+    // List reflète le nouveau nom.
+    {
+        let mut w: &wimux_protocol::transport::PipeConn = &conn;
+        wimux_protocol::send(&mut w, &wimux_protocol::ClientMessage::List).unwrap();
+    }
+    let mut r3: &wimux_protocol::transport::PipeConn = &conn;
+    let ok = matches!(
+        wimux_protocol::recv::<_, wimux_protocol::ServerMessage>(&mut r3).unwrap(),
+        wimux_protocol::ServerMessage::Sessions(v)
+            if v.iter().any(|s| s.name == "nouveau") && !v.iter().any(|s| s.name == "vieux"));
+    assert!(ok, "List devrait montrer 'nouveau' et plus 'vieux'");
+
+    let mut w: &wimux_protocol::transport::PipeConn = &conn;
+    let _ = wimux_protocol::send(
+        &mut w,
+        &wimux_protocol::ClientMessage::Kill {
+            name: "nouveau".into(),
+        },
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+#[test]
 fn attach_gui_session_inexistante_renvoie_erreur() {
     let pipe = format!(r"\\.\pipe\wimux-test-{}-guierr", std::process::id());
     start_daemon(&pipe);

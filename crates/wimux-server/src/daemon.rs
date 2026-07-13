@@ -103,6 +103,21 @@ impl Server {
         sessions.insert(name, Arc::clone(&session));
         Ok(session)
     }
+
+    fn rename_session(&self, from: &str, to: &str) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().unwrap();
+        if !sessions.contains_key(from) {
+            return Err(format!("session introuvable : {from}"));
+        }
+        if sessions.contains_key(to) {
+            return Err(format!("la session « {to} » existe déjà"));
+        }
+        if let Some(s) = sessions.remove(from) {
+            s.set_name(to.to_string());
+            sessions.insert(to.to_string(), s);
+        }
+        Ok(())
+    }
 }
 
 /// Lance le démon sur le pipe de l'utilisateur courant.
@@ -436,9 +451,22 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &ServerMessage::Pong)?;
             }
-            // Remplis par la tâche 4 (G2). No-op provisoire pour compiler.
-            ClientMessage::CreateSession { .. } => {}
-            ClientMessage::RenameSession { .. } => {}
+            ClientMessage::CreateSession { name } => {
+                let reply = match server.create_session(name, 80, 24) {
+                    Ok(s) => ServerMessage::SessionCreated { name: s.name() },
+                    Err(e) => ServerMessage::Error(e),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::RenameSession { from, to } => {
+                let reply = match server.rename_session(&from, &to) {
+                    Ok(()) => ServerMessage::Ok,
+                    Err(e) => ServerMessage::Error(e),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
             ClientMessage::Hello(_) => {}
         }
     }
