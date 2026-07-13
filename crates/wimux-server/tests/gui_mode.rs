@@ -659,6 +659,7 @@ fn split_pane_ajoute_une_feuille() {
     }
 
     let mut new_id: Option<u64> = None;
+    let mut split_ids: Option<Vec<u64>> = None;
     let mut split_ok = false;
     let mut output_ok = false;
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -678,9 +679,7 @@ fn split_pane_ajoute_une_feuille() {
                     if let LayoutNode::Leaf { pane_id } = *b {
                         ids.push(pane_id);
                     }
-                    if ids.contains(&leaf) && ids.iter().any(|&i| Some(i) == new_id) {
-                        split_ok = true;
-                    }
+                    split_ids = Some(ids);
                 }
             }
             Ok(ServerMessage::PaneOutput { pane_id, .. }) => {
@@ -690,6 +689,15 @@ fn split_pane_ajoute_une_feuille() {
             }
             Ok(_) => {}
             Err(_) => {}
+        }
+        // Réévalué après chaque message : le correctif d'ordre (WindowLayout
+        // avant PaneSnapshot, cf. Défaut 2) fait arriver la disposition AVANT
+        // que `new_id` ne soit connu ; ne pas dépendre de l'ordre de réception.
+        if let Some(ids) = &split_ids
+            && ids.contains(&leaf)
+            && ids.iter().any(|&i| Some(i) == new_id)
+        {
+            split_ok = true;
         }
     }
     assert!(new_id.is_some(), "pas de snapshot du nouveau volet");

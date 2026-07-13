@@ -114,7 +114,11 @@ impl Session {
         let (layout, active) = {
             let mut inner = self.inner.lock().unwrap();
             let aw = inner.active_window;
-            inner.windows.get(aw)?;
+            if inner.windows.get(aw).is_none() {
+                drop(inner);
+                new_pane.kill();
+                return None;
+            }
             let area = content_area(inner.cols, inner.rows);
             inner.windows[aw].split_pane(pane_id, dir, Arc::clone(&new_pane));
             inner.windows[aw].reflow(area);

@@ -266,6 +266,11 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
     let mut gui_attach: Option<GuiAttachment> = None;
     let mut gui_session: Option<Arc<Session>> = None;
     let mut prefix = PrefixState::default();
+    // Sérialise TOUTES les écritures GUI sur `conn` (WindowLayout/PaneSnapshot
+    // envoyés par la boucle principale, PaneOutput envoyé par le thread de
+    // retransmission) : deux `write_all` concurrents sur le même PipeConn
+    // peuvent entrelacer leurs frames et désynchroniser le client.
+    let gui_write = Arc::new(Mutex::new(()));
 
     loop {
         let mut rd: &PipeConn = &conn;
@@ -329,26 +334,32 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 match server.get(&session) {
                     Some(s) => {
                         if let Some((tree, active, snaps, rx, tx)) = s.gui_attach_window() {
-                            let mut wr: &PipeConn = &conn;
-                            send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
-                            for (pane_id, bytes) in snaps {
+                            {
+                                let _g = gui_write.lock().unwrap();
                                 let mut wr: &PipeConn = &conn;
-                                send(&mut wr, &ServerMessage::PaneSnapshot { pane_id, bytes })?;
+                                send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
+                                for (pane_id, bytes) in snaps {
+                                    let mut wr: &PipeConn = &conn;
+                                    send(&mut wr, &ServerMessage::PaneSnapshot { pane_id, bytes })?;
+                                }
                             }
                             let keep_going = Arc::new(AtomicBool::new(true));
                             let conn_out = Arc::clone(&conn);
                             let kg = Arc::clone(&keep_going);
+                            let gw = Arc::clone(&gui_write);
                             let handle = std::thread::spawn(move || {
                                 while kg.load(Ordering::Relaxed) {
                                     match rx.recv_timeout(std::time::Duration::from_millis(200)) {
                                         Ok((pane_id, bytes)) => {
                                             let mut w: &PipeConn = &conn_out;
-                                            if send(
-                                                &mut w,
-                                                &ServerMessage::PaneOutput { pane_id, bytes },
-                                            )
-                                            .is_err()
-                                            {
+                                            let sent = {
+                                                let _g = gw.lock().unwrap();
+                                                send(
+                                                    &mut w,
+                                                    &ServerMessage::PaneOutput { pane_id, bytes },
+                                                )
+                                            };
+                                            if sent.is_err() {
                                                 break;
                                             }
                                         }
@@ -367,6 +378,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                             });
                             gui_session = Some(s);
                         } else {
+                            let _g = gui_write.lock().unwrap();
                             let mut wr: &PipeConn = &conn;
                             send(
                                 &mut wr,
@@ -377,6 +389,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                         }
                     }
                     None => {
+                        let _g = gui_write.lock().unwrap();
                         let mut wr: &PipeConn = &conn;
                         send(
                             &mut wr,
@@ -404,6 +417,11 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                     && let Some((new_id, snapshot, tree, active)) =
                         ga.session.gui_split(pane_id, dir.into(), ga.tx.clone())
                 {
+                    // WindowLayout D'ABORD : le frontend crée le xterm du volet à
+                    // sa réception ; un PaneSnapshot reçu avant serait perdu.
+                    let _g = gui_write.lock().unwrap();
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
                     let mut wr: &PipeConn = &conn;
                     send(
                         &mut wr,
@@ -412,14 +430,13 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                             bytes: snapshot,
                         },
                     )?;
-                    let mut wr: &PipeConn = &conn;
-                    send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
                 }
             }
             ClientMessage::ClosePane { pane_id } => {
                 if let Some(ga) = &gui_attach
                     && let Some((tree, active)) = ga.session.gui_close(pane_id)
                 {
+                    let _g = gui_write.lock().unwrap();
                     let mut wr: &PipeConn = &conn;
                     send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
                 }
@@ -428,6 +445,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 if let Some(ga) = &gui_attach
                     && let Some((tree, active)) = ga.session.gui_focus(pane_id)
                 {
+                    let _g = gui_write.lock().unwrap();
                     let mut wr: &PipeConn = &conn;
                     send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
                 }
@@ -436,6 +454,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 if let Some(ga) = &gui_attach
                     && let Some((tree, active)) = ga.session.gui_set_ratio(node_id, ratio)
                 {
+                    let _g = gui_write.lock().unwrap();
                     let mut wr: &PipeConn = &conn;
                     send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
                 }
