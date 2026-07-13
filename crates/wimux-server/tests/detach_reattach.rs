@@ -304,7 +304,7 @@ fn split_compose_deux_volets_avec_bordure() {
     // Découpe verticale (Ctrl-b %). Une bordure « │ » doit apparaître.
     {
         let mut w: &PipeConn = &conn;
-        send(&mut w, &ClientMessage::Input(vec![0x02, b'%'])).unwrap();
+        send(&mut w, &ClientMessage::Input(b"\x02%".to_vec())).unwrap();
     }
     let (has_border, screen) = wait_for_marker(&rx, "│", Duration::from_secs(8));
     assert!(
@@ -357,14 +357,14 @@ fn mode_copie_selectionne_et_copie() {
     // Entrer en mode copie (Ctrl-b [). La barre de statut doit montrer « COPIE ».
     {
         let mut w: &PipeConn = &conn;
-        send(&mut w, &ClientMessage::Input(vec![0x02, b'['])).unwrap();
+        send(&mut w, &ClientMessage::Input(b"\x02[".to_vec())).unwrap();
     }
     let (in_copy, _) = wait_for_marker(&rx, "COPIE", Duration::from_secs(5));
     assert!(in_copy, "l'indicateur de mode copie n'apparaît pas");
 
     // Sélectionner tout le buffer et copier :
     // g (haut), 0 (début), espace (ancre), G (bas), $ (fin), y (copier).
-    for key in [b'g', b'0', b' ', b'G', b'$', b'y'] {
+    for key in *b"g0 G$y" {
         let mut w: &PipeConn = &conn;
         send(&mut w, &ClientMessage::Input(vec![key])).unwrap();
         std::thread::sleep(Duration::from_millis(30));
