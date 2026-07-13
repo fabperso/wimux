@@ -75,6 +75,30 @@ pub struct SessionInfo {
     pub attached: bool,
 }
 
+/// Sens d'une découpe de volet (miroir du `window::SplitDir` serveur).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum SplitDir {
+    LeftRight,
+    TopBottom,
+}
+
+/// Arbre de disposition d'une fenêtre, sérialisable pour la GUI. Chaque `Split`
+/// porte un `node_id` stable (attribué à la création) pour cibler `SetSplitRatio`
+/// sans ambiguïté même si l'arbre a changé ailleurs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LayoutNode {
+    Leaf {
+        pane_id: u64,
+    },
+    Split {
+        node_id: u32,
+        dir: SplitDir,
+        ratio: f32,
+        a: Box<LayoutNode>,
+        b: Box<LayoutNode>,
+    },
+}
+
 /// Instantané complet de la grille d'un volet, envoyé au client pour affichage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
@@ -124,6 +148,25 @@ pub enum ClientMessage {
         pane_id: u64,
         cols: u16,
         rows: u16,
+    },
+    /// Découpe le volet désigné (mode GUI) ; le nouveau volet devient actif.
+    SplitPane {
+        pane_id: u64,
+        dir: SplitDir,
+    },
+    /// Ferme le volet désigné (mode GUI).
+    ClosePane {
+        pane_id: u64,
+    },
+    /// Désigne le volet actif (mode GUI).
+    FocusPane {
+        pane_id: u64,
+    },
+    /// Fixe le ratio d'un nœud de découpe interne (glisser-bordure). Borné
+    /// `[0.1, 0.9]` côté serveur.
+    SetSplitRatio {
+        node_id: u32,
+        ratio: f32,
     },
     /// Crée une session sans s'y attacher (mode GUI). Nom auto si `None`.
     CreateSession {
@@ -185,6 +228,12 @@ pub enum ServerMessage {
     PaneOutput {
         pane_id: u64,
         bytes: Vec<u8>,
+    },
+    /// Disposition de la fenêtre active (mode GUI). Envoyé à l'attache et après
+    /// chaque changement de topologie ou de ratio.
+    WindowLayout {
+        tree: LayoutNode,
+        active: u64,
     },
     /// Session créée (réponse à `CreateSession`).
     SessionCreated {
@@ -341,6 +390,49 @@ mod tests {
             ClientMessage::RenameSession { from, to } => {
                 assert_eq!(from, "a");
                 assert_eq!(to, "b");
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_split_pane() {
+        let msg = ClientMessage::SplitPane {
+            pane_id: 3,
+            dir: SplitDir::TopBottom,
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ClientMessage>(&mut cur).unwrap() {
+            ClientMessage::SplitPane { pane_id, dir } => {
+                assert_eq!(pane_id, 3);
+                assert_eq!(dir, SplitDir::TopBottom);
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_window_layout() {
+        let tree = LayoutNode::Split {
+            node_id: 1,
+            dir: SplitDir::LeftRight,
+            ratio: 0.5,
+            a: Box::new(LayoutNode::Leaf { pane_id: 10 }),
+            b: Box::new(LayoutNode::Leaf { pane_id: 11 }),
+        };
+        let msg = ServerMessage::WindowLayout {
+            tree: tree.clone(),
+            active: 10,
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ServerMessage>(&mut cur).unwrap() {
+            ServerMessage::WindowLayout { tree: got, active } => {
+                assert_eq!(active, 10);
+                assert_eq!(got, tree);
             }
             _ => panic!("mauvais variant"),
         }

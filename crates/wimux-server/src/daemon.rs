@@ -393,6 +393,10 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 }
             }
             ClientMessage::PaneResize { .. } => {} // G1 : ignoré (voir G3)
+            ClientMessage::SplitPane { .. } => {}  // Task 6
+            ClientMessage::ClosePane { .. } => {}  // Task 6
+            ClientMessage::FocusPane { .. } => {}  // Task 6
+            ClientMessage::SetSplitRatio { .. } => {} // Task 6
             ClientMessage::SendKeys { session, keys } => {
                 let reply = match server.get(&session) {
                     Some(s) => {
