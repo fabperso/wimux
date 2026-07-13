@@ -125,6 +125,15 @@ pub enum ClientMessage {
         cols: u16,
         rows: u16,
     },
+    /// Crée une session sans s'y attacher (mode GUI). Nom auto si `None`.
+    CreateSession {
+        name: Option<String>,
+    },
+    /// Renomme une session.
+    RenameSession {
+        from: String,
+        to: String,
+    },
     /// Commande scriptable : injecte des octets dans le volet actif d'une session
     /// nommée (comme `tmux send-keys -t <session>`).
     SendKeys {
@@ -176,6 +185,10 @@ pub enum ServerMessage {
     PaneOutput {
         pane_id: u64,
         bytes: Vec<u8>,
+    },
+    /// Session créée (réponse à `CreateSession`).
+    SessionCreated {
+        name: String,
     },
     /// Texte à placer dans le presse-papiers du système (suite à une copie).
     SetClipboard(String),
@@ -296,6 +309,38 @@ mod tests {
             ServerMessage::PaneOutput { pane_id, bytes } => {
                 assert_eq!(pane_id, 7);
                 assert_eq!(bytes, b"hello");
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_create_session() {
+        let msg = ClientMessage::CreateSession {
+            name: Some("dev".into()),
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ClientMessage>(&mut cur).unwrap() {
+            ClientMessage::CreateSession { name } => assert_eq!(name.as_deref(), Some("dev")),
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_rename_session() {
+        let msg = ClientMessage::RenameSession {
+            from: "a".into(),
+            to: "b".into(),
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ClientMessage>(&mut cur).unwrap() {
+            ClientMessage::RenameSession { from, to } => {
+                assert_eq!(from, "a");
+                assert_eq!(to, "b");
             }
             _ => panic!("mauvais variant"),
         }

@@ -399,6 +399,9 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &ServerMessage::Pong)?;
             }
+            // Remplis par la tâche 4 (G2). No-op provisoire pour compiler.
+            ClientMessage::CreateSession { .. } => {}
+            ClientMessage::RenameSession { .. } => {}
             ClientMessage::Hello(_) => {}
         }
     }
