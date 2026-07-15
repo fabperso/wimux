@@ -55,6 +55,8 @@ pub type PaneId = u64;
 pub struct Notifier {
     generation: Mutex<u64>,
     cond: Condvar,
+    /// Cloche (BEL) en attente pour cette session (G4).
+    bell: AtomicBool,
 }
 
 impl Notifier {
@@ -62,6 +64,7 @@ impl Notifier {
         Arc::new(Notifier {
             generation: Mutex::new(0),
             cond: Condvar::new(),
+            bell: AtomicBool::new(false),
         })
     }
 
@@ -78,6 +81,21 @@ impl Notifier {
 
     pub fn notify(&self) {
         self.cond.notify_all();
+    }
+
+    /// Pose le drapeau cloche (appelé par le `reader_loop` d'un volet).
+    pub fn signal_bell(&self) {
+        self.bell.store(true, Ordering::Relaxed);
+    }
+
+    /// Lit le drapeau cloche.
+    pub fn bell(&self) -> bool {
+        self.bell.load(Ordering::Relaxed)
+    }
+
+    /// Efface le drapeau cloche (quand la session est vue).
+    pub fn clear_bell(&self) {
+        self.bell.store(false, Ordering::Relaxed);
     }
 
     /// Bloque jusqu'à un changement au-delà de `last_seen`, ou jusqu'à ce que
@@ -444,7 +462,7 @@ fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                {
+                let rang = {
                     let mut st = pane.state.lock().unwrap();
                     st.terminal.advance(&buf[..n]);
                     let responses = st.terminal.take_responses();
@@ -455,6 +473,12 @@ fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
                     // Diffuser le flux brut aux clients GUI abonnés.
                     st.subscribers
                         .retain(|tx| tx.send((pane.id, buf[..n].to_vec())).is_ok());
+                    // Cloche détectée par l'émulateur pendant l'advance (sous le verrou).
+                    st.terminal.take_bell()
+                };
+                if rang {
+                    // Hors du verrou du volet : le drapeau vit sur le Notifier partagé.
+                    pane.notifier.signal_bell();
                 }
                 pane.notifier.bump();
             }
@@ -763,6 +787,16 @@ fn pen_to_sgr(pen: &Pen) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notifier_cloche() {
+        let n = Notifier::new();
+        assert!(!n.bell(), "cloche neuve à faux");
+        n.signal_bell();
+        assert!(n.bell());
+        n.clear_bell();
+        assert!(!n.bell());
+    }
 
     #[test]
     fn snapshot_reproduit_le_texte_visible() {
