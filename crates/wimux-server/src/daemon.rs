@@ -26,6 +26,8 @@ use crate::window::{Move, SplitDir};
 pub struct Server {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     config: Config,
+    /// Session actuellement affichée par la connexion GUI persistante (G4).
+    gui_viewed: Mutex<Option<String>>,
 }
 
 impl Server {
@@ -33,6 +35,7 @@ impl Server {
         Arc::new(Server {
             sessions: Mutex::new(HashMap::new()),
             config: Config::load(),
+            gui_viewed: Mutex::new(None),
         })
     }
 
@@ -44,17 +47,33 @@ impl Server {
         self.sessions.lock().unwrap().get(name).cloned()
     }
 
+    fn set_gui_viewed(&self, v: Option<String>) {
+        *self.gui_viewed.lock().unwrap() = v;
+    }
+
     fn list(&self) -> Vec<SessionInfo> {
         self.reap();
+        let viewed = self.gui_viewed.lock().unwrap().clone();
         let sessions = self.sessions.lock().unwrap();
         let mut infos: Vec<SessionInfo> = sessions
             .values()
-            .map(|s| SessionInfo {
-                name: s.name(),
-                windows: s.window_count() as u32,
-                attached: s.attached_count() > 0,
-                activity: false, // calculé en Task 5
-                bell: false,     // calculé en Task 5
+            .map(|s| {
+                let name = s.name();
+                // La session vue n'a jamais d'indicateur : on efface et on
+                // rafraîchit son baseline à chaque sondage (paresseux).
+                let (activity, bell) = if Some(&name) == viewed.as_ref() {
+                    s.mark_seen();
+                    (false, false)
+                } else {
+                    (s.has_activity(), s.has_bell())
+                };
+                SessionInfo {
+                    name,
+                    windows: s.window_count() as u32,
+                    attached: s.attached_count() > 0,
+                    activity,
+                    bell,
+                }
             })
             .collect();
         infos.sort_by(|a, b| a.name.cmp(&b.name));
@@ -267,6 +286,8 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
     let mut attachment: Option<Attachment> = None;
     let mut gui_attach: Option<GuiAttachment> = None;
     let mut gui_session: Option<Arc<Session>> = None;
+    // A-t-on posé l'état « vue » global ? (Seule cette connexion l'efface au drop.)
+    let mut viewed_set = false;
     let mut prefix = PrefixState::default();
     // Sérialise TOUTES les écritures GUI sur `conn` (WindowLayout/PaneSnapshot
     // envoyés par la boucle principale, PaneOutput envoyé par le thread de
@@ -335,6 +356,10 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 gui_session = None;
                 match server.get(&session) {
                     Some(s) => {
+                        // G4 : cette session devient « vue » ; on efface ses indicateurs.
+                        server.set_gui_viewed(Some(session.clone()));
+                        s.mark_seen();
+                        viewed_set = true;
                         if let Some((tree, active, snaps, rx, tx)) = s.gui_attach_window() {
                             {
                                 let _g = gui_write.lock().unwrap();
@@ -541,6 +566,11 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
 
     drop(attachment);
     drop(gui_attach);
+    // G4 : n'effacer l'état « vue » que si CETTE connexion l'a posé (les
+    // connexions `List` jetables ne doivent pas l'effacer).
+    if viewed_set {
+        server.set_gui_viewed(None);
+    }
     Ok(())
 }
 

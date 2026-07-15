@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use wimux_protocol::transport::PipeConn;
-use wimux_protocol::{ClientMessage, LayoutNode, ServerMessage, SplitDir, send};
+use wimux_protocol::{ClientMessage, LayoutNode, ServerMessage, SessionInfo, SplitDir, recv, send};
 
 #[test]
 fn attach_gui_recoit_snapshot_puis_flux() {
@@ -850,5 +850,217 @@ fn close_pane_retire_la_feuille() {
 
     let mut w: &PipeConn = &gui;
     let _ = send(&mut w, &ClientMessage::Kill { name: "C".into() });
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+// --- G4 : indicateurs d'activité -----------------------------------------
+
+/// Crée une session détachée (le client est relâché ; la session survit).
+fn create_detached(pipe: &str, name: &str) {
+    let c = Arc::new(connect_retry(pipe));
+    handshake(&c);
+    {
+        let mut w: &PipeConn = &c;
+        send(
+            &mut w,
+            &ClientMessage::NewSession {
+                name: Some(name.into()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+    }
+    // Laisser le shell démarrer avant de relâcher la connexion.
+    std::thread::sleep(Duration::from_millis(800));
+}
+
+/// Injecte des octets dans le volet actif d'une session, sans s'y attacher.
+fn send_keys(pipe: &str, session: &str, keys: &[u8]) {
+    let c = Arc::new(connect_retry(pipe));
+    handshake(&c);
+    {
+        let mut w: &PipeConn = &c;
+        send(
+            &mut w,
+            &ClientMessage::SendKeys {
+                session: session.into(),
+                keys: keys.to_vec(),
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &PipeConn = &c;
+    let _ = recv::<_, ServerMessage>(&mut r); // Ok / Error
+}
+
+/// Récupère la liste des sessions via une connexion de contrôle jetable.
+fn fetch_list(pipe: &str) -> Vec<SessionInfo> {
+    let c = Arc::new(connect_retry(pipe));
+    handshake(&c);
+    {
+        let mut w: &PipeConn = &c;
+        send(&mut w, &ClientMessage::List).unwrap();
+    }
+    let mut r: &PipeConn = &c;
+    match recv::<_, ServerMessage>(&mut r).unwrap() {
+        ServerMessage::Sessions(v) => v,
+        other => panic!("attendu Sessions, reçu {other:?}"),
+    }
+}
+
+/// Sonde `List` jusqu'à ce que `pred` soit vrai, dans la limite du délai.
+fn poll_list_until<F: Fn(&[SessionInfo]) -> bool>(pipe: &str, secs: u64, pred: F) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        if pred(&fetch_list(pipe)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+/// Attache la GUI (connexion persistante) à une session et attend son snapshot.
+fn attach_gui_persistent(pipe: &str, name: &str) -> (Arc<PipeConn>, Receiver<ServerMessage>) {
+    let gui = Arc::new(connect_retry(pipe));
+    handshake(&gui);
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::AttachGui {
+                session: name.into(),
+            },
+        )
+        .unwrap();
+    }
+    let rx = spawn_reader(Arc::clone(&gui));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(ServerMessage::PaneSnapshot { .. }) => break,
+            Ok(_) => {}
+            Err(_) if Instant::now() < deadline => {}
+            Err(_) => panic!("pas de PaneSnapshot pour {name}"),
+        }
+    }
+    (gui, rx)
+}
+
+#[test]
+fn activite_marquee_pour_session_inactive() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-g4act", std::process::id());
+    start_daemon(&pipe);
+    create_detached(&pipe, "A");
+    create_detached(&pipe, "B");
+
+    // GUI attachée à A : A devient « vue », B reste inactive.
+    let (gui, _grx) = attach_gui_persistent(&pipe, "A");
+
+    // Injecter de la sortie dans B (session inactive).
+    send_keys(&pipe, "B", b"Write-Output ABC\r");
+
+    let ok = poll_list_until(&pipe, 15, |list| {
+        let a = list.iter().find(|s| s.name == "A");
+        let b = list.iter().find(|s| s.name == "B");
+        matches!(a, Some(s) if !s.activity) && matches!(b, Some(s) if s.activity)
+    });
+    assert!(
+        ok,
+        "B devrait être active et A inactive : {:?}",
+        fetch_list(&pipe)
+    );
+
+    // Nettoyage.
+    for name in ["A", "B"] {
+        let mut w: &PipeConn = &gui;
+        let _ = send(&mut w, &ClientMessage::Kill { name: name.into() });
+    }
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn bascule_efface_activite() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-g4switch", std::process::id());
+    start_daemon(&pipe);
+    create_detached(&pipe, "A");
+    create_detached(&pipe, "B");
+
+    let (gui, grx) = attach_gui_persistent(&pipe, "A");
+
+    // Rendre B active.
+    send_keys(&pipe, "B", b"Write-Output XYZ\r");
+    assert!(
+        poll_list_until(&pipe, 15, |l| l
+            .iter()
+            .find(|s| s.name == "B")
+            .is_some_and(|s| s.activity)),
+        "B aurait dû devenir active"
+    );
+
+    // Basculer la GUI sur B (même connexion persistante).
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::AttachGui {
+                session: "B".into(),
+            },
+        )
+        .unwrap();
+    }
+    // Attendre le snapshot de B (bascule effective).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match grx.recv_timeout(Duration::from_millis(200)) {
+            Ok(ServerMessage::PaneSnapshot { .. }) => break,
+            Ok(_) => {}
+            Err(_) if Instant::now() < deadline => {}
+            Err(_) => panic!("pas de snapshot après bascule sur B"),
+        }
+    }
+
+    // Regarder B efface son indicateur d'activité.
+    assert!(
+        poll_list_until(&pipe, 10, |l| l
+            .iter()
+            .find(|s| s.name == "B")
+            .is_some_and(|s| !s.activity)),
+        "après bascule, B ne devrait plus être active : {:?}",
+        fetch_list(&pipe)
+    );
+
+    for name in ["A", "B"] {
+        let mut w: &PipeConn = &gui;
+        let _ = send(&mut w, &ClientMessage::Kill { name: name.into() });
+    }
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn cloche_marquee_pour_session_inactive() {
+    // Ce test dépend du shell : PowerShell émet un BEL en SORTIE via
+    // `[Console]::Write([char]7)`. Sur un shell sans BEL, il serait à ignorer.
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-g4bell", std::process::id());
+    start_daemon(&pipe);
+    create_detached(&pipe, "B");
+
+    // Aucune GUI attachée : gui_viewed = None, la cloche persiste jusqu'à la vue.
+    send_keys(&pipe, "B", b"[Console]::Write([char]7)\r");
+
+    let rang = poll_list_until(&pipe, 15, |l| {
+        l.iter().find(|s| s.name == "B").is_some_and(|s| s.bell)
+    });
+    assert!(
+        rang,
+        "B aurait dû être marquée cloche : {:?}",
+        fetch_list(&pipe)
+    );
+
+    let c = Arc::new(connect_retry(&pipe));
+    handshake(&c);
+    let mut w: &PipeConn = &c;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "B".into() });
     std::thread::sleep(Duration::from_millis(200));
 }
