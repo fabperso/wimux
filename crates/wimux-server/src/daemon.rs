@@ -53,6 +53,8 @@ impl Server {
                 name: s.name(),
                 windows: s.window_count() as u32,
                 attached: s.attached_count() > 0,
+                activity: false, // calculé en Task 5
+                bell: false,     // calculé en Task 5
             })
             .collect();
         infos.sort_by(|a, b| a.name.cmp(&b.name));

@@ -73,6 +73,10 @@ pub struct SessionInfo {
     pub name: String,
     pub windows: u32,
     pub attached: bool,
+    /// Sortie non vue depuis la dernière vue GUI (G4).
+    pub activity: bool,
+    /// BEL explicite reçu depuis la dernière vue GUI (G4).
+    pub bell: bool,
 }
 
 /// Sens d'une découpe de volet (miroir du `window::SplitDir` serveur).
@@ -433,6 +437,32 @@ mod tests {
             ServerMessage::WindowLayout { tree: got, active } => {
                 assert_eq!(active, 10);
                 assert_eq!(got, tree);
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_session_info_activite() {
+        let info = SessionInfo {
+            name: "dev".into(),
+            windows: 2,
+            attached: true,
+            activity: true,
+            bell: false,
+        };
+        let msg = ServerMessage::Sessions(vec![info]);
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ServerMessage>(&mut cur).unwrap() {
+            ServerMessage::Sessions(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].name, "dev");
+                assert_eq!(v[0].windows, 2);
+                assert!(v[0].attached);
+                assert!(v[0].activity);
+                assert!(!v[0].bell);
             }
             _ => panic!("mauvais variant"),
         }
