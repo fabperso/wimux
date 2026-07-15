@@ -354,13 +354,16 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 // Arrêter proprement la diffusion précédente avant d'en démarrer une.
                 gui_attach = None;
                 gui_session = None;
+                // La vue précédente se termine ; aucune session n'est regardée tant
+                // que la nouvelle attache n'a pas réussi.
+                server.set_gui_viewed(None);
                 match server.get(&session) {
                     Some(s) => {
-                        // G4 : cette session devient « vue » ; on efface ses indicateurs.
-                        server.set_gui_viewed(Some(session.clone()));
-                        s.mark_seen();
-                        viewed_set = true;
                         if let Some((tree, active, snaps, rx, tx)) = s.gui_attach_window() {
+                            // G4 : cette session devient « vue » ; on efface ses indicateurs.
+                            server.set_gui_viewed(Some(session.clone()));
+                            s.mark_seen();
+                            viewed_set = true;
                             {
                                 let _g = gui_write.lock().unwrap();
                                 let mut wr: &PipeConn = &conn;
