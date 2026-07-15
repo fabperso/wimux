@@ -54,6 +54,13 @@ impl Terminal {
         std::mem::take(&mut self.screen.responses)
     }
 
+    /// Récupère (et remet à faux) le drapeau « cloche » : `true` si au moins un
+    /// BEL (`0x07`) a été reçu comme contrôle depuis le dernier appel. Miroir de
+    /// `take_responses`.
+    pub fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.screen.bell_pending)
+    }
+
     /// Lignes de scrollback (les plus anciennes en tête).
     pub fn history(&self) -> &VecDeque<Vec<Cell>> {
         &self.screen.history
@@ -76,6 +83,8 @@ struct Screen {
     wrap_next: bool,
     history: VecDeque<Vec<Cell>>,
     responses: Vec<u8>,
+    /// Un BEL (`0x07`) a été reçu comme contrôle C0 depuis le dernier `take_bell`.
+    bell_pending: bool,
 }
 
 impl Screen {
@@ -92,6 +101,7 @@ impl Screen {
             wrap_next: false,
             history: VecDeque::new(),
             responses: Vec::new(),
+            bell_pending: false,
         }
     }
 
@@ -290,6 +300,7 @@ impl Perform for Screen {
                 self.cx = next.min(self.cols - 1);
                 self.wrap_next = false;
             }
+            0x07 => self.bell_pending = true,
             _ => {}
         }
     }
@@ -481,5 +492,31 @@ mod tests {
         t.advance(b"abcd");
         assert_eq!(text_row(&t, 0), "abc");
         assert_eq!(text_row(&t, 1), "d");
+    }
+
+    #[test]
+    fn bel_nu_leve_la_cloche() {
+        let mut t = Terminal::new(10, 2);
+        t.advance(b"\x07");
+        assert!(t.take_bell(), "un BEL nu doit lever la cloche");
+        assert!(!t.take_bell(), "la cloche est consommée au premier take");
+    }
+
+    #[test]
+    fn bel_terminateur_osc_ne_leve_pas_la_cloche() {
+        let mut t = Terminal::new(10, 2);
+        // ESC ] 0 ; titre BEL : le BEL termine l'OSC, il ne passe pas par execute.
+        t.advance(b"\x1b]0;titre\x07");
+        assert!(
+            !t.take_bell(),
+            "un BEL terminateur d'OSC ne doit PAS lever la cloche"
+        );
+    }
+
+    #[test]
+    fn sans_bel_pas_de_cloche() {
+        let mut t = Terminal::new(10, 2);
+        t.advance(b"abc");
+        assert!(!t.take_bell());
     }
 }
