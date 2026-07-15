@@ -3,7 +3,7 @@
 //! chaque changement les clients attachés sont réveillés puis reçoivent une
 //! composition (volets + bordures + barre de statut) rendue par le serveur.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -29,6 +29,8 @@ pub struct Session {
     shell: String,
     inner: Mutex<Inner>,
     attached: AtomicUsize,
+    /// Génération du Notifier vue par la GUI la dernière fois (G4).
+    last_seen_gen: AtomicU64,
     paste_buffer: Mutex<String>,
 }
 
@@ -50,6 +52,7 @@ impl Session {
                 command_line: None,
             }),
             attached: AtomicUsize::new(0),
+            last_seen_gen: AtomicU64::new(0),
             paste_buffer: Mutex::new(String::new()),
         });
         session.reflow();
@@ -386,6 +389,24 @@ impl Session {
         Arc::clone(&self.notifier)
     }
 
+    /// G4 : marque la session comme « vue » — rafraîchit le baseline d'activité
+    /// et efface la cloche. Ce qu'on regarde n'est jamais « non vu ».
+    pub fn mark_seen(&self) {
+        self.last_seen_gen
+            .store(self.notifier.generation(), Ordering::Relaxed);
+        self.notifier.clear_bell();
+    }
+
+    /// G4 : la session a-t-elle produit de la sortie depuis la dernière vue ?
+    pub fn has_activity(&self) -> bool {
+        self.notifier.generation() > self.last_seen_gen.load(Ordering::Relaxed)
+    }
+
+    /// G4 : une cloche (BEL) est-elle en attente sur cette session ?
+    pub fn has_bell(&self) -> bool {
+        self.notifier.bell()
+    }
+
     pub fn attached_count(&self) -> usize {
         self.attached.load(Ordering::Relaxed)
     }
@@ -693,6 +714,35 @@ mod tests {
             wimux_protocol::LayoutNode::Leaf { pane_id } => assert_eq!(pane_id, active),
             _ => panic!("attendu une feuille pour une session neuve"),
         }
+        s.kill();
+    }
+
+    #[test]
+    fn suivi_activite_et_cloche() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        // Laisser le shell démarrer puis se taire (cmd.exe à l'invite est inactif),
+        // pour que la génération se stabilise avant les assertions.
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+
+        // Activité : un bump au-delà du baseline vu.
+        s.mark_seen();
+        s.notifier().bump();
+        assert!(
+            s.has_activity(),
+            "un bump après mark_seen doit marquer l'activité"
+        );
+        s.mark_seen();
+        assert!(
+            !s.has_activity(),
+            "après mark_seen, plus d'activité en attente"
+        );
+
+        // Cloche : drapeau sur le Notifier, effacé par mark_seen.
+        s.notifier().signal_bell();
+        assert!(s.has_bell());
+        s.mark_seen();
+        assert!(!s.has_bell(), "mark_seen efface la cloche");
+
         s.kill();
     }
 }
