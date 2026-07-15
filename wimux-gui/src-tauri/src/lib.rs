@@ -87,6 +87,8 @@ fn attach_session(session: String, app: AppHandle, bridge: State<Bridge>) -> Res
 struct SessionDto {
     name: String,
     attached: bool,
+    activity: bool,
+    bell: bool,
 }
 
 #[tauri::command]
@@ -99,6 +101,8 @@ fn list_sessions() -> Result<Vec<SessionDto>, String> {
                 .map(|s| SessionDto {
                     name: s.name,
                     attached: s.attached,
+                    activity: s.activity,
+                    bell: s.bell,
                 })
                 .collect()),
             ServerMessage::Error(e) => Err(e),
