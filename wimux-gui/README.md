@@ -90,3 +90,20 @@ Avec la GUI attachée à une session découpée :
 - **Glisser les bordures** : tirer un séparateur redimensionne en direct (borné
   10 %–90 %) ; relâcher fixe le ratio côté serveur (le TUI attaché voit le même
   ratio).
+
+## Vérification manuelle G4 (indicateurs d'activité)
+
+Prérequis : deux sessions (ex. `dev` et `build`), la GUI attachée à `dev`.
+
+1. Dans la session **inactive** `build` (via un TUI attaché ailleurs, ou
+   `wimux send-keys -t build ...`), produire de la sortie, p. ex. `ls` ou
+   `Write-Output test`.
+   - **Attendu :** dans le rail, une **pastille bleue discrète** apparaît à droite
+     du nom `build` (activité non vue), en ~1 s (sondage `List`).
+2. Dans `build`, provoquer un **BEL** en sortie, p. ex. `[Console]::Write([char]7)`.
+   - **Attendu :** la pastille de `build` devient une **cloche 🔔** (prioritaire
+     sur l'activité).
+3. Cliquer sur `build` dans le rail pour la regarder.
+   - **Attendu :** sa pastille **disparaît immédiatement** (effacement optimiste),
+     et le sondage suivant la maintient éteinte tant que `build` est affichée.
+4. La session **active** n'affiche jamais de pastille.

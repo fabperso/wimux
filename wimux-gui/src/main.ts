@@ -40,11 +40,19 @@ listen<string>("pane-error", (e) => {
   console.error("erreur serveur:", e.payload);
 });
 
-type SessionDto = { name: string; attached: boolean };
+type SessionDto = { name: string; attached: boolean; activity: boolean; bell: boolean };
 
 async function switchTo(name: string) {
   if (name === activeSession) return;
   activeSession = name;
+  // Effacement optimiste : la session qu'on regarde n'a plus d'indicateur, sans
+  // attendre le prochain sondage.
+  for (const s of lastSessions) {
+    if (s.name === name) {
+      s.activity = false;
+      s.bell = false;
+    }
+  }
   paneManager.reset();
   await invoke("attach_session", { session: name }).catch((e) =>
     console.error("attach:", e),
@@ -79,7 +87,16 @@ function renderRail(sessions: SessionDto[]) {
       if (clickTimer !== null) return; // 2e clic d'un double-clic : ignore, laisse ondblclick gerer
       clickTimer = window.setTimeout(() => { clickTimer = null; switchTo(s.name); }, 200);
     };
-    el.append(name, close);
+    const isActive = s.name === activeSession;
+    if (!isActive && (s.bell || s.activity)) {
+      // Cloche prioritaire sur l'activité ; rien pour la session active.
+      const dot = document.createElement("span");
+      dot.className = "dot " + (s.bell ? "bell" : "activity");
+      dot.textContent = s.bell ? "🔔" : "";
+      el.append(name, dot, close);
+    } else {
+      el.append(name, close);
+    }
     container.append(el);
   }
 }

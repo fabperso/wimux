@@ -9,6 +9,9 @@ body { margin: 0; }
 .session .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session .close { visibility: hidden; color: #999; }
 .session:hover .close { visibility: visible; }
+.session .dot { flex: 0 0 auto; line-height: 1; }
+.session .dot.activity { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #0a84ff; }
+.session .dot.bell { font-size: 12px; }
 .session .name-edit { flex: 1; background: #1e1e1e; color: #fff; border: 1px solid #0a84ff; }
 #new-session { border: none; background: #2d2d2d; color: #ccc; padding: 8px; cursor: pointer; font-size: 16px; }
 #new-session:hover { background: #37373d; }
