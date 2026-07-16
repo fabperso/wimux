@@ -127,7 +127,7 @@ impl Notifier {
 struct PaneState {
     terminal: Terminal,
     writer: Box<dyn Write + Send>,
-    master: Box<dyn MasterPty + Send>,
+    master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
     cols: u16,
     rows: u16,
@@ -177,7 +177,7 @@ impl Pane {
             state: Mutex::new(PaneState {
                 terminal: Terminal::new(cols, rows),
                 writer,
-                master: pair.master,
+                master: Some(pair.master),
                 child: Some(child),
                 cols,
                 rows,
@@ -210,12 +210,14 @@ impl Pane {
         if st.cols == cols && st.rows == rows {
             return;
         }
-        let _ = st.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        if let Some(m) = st.master.as_ref() {
+            let _ = m.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
         st.terminal.resize(cols, rows);
         st.cols = cols;
         st.rows = rows;
@@ -472,6 +474,11 @@ impl Pane {
         if let Some(child) = st.child.as_mut() {
             let _ = child.kill();
         }
+        // Fermer la ConPTY (drop du master) provoque l'EOF du reader_loop parqué
+        // sur read() : ConPTY n'EOF pas sur sortie propre, mais fermer le master
+        // débloque le lecteur, qui se termine et relâche son Arc<Pane> (correctif
+        // M1 : sinon tuer un agent terminé fuit un thread + un handle).
+        st.master.take();
     }
 }
 
@@ -927,5 +934,35 @@ mod tests {
             "un volet vivant n'a pas de code de sortie"
         );
         p.kill();
+    }
+
+    #[test]
+    fn kill_ferme_le_master_et_libere_le_lecteur() {
+        let n = Notifier::new();
+        let pane = Pane::spawn(20, 5, "cmd.exe", n).unwrap();
+        // Faire sortir le shell proprement (code 0).
+        pane.send_input(b"exit 0\r\n");
+        // Attendre la détection de la sortie (wait_for_exit renseigne exit_code).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pane.exit_code().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            pane.exit_code().is_some(),
+            "le shell aurait dû sortir (exit 0)"
+        );
+        // À ce stade, le reader_loop reste parqué sur read() (ConPTY n'EOF pas sur
+        // sortie propre) et retient un Arc<Pane> -> strong_count >= 2.
+        // kill() ferme le master -> EOF -> le thread lecteur se termine.
+        pane.kill();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&pane) > 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            Arc::strong_count(&pane),
+            1,
+            "après kill (master fermé), le thread lecteur doit relâcher son Arc<Pane>"
+        );
     }
 }
