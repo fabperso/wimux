@@ -9,7 +9,7 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -57,6 +57,9 @@ pub struct Notifier {
     cond: Condvar,
     /// Cloche (BEL) en attente pour cette session (G4).
     bell: AtomicBool,
+    /// Horodatage de la dernière sortie (dernier `bump`), pour le calcul du
+    /// statut d'agent (M1).
+    last_output_at: Mutex<Instant>,
 }
 
 impl Notifier {
@@ -65,6 +68,7 @@ impl Notifier {
             generation: Mutex::new(0),
             cond: Condvar::new(),
             bell: AtomicBool::new(false),
+            last_output_at: Mutex::new(Instant::now()),
         })
     }
 
@@ -72,11 +76,18 @@ impl Notifier {
     pub fn bump(&self) {
         let mut g = self.generation.lock().unwrap();
         *g += 1;
+        *self.last_output_at.lock().unwrap() = Instant::now();
         self.cond.notify_all();
     }
 
     pub fn generation(&self) -> u64 {
         *self.generation.lock().unwrap()
+    }
+
+    /// Durée écoulée depuis la dernière sortie (dernier `bump`). Sert au calcul
+    /// du statut d'agent (M1).
+    pub fn last_output_elapsed(&self) -> Duration {
+        self.last_output_at.lock().unwrap().elapsed()
     }
 
     pub fn notify(&self) {
@@ -446,6 +457,11 @@ impl Pane {
 
     pub fn is_alive(&self) -> bool {
         self.state.lock().unwrap().exit_code.is_none()
+    }
+
+    /// Code de sortie du processus du volet, ou `None` s'il tourne encore (M1).
+    pub fn exit_code(&self) -> Option<u32> {
+        self.state.lock().unwrap().exit_code
     }
 
     pub fn kill(&self) {
@@ -842,5 +858,35 @@ mod tests {
             assert_eq!(c2.ch, c1.ch, "caractere different en colonne {col}");
             assert_eq!(c2.pen, c1.pen, "pen different en colonne {col}");
         }
+    }
+
+    #[test]
+    fn notifier_horodatage_apres_bump() {
+        let n = Notifier::new();
+        n.bump();
+        assert!(
+            n.last_output_elapsed() < Duration::from_secs(1),
+            "juste après un bump, l'écoulement doit être petit"
+        );
+    }
+
+    #[test]
+    fn notifier_neuf_a_un_horodatage_defini() {
+        let n = Notifier::new();
+        // Un Notifier neuf initialise last_output_at à Instant::now() : l'écoulement
+        // est défini et petit tout de suite après la création.
+        assert!(n.last_output_elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn exit_code_none_pour_volet_vivant() {
+        let n = Notifier::new();
+        let p = Pane::spawn(20, 5, "cmd.exe", n).unwrap();
+        assert_eq!(
+            p.exit_code(),
+            None,
+            "un volet vivant n'a pas de code de sortie"
+        );
+        p.kill();
     }
 }
