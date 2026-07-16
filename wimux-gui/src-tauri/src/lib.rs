@@ -89,6 +89,22 @@ struct SessionDto {
     attached: bool,
     activity: bool,
     bell: bool,
+    agent: bool,
+    agent_status: Option<String>,
+}
+
+/// Libellé stable d'un `AgentStatus` pour le frontend (mappé sur un glyphe côté
+/// TypeScript).
+fn agent_status_label(status: wimux_protocol::AgentStatus) -> String {
+    use wimux_protocol::AgentStatus::*;
+    match status {
+        Working => "Working",
+        Idle => "Idle",
+        Attention => "Attention",
+        Done => "Done",
+        Error => "Error",
+    }
+    .to_string()
 }
 
 #[tauri::command]
@@ -103,6 +119,8 @@ fn list_sessions() -> Result<Vec<SessionDto>, String> {
                     attached: s.attached,
                     activity: s.activity,
                     bell: s.bell,
+                    agent: s.agent,
+                    agent_status: s.agent_status.map(agent_status_label),
                 })
                 .collect()),
             ServerMessage::Error(e) => Err(e),
@@ -115,6 +133,48 @@ fn list_sessions() -> Result<Vec<SessionDto>, String> {
 fn create_session(name: Option<String>) -> Result<String, String> {
     control(
         || ClientMessage::CreateSession { name },
+        |msg| match msg {
+            ServerMessage::SessionCreated { name } => Ok(name),
+            ServerMessage::Error(e) => Err(e),
+            _ => Err("réponse inattendue".into()),
+        },
+    )
+}
+
+#[derive(serde::Serialize)]
+struct AgentTemplateDto {
+    name: String,
+}
+
+#[tauri::command]
+fn list_agent_templates() -> Result<Vec<AgentTemplateDto>, String> {
+    control(
+        || ClientMessage::ListAgentTemplates,
+        |msg| match msg {
+            ServerMessage::AgentTemplates(v) => Ok(v
+                .into_iter()
+                .map(|t| AgentTemplateDto { name: t.name })
+                .collect()),
+            ServerMessage::Error(e) => Err(e),
+            _ => Err("réponse inattendue".into()),
+        },
+    )
+}
+
+#[tauri::command]
+fn create_agent(
+    template: String,
+    prompt: String,
+    cwd: Option<String>,
+    name: Option<String>,
+) -> Result<String, String> {
+    control(
+        || ClientMessage::CreateAgentSession {
+            name,
+            template,
+            prompt,
+            cwd,
+        },
         |msg| match msg {
             ServerMessage::SessionCreated { name } => Ok(name),
             ServerMessage::Error(e) => Err(e),
@@ -223,7 +283,9 @@ pub fn run() {
             list_sessions,
             create_session,
             kill_session,
-            rename_session
+            rename_session,
+            list_agent_templates,
+            create_agent
         ])
         .run(tauri::generate_context!())
         .expect("erreur au lancement de wimux-gui");
