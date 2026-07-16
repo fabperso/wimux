@@ -40,6 +40,89 @@ listen<string>("pane-error", (e) => {
   console.error("erreur serveur:", e.payload);
 });
 
+// --- W2 : barre d'onglets (fenêtres de la session GUI-attachée) -------------
+type WindowInfo = { name: string | null };
+
+const tabsEl = document.getElementById("tabs")!;
+// Dernière fenêtre active connue : une bascule (changement d'`active`) impose un
+// `reset()` du PaneManager avant le prochain window-layout (pane_id globaux, les
+// snapshots frais repeignent le contenu).
+let lastActiveWindow = -1;
+
+listen<[WindowInfo[], number]>("window-list", (e) => {
+  const [windows, active] = e.payload;
+  if (active !== lastActiveWindow) {
+    paneManager.reset();
+  }
+  lastActiveWindow = active;
+  renderTabs(windows, active);
+});
+
+function renderTabs(windows: WindowInfo[], active: number) {
+  tabsEl.innerHTML = "";
+  windows.forEach((win, i) => {
+    const tab = document.createElement("div");
+    tab.className = "tab" + (i === active ? " active" : "");
+    const label = document.createElement("span");
+    label.className = "tab-label";
+    label.textContent = win.name ?? String(i + 1);
+    tab.appendChild(label);
+    let clickTimer: number | null = null;
+    label.ondblclick = (ev) => {
+      ev.stopPropagation();
+      if (clickTimer !== null) { clearTimeout(clickTimer); clickTimer = null; }
+      startTabRename(tab, i, win.name ?? "");
+    };
+    // Le `×` est masqué s'il ne reste qu'une fenêtre (fermeture interdite).
+    if (windows.length > 1) {
+      const close = document.createElement("span");
+      close.className = "tab-close";
+      close.textContent = "×";
+      close.onclick = (ev) => {
+        ev.stopPropagation();
+        invoke("close_window", { index: i }).catch(() => {});
+      };
+      tab.appendChild(close);
+    }
+    tab.onclick = () => {
+      if (clickTimer !== null) return; // 2e clic d'un double-clic : laisse ondblclick
+      clickTimer = window.setTimeout(() => {
+        clickTimer = null;
+        invoke("select_window", { index: i }).catch(() => {});
+      }, 200);
+    };
+    tabsEl.appendChild(tab);
+  });
+  const add = document.createElement("button");
+  add.className = "tab-add";
+  add.textContent = "+";
+  add.title = "Nouvel onglet";
+  add.onclick = () => { invoke("new_window", {}).catch(() => {}); };
+  tabsEl.appendChild(add);
+}
+
+function startTabRename(tab: HTMLElement, index: number, oldName: string) {
+  const input = document.createElement("input");
+  input.className = "tab-edit";
+  input.value = oldName;
+  tab.replaceChildren(input);
+  input.focus();
+  input.select();
+  let committed = false;
+  const commit = () => {
+    if (committed) return;
+    committed = true;
+    const name = input.value.trim();
+    // Nom vide => le serveur remet le nom à None (affiche la position).
+    invoke("rename_window", { index, name }).catch(() => {});
+  };
+  input.onkeydown = (ev) => {
+    if (ev.key === "Enter") commit();
+    else if (ev.key === "Escape") { committed = true; input.blur(); }
+  };
+  input.onblur = () => commit();
+}
+
 type SessionDto = {
   name: string;
   attached: boolean;
@@ -64,6 +147,7 @@ async function switchTo(name: string) {
     }
   }
   paneManager.reset();
+  lastActiveWindow = -1; // force le rendu des onglets + reset au 1er window-list de la nouvelle session
   await invoke("attach_session", { session: name }).catch((e) =>
     console.error("attach:", e),
   );

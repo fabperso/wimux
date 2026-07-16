@@ -151,3 +151,25 @@ ou une directive `set agent-worktree-root <chemin>` dans `%USERPROFILE%\.wimux.c
    disparaissent (`git -C <repo> worktree list` / `git branch` le confirment).
 5. Un **repo non-git** (ou un chemin invalide) affiche l'erreur dans le dialogue,
    sans créer ni session ni worktree.
+
+## Vérification manuelle W2 (onglets terminaux)
+
+Prérequis : rebuild + redémarrage du daemon (changement de protocole), puis
+`npm run tauri dev`. S'attacher à une session.
+
+1. **État initial** : une session neuve affiche un seul onglet (libellé « 1 »),
+   sans `×` (fermeture de la dernière fenêtre interdite), et un bouton `+`.
+2. **Créer** : cliquer `+` → un 2e onglet apparaît (« 2 »), devient actif, et la
+   zone de volets se réinitialise sur le shell de la nouvelle fenêtre.
+3. **Basculer** : cliquer l'onglet « 1 » → le contenu revient à la 1re fenêtre
+   (les volets et leur sortie suivent la bascule). L'onglet actif est surligné
+   (bordure haute bleue).
+4. **Renommer** : double-cliquer un onglet → champ d'édition inline ; taper
+   « build » + Entrée → le libellé devient « build ». Vider le nom + Entrée →
+   le libellé revient à la position.
+5. **Fermer** : avec ≥ 2 onglets, survoler un onglet → un `×` apparaît ; cliquer
+   → l'onglet disparaît. Quand il ne reste qu'un onglet, le `×` est masqué
+   (le dernier onglet ne peut pas être fermé).
+6. **Non-régression volets** : dans un onglet, découper un volet (W1/G3),
+   redimensionner la bordure, fermer un volet — tout fonctionne comme avant, par
+   onglet.
