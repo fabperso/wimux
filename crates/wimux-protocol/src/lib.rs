@@ -145,6 +145,14 @@ pub struct Frame {
     pub cells: Vec<Cell>,
 }
 
+/// Résumé d'une fenêtre (onglet) d'une session GUI-attachée (W2). La GUI affiche
+/// `name` s'il est présent, sinon la position (1-based).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowInfo {
+    /// Nom explicite de la fenêtre, ou `None` (la GUI affiche alors la position).
+    pub name: Option<String>,
+}
+
 /// Messages client -> serveur.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -253,6 +261,22 @@ pub enum ClientMessage {
         base_repo: String,
         count: u32,
     },
+    /// Crée une fenêtre (onglet) dans la session GUI-attachée et la rend active (W2).
+    NewWindow,
+    /// Rend active la fenêtre `index` de la session GUI-attachée (W2).
+    SelectWindow {
+        index: u32,
+    },
+    /// Ferme la fenêtre `index` (tue ses volets) ; no-op s'il ne reste qu'une
+    /// fenêtre (W2).
+    CloseWindow {
+        index: u32,
+    },
+    /// Nomme la fenêtre `index` ; un nom vide efface le nom (W2).
+    RenameWindow {
+        index: u32,
+        name: String,
+    },
 }
 
 /// Messages serveur -> client.
@@ -309,6 +333,12 @@ pub enum ServerMessage {
     BatchCreated {
         group: String,
         sessions: Vec<String>,
+    },
+    /// Liste des fenêtres (onglets) de la session GUI-attachée (W2). Émis à
+    /// l'attache (état initial) et après chaque opération de fenêtre.
+    WindowList {
+        windows: Vec<WindowInfo>,
+        active: u32,
     },
 }
 
@@ -656,6 +686,76 @@ mod tests {
             ServerMessage::BatchCreated { group, sessions } => {
                 assert_eq!(group, "batch0");
                 assert_eq!(sessions, vec!["echo-batch0-0", "echo-batch0-1"]);
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_window_info_et_liste() {
+        let msg = ServerMessage::WindowList {
+            windows: vec![
+                WindowInfo {
+                    name: Some("build".into()),
+                },
+                WindowInfo { name: None },
+            ],
+            active: 1,
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ServerMessage>(&mut cur).unwrap() {
+            ServerMessage::WindowList { windows, active } => {
+                assert_eq!(active, 1);
+                assert_eq!(windows.len(), 2);
+                assert_eq!(windows[0].name.as_deref(), Some("build"));
+                assert_eq!(windows[1].name, None);
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_new_window() {
+        let mut buf = Vec::new();
+        send(&mut buf, &ClientMessage::NewWindow).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        assert!(matches!(
+            recv::<_, ClientMessage>(&mut cur).unwrap(),
+            ClientMessage::NewWindow
+        ));
+    }
+
+    #[test]
+    fn aller_retour_select_et_close_window() {
+        let mut buf = Vec::new();
+        send(&mut buf, &ClientMessage::SelectWindow { index: 2 }).unwrap();
+        send(&mut buf, &ClientMessage::CloseWindow { index: 3 }).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ClientMessage>(&mut cur).unwrap() {
+            ClientMessage::SelectWindow { index } => assert_eq!(index, 2),
+            _ => panic!("mauvais variant"),
+        }
+        match recv::<_, ClientMessage>(&mut cur).unwrap() {
+            ClientMessage::CloseWindow { index } => assert_eq!(index, 3),
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_rename_window() {
+        let msg = ClientMessage::RenameWindow {
+            index: 0,
+            name: "build".into(),
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ClientMessage>(&mut cur).unwrap() {
+            ClientMessage::RenameWindow { index, name } => {
+                assert_eq!(index, 0);
+                assert_eq!(name, "build");
             }
             _ => panic!("mauvais variant"),
         }

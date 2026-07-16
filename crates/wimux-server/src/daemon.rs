@@ -815,6 +815,10 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 send(&mut wr, &reply)?;
             }
             ClientMessage::Hello(_) => {}
+            ClientMessage::NewWindow => {}
+            ClientMessage::SelectWindow { .. } => {}
+            ClientMessage::CloseWindow { .. } => {}
+            ClientMessage::RenameWindow { .. } => {}
         }
     }
 
