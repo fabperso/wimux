@@ -12,6 +12,8 @@
 
 use std::collections::HashMap;
 
+use wimux_protocol::AgentTemplate;
+
 /// Action déclenchée par une touche de préfixe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -48,6 +50,8 @@ pub struct Config {
     pub bindings: HashMap<u8, Action>,
     /// Seuil (secondes) séparant *Travaille* de *Au repos* pour un agent (M1).
     pub agent_idle_seconds: u64,
+    /// Modèles d'agents configurés (M2), directive `agent-template`.
+    pub agent_templates: Vec<AgentTemplate>,
 }
 
 impl Default for Config {
@@ -79,6 +83,7 @@ impl Default for Config {
             mouse: true,
             bindings,
             agent_idle_seconds: 4,
+            agent_templates: Vec::new(),
         }
     }
 }
@@ -115,6 +120,13 @@ impl Config {
                     if let Ok(v) = n.parse::<u64>() {
                         self.agent_idle_seconds = v;
                     }
+                }
+                ["agent-template", name, program, args @ ..] => {
+                    self.agent_templates.push(AgentTemplate {
+                        name: name.to_string(),
+                        program: program.to_string(),
+                        args: args.iter().map(|s| s.to_string()).collect(),
+                    });
                 }
                 ["bind", key, rest @ ..] => {
                     if let (Some(b), Some(action)) = (parse_key(key), parse_action(rest)) {
@@ -246,5 +258,46 @@ mod tests {
         let mut c = Config::default();
         c.apply("set agent-idle-seconds abc\n");
         assert_eq!(c.agent_idle_seconds, 4);
+    }
+
+    #[test]
+    fn agent_templates_defaut_vide() {
+        assert!(Config::default().agent_templates.is_empty());
+    }
+
+    #[test]
+    fn agent_template_avec_placeholder() {
+        let mut c = Config::default();
+        c.apply("agent-template claude claude -p {prompt}\n");
+        assert_eq!(c.agent_templates.len(), 1);
+        let t = &c.agent_templates[0];
+        assert_eq!(t.name, "claude");
+        assert_eq!(t.program, "claude");
+        assert_eq!(t.args, vec!["-p".to_string(), "{prompt}".to_string()]);
+    }
+
+    #[test]
+    fn agent_template_sans_arg() {
+        let mut c = Config::default();
+        c.apply("agent-template shell cmd.exe\n");
+        assert_eq!(c.agent_templates.len(), 1);
+        let t = &c.agent_templates[0];
+        assert_eq!(t.name, "shell");
+        assert_eq!(t.program, "cmd.exe");
+        assert!(t.args.is_empty());
+    }
+
+    #[test]
+    fn plusieurs_agent_templates() {
+        let mut c = Config::default();
+        c.apply("agent-template a cmd.exe /c echo {prompt}\nagent-template b pwsh.exe\n");
+        assert_eq!(c.agent_templates.len(), 2);
+        assert_eq!(c.agent_templates[0].name, "a");
+        assert_eq!(
+            c.agent_templates[0].args,
+            vec!["/c".to_string(), "echo".to_string(), "{prompt}".to_string()]
+        );
+        assert_eq!(c.agent_templates[1].name, "b");
+        assert!(c.agent_templates[1].args.is_empty());
     }
 }
