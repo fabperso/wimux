@@ -1064,3 +1064,150 @@ fn cloche_marquee_pour_session_inactive() {
     let _ = send(&mut w, &ClientMessage::Kill { name: "B".into() });
     std::thread::sleep(Duration::from_millis(200));
 }
+
+// --- M2 : templates d'agents et création de session agent ----------------
+
+#[test]
+fn list_agent_templates_renvoie_les_modeles() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-tpllist", std::process::id());
+    common::start_daemon_with_config(
+        &pipe,
+        "agent-template echo cmd.exe /c echo {prompt}\nagent-template shell cmd.exe\n",
+    );
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::ListAgentTemplates).unwrap();
+    }
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r).unwrap() {
+        ServerMessage::AgentTemplates(v) => {
+            assert!(
+                v.iter().any(|t| t.name == "echo"),
+                "modèle 'echo' absent : {v:?}"
+            );
+            assert!(
+                v.iter().any(|t| t.name == "shell"),
+                "modèle 'shell' absent : {v:?}"
+            );
+        }
+        other => panic!("attendu AgentTemplates, reçu {other:?}"),
+    }
+}
+
+#[test]
+fn create_agent_session_one_shot_apparait_agent_puis_done() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-agone", std::process::id());
+    common::start_daemon_with_config(&pipe, "agent-template echo cmd.exe /c echo {prompt}\n");
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::CreateAgentSession {
+                name: Some("bot".into()),
+                template: "echo".into(),
+                prompt: "salut".into(),
+                cwd: None,
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &PipeConn = &conn;
+    let created = match recv::<_, ServerMessage>(&mut r).unwrap() {
+        ServerMessage::SessionCreated { name } => name,
+        other => panic!("attendu SessionCreated, reçu {other:?}"),
+    };
+    assert_eq!(created, "bot");
+
+    // La session doit apparaître dans List, marquée agent, puis passer à Done.
+    let ok = poll_list_until(&pipe, 20, |list| {
+        list.iter().any(|s| {
+            s.name == "bot" && s.agent && s.agent_status == Some(wimux_protocol::AgentStatus::Done)
+        })
+    });
+    assert!(
+        ok,
+        "la session agent one-shot devrait être Done : {:?}",
+        fetch_list(&pipe)
+    );
+
+    let mut w: &PipeConn = &conn;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "bot".into() });
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn create_agent_session_stdin_prompt_termine() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-agstdin", std::process::id());
+    common::start_daemon_with_config(&pipe, "agent-template shell cmd.exe\n");
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::CreateAgentSession {
+                name: Some("sh".into()),
+                template: "shell".into(),
+                prompt: "exit 0".into(),
+                cwd: None,
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &PipeConn = &conn;
+    assert!(
+        matches!(
+            recv::<_, ServerMessage>(&mut r).unwrap(),
+            ServerMessage::SessionCreated { .. }
+        ),
+        "la création de l'agent stdin doit répondre SessionCreated"
+    );
+    // Le prompt "exit 0" envoyé sur stdin (+ Entrée) fait sortir cmd.exe -> Done.
+    let ok = poll_list_until(&pipe, 20, |list| {
+        list.iter().any(|s| {
+            s.name == "sh" && s.agent && s.agent_status == Some(wimux_protocol::AgentStatus::Done)
+        })
+    });
+    assert!(
+        ok,
+        "l'agent stdin devrait se terminer (Done) : {:?}",
+        fetch_list(&pipe)
+    );
+
+    let mut w: &PipeConn = &conn;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "sh".into() });
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn create_agent_session_modele_inconnu_renvoie_error() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-agunknown", std::process::id());
+    common::start_daemon_with_config(&pipe, "agent-template echo cmd.exe /c echo {prompt}\n");
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::CreateAgentSession {
+                name: None,
+                template: "absent".into(),
+                prompt: "x".into(),
+                cwd: None,
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &PipeConn = &conn;
+    assert!(
+        matches!(
+            recv::<_, ServerMessage>(&mut r).unwrap(),
+            ServerMessage::Error(_)
+        ),
+        "un modèle inconnu doit répondre Error"
+    );
+}

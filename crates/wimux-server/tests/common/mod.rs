@@ -76,3 +76,16 @@ pub fn wait_for<F: Fn(&wimux_protocol::ServerMessage) -> bool>(
     }
     false
 }
+
+/// Démarre un démon de test avec une config construite depuis `conf` (contenu
+/// façon `wimux.conf`, appliqué via `Config::apply`). Évite de toucher au
+/// fichier utilisateur ou à des variables d'environnement globales.
+pub fn start_daemon_with_config(pipe: &str, conf: &str) {
+    let p = pipe.to_string();
+    let mut config = wimux_server::config::Config::default();
+    config.apply(conf);
+    std::thread::spawn(move || {
+        let _ = daemon::run_on_with_config(&p, config);
+    });
+    std::thread::sleep(Duration::from_millis(150));
+}

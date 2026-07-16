@@ -15,7 +15,8 @@ use std::thread::JoinHandle;
 use anyhow::Result;
 use wimux_protocol::transport::{PipeConn, PipeListener, user_pipe_name};
 use wimux_protocol::{
-    ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, SessionInfo, recv, send,
+    AgentTemplate, ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, SessionInfo,
+    recv, send,
 };
 
 use crate::config::{Action, Config};
@@ -32,9 +33,15 @@ pub struct Server {
 
 impl Server {
     fn new() -> Arc<Server> {
+        Self::with_config(Config::load())
+    }
+
+    /// Construit un serveur avec une config donnée (utile aux tests qui doivent
+    /// injecter des modèles d'agents sans toucher au fichier utilisateur).
+    fn with_config(config: Config) -> Arc<Server> {
         Arc::new(Server {
             sessions: Mutex::new(HashMap::new()),
-            config: Config::load(),
+            config,
             gui_viewed: Mutex::new(None),
         })
     }
@@ -129,6 +136,83 @@ impl Server {
         Ok(session)
     }
 
+    /// Modèles d'agents configurés (M2).
+    fn agent_templates(&self) -> Vec<AgentTemplate> {
+        self.config.agent_templates.clone()
+    }
+
+    /// Crée une session agent depuis un modèle. Substitue `{prompt}` dans les
+    /// args s'il est présent ; sinon signale un envoi stdin. Nom auto
+    /// `<template>-<n>` si `name` absent. Insère la session et, en cas de
+    /// livraison stdin, envoie `prompt` + `\r` au volet racine après le spawn.
+    fn create_agent_session(
+        &self,
+        name: Option<String>,
+        template: &str,
+        prompt: &str,
+        cwd: Option<&str>,
+    ) -> Result<Arc<Session>, String> {
+        // Résoudre le modèle par son nom.
+        let tpl = self
+            .config
+            .agent_templates
+            .iter()
+            .find(|t| t.name == template)
+            .cloned()
+            .ok_or_else(|| format!("modèle d'agent inconnu : {template}"))?;
+
+        // Substituer {prompt} dans les args ; noter s'il reste à livrer sur stdin.
+        let mut has_placeholder = false;
+        let args: Vec<String> = tpl
+            .args
+            .iter()
+            .map(|a| {
+                if a.contains("{prompt}") {
+                    has_placeholder = true;
+                    a.replace("{prompt}", prompt)
+                } else {
+                    a.clone()
+                }
+            })
+            .collect();
+        let stdin_prompt = !has_placeholder;
+
+        self.reap();
+        let mut sessions = self.sessions.lock().unwrap();
+
+        // Nom : fourni (doit être libre) ou auto `<template>-<n>`.
+        let name = match name {
+            Some(n) => {
+                if sessions.contains_key(&n) {
+                    return Err(format!("la session « {n} » existe déjà"));
+                }
+                n
+            }
+            None => {
+                let mut i = 0;
+                loop {
+                    let candidate = format!("{template}-{i}");
+                    if !sessions.contains_key(&candidate) {
+                        break candidate;
+                    }
+                    i += 1;
+                }
+            }
+        };
+
+        let session = Session::new_agent(name.clone(), 80, 24, &tpl.program, &args, cwd)
+            .map_err(|e| format!("création de la session agent : {e}"))?;
+        sessions.insert(name, Arc::clone(&session));
+        drop(sessions);
+
+        if stdin_prompt && !prompt.is_empty() {
+            let mut line = prompt.as_bytes().to_vec();
+            line.push(b'\r');
+            session.send_input(&line);
+        }
+        Ok(session)
+    }
+
     fn rename_session(&self, from: &str, to: &str) -> Result<(), String> {
         let mut sessions = self.sessions.lock().unwrap();
         if !sessions.contains_key(from) {
@@ -152,7 +236,16 @@ pub fn run() -> Result<()> {
 
 /// Lance le démon sur un pipe nommé donné (utile pour les tests isolés).
 pub fn run_on(pipe_name: &str) -> Result<()> {
-    let server = Server::new();
+    serve(Server::new(), pipe_name)
+}
+
+/// Lance le démon avec une configuration injectée (tests : modèles d'agents).
+pub fn run_on_with_config(pipe_name: &str, config: Config) -> Result<()> {
+    serve(Server::with_config(config), pipe_name)
+}
+
+/// Boucle d'acceptation partagée par `run_on` et `run_on_with_config`.
+fn serve(server: Arc<Server>, pipe_name: &str) -> Result<()> {
     let listener = PipeListener::bind(pipe_name);
 
     loop {
@@ -567,8 +660,27 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
-            ClientMessage::ListAgentTemplates => {} // câblé en Task 5
-            ClientMessage::CreateAgentSession { .. } => {} // câblé en Task 5
+            ClientMessage::ListAgentTemplates => {
+                let mut wr: &PipeConn = &conn;
+                send(
+                    &mut wr,
+                    &ServerMessage::AgentTemplates(server.agent_templates()),
+                )?;
+            }
+            ClientMessage::CreateAgentSession {
+                name,
+                template,
+                prompt,
+                cwd,
+            } => {
+                let reply =
+                    match server.create_agent_session(name, &template, &prompt, cwd.as_deref()) {
+                        Ok(s) => ServerMessage::SessionCreated { name: s.name() },
+                        Err(e) => ServerMessage::Error(e),
+                    };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
             ClientMessage::Hello(_) => {}
         }
     }
