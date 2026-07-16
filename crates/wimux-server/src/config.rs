@@ -46,6 +46,8 @@ pub struct Config {
     pub mouse: bool,
     /// Table des raccourcis de préfixe (octet -> action).
     pub bindings: HashMap<u8, Action>,
+    /// Seuil (secondes) séparant *Travaille* de *Au repos* pour un agent (M1).
+    pub agent_idle_seconds: u64,
 }
 
 impl Default for Config {
@@ -76,6 +78,7 @@ impl Default for Config {
                 .unwrap_or_else(|_| "powershell.exe".to_string()),
             mouse: true,
             bindings,
+            agent_idle_seconds: 4,
         }
     }
 }
@@ -108,6 +111,11 @@ impl Config {
                 }
                 ["set", "default-shell", shell] => self.default_shell = shell.to_string(),
                 ["set", "mouse", value] => self.mouse = matches!(*value, "on" | "true" | "1"),
+                ["set", "agent-idle-seconds", n] => {
+                    if let Ok(v) = n.parse::<u64>() {
+                        self.agent_idle_seconds = v;
+                    }
+                }
                 ["bind", key, rest @ ..] => {
                     if let (Some(b), Some(action)) = (parse_key(key), parse_action(rest)) {
                         self.bindings.insert(b, action);
@@ -219,5 +227,24 @@ mod tests {
         let mut c = Config::default();
         c.apply("# commentaire\n\nset default-shell pwsh.exe\n");
         assert_eq!(c.default_shell, "pwsh.exe");
+    }
+
+    #[test]
+    fn agent_idle_seconds_defaut_est_4() {
+        assert_eq!(Config::default().agent_idle_seconds, 4);
+    }
+
+    #[test]
+    fn set_agent_idle_seconds_modifie_le_seuil() {
+        let mut c = Config::default();
+        c.apply("set agent-idle-seconds 10\n");
+        assert_eq!(c.agent_idle_seconds, 10);
+    }
+
+    #[test]
+    fn set_agent_idle_seconds_invalide_ignore() {
+        let mut c = Config::default();
+        c.apply("set agent-idle-seconds abc\n");
+        assert_eq!(c.agent_idle_seconds, 4);
     }
 }
