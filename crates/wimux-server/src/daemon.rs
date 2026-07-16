@@ -73,8 +73,10 @@ impl Server {
                     attached: s.attached_count() > 0,
                     activity,
                     bell,
-                    agent: false,       // calculé en Task 5
-                    agent_status: None, // calculé en Task 5
+                    agent: s.is_agent(),
+                    agent_status: s.agent_status(std::time::Duration::from_secs(
+                        self.config.agent_idle_seconds,
+                    )),
                 }
             })
             .collect();
