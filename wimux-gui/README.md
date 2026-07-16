@@ -107,3 +107,24 @@ Prérequis : deux sessions (ex. `dev` et `build`), la GUI attachée à `dev`.
    - **Attendu :** sa pastille **disparaît immédiatement** (effacement optimiste),
      et le sondage suivant la maintient éteinte tant que `build` est affichée.
 4. La session **active** n'affiche jamais de pastille.
+
+## Vérification manuelle M2 (agents)
+
+Déclarer au moins un modèle dans `%USERPROFILE%\.wimux.conf` :
+
+```text
+agent-template echo   cmd.exe /c echo {prompt}
+agent-template shell  cmd.exe
+```
+
+Rebuild + **redémarrer le démon détaché** (piège du serveur persistant), puis
+lancer la GUI (`npm run tauri dev` dans `wimux-gui/`) et vérifier :
+
+1. Cliquer **+ agent** : le dialogue s'ouvre, le menu liste `echo` et `shell`.
+2. Modèle `echo`, prompt `bonjour`, cwd/nom vides → **Lancer**. La GUI bascule
+   sur `echo-0` ; le glyphe passe ⚙ (*Working*, bleu) puis ✓ (*Done*, vert).
+3. Modèle `shell` (interactif), prompt `echo salut` → **Lancer** : le prompt est
+   injecté sur stdin (+ Entrée) ; la session vit puis (après `exit`) affiche ✓.
+4. Un modèle absent / un cwd invalide affiche l'erreur dans le dialogue, sans
+   créer de session.
+5. Fermer un agent terminé via le `×` du rail.

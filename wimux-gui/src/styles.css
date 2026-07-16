@@ -34,3 +34,29 @@ body { margin: 0; }
 .separator:hover { background: #0a84ff; }
 .sep-v { width: 4px; cursor: col-resize; }
 .sep-h { height: 4px; cursor: row-resize; }
+
+/* M2 : actions du rail + glyphe d'agent + dialogue modal */
+#rail-actions { display: flex; }
+#rail-actions button { flex: 1; }
+#new-agent { border: none; background: #2d2d2d; color: #ccc; padding: 8px; cursor: pointer; font-size: 13px; }
+#new-agent:hover { background: #37373d; }
+
+.session .agent-glyph { flex: 0 0 auto; line-height: 1; font-size: 13px; }
+.session .agent-glyph.working { color: #0a84ff; }
+.session .agent-glyph.idle { color: #888; }
+.session .agent-glyph.attention { color: #ff9f0a; }
+.session .agent-glyph.done { color: #30d158; }
+.session .agent-glyph.error { color: #ff453a; }
+
+.modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal-overlay.hidden { display: none; }
+.modal { background: #252526; border: 1px solid #333; border-radius: 6px; padding: 16px; width: 360px; max-width: 90vw; display: flex; flex-direction: column; gap: 10px; color: #d4d4d4; }
+.modal h2 { margin: 0 0 4px; font-size: 15px; }
+.modal label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #aaa; }
+.modal select, .modal input, .modal textarea { background: #1e1e1e; color: #fff; border: 1px solid #3c3c3c; border-radius: 3px; padding: 6px; font: inherit; }
+.modal textarea { resize: vertical; }
+.modal .agent-error { color: #ff453a; font-size: 12px; min-height: 14px; }
+.modal-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+.modal-buttons button { border: none; border-radius: 3px; padding: 6px 14px; cursor: pointer; }
+#agent-cancel { background: #3a3a3a; color: #ddd; }
+#agent-launch { background: #0a84ff; color: #fff; }

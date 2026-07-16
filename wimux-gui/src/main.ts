@@ -40,7 +40,16 @@ listen<string>("pane-error", (e) => {
   console.error("erreur serveur:", e.payload);
 });
 
-type SessionDto = { name: string; attached: boolean; activity: boolean; bell: boolean };
+type SessionDto = {
+  name: string;
+  attached: boolean;
+  activity: boolean;
+  bell: boolean;
+  agent: boolean;
+  agent_status: string | null;
+};
+
+type AgentTemplateDto = { name: string };
 
 async function switchTo(name: string) {
   if (name === activeSession) return;
@@ -62,6 +71,28 @@ async function switchTo(name: string) {
 
 let lastSessions: SessionDto[] = [];
 let renaming = false; // suspend le sondage tant qu'une edition de nom est en cours
+
+function agentStatusGlyph(status: string | null): string {
+  switch (status) {
+    case "Working": return "⚙";
+    case "Idle": return "○";
+    case "Attention": return "❗";
+    case "Done": return "✓";
+    case "Error": return "✗";
+    default: return "○";
+  }
+}
+
+function agentStatusClass(status: string | null): string {
+  switch (status) {
+    case "Working": return "working";
+    case "Idle": return "idle";
+    case "Attention": return "attention";
+    case "Done": return "done";
+    case "Error": return "error";
+    default: return "idle";
+  }
+}
 
 function renderRail(sessions: SessionDto[]) {
   lastSessions = sessions;
@@ -88,7 +119,14 @@ function renderRail(sessions: SessionDto[]) {
       clickTimer = window.setTimeout(() => { clickTimer = null; switchTo(s.name); }, 200);
     };
     const isActive = s.name === activeSession;
-    if (!isActive && (s.bell || s.activity)) {
+    if (s.agent) {
+      // Session agent : glyphe de statut (remplace les pastilles G4).
+      const glyph = document.createElement("span");
+      glyph.className = "agent-glyph " + agentStatusClass(s.agent_status);
+      glyph.textContent = agentStatusGlyph(s.agent_status);
+      glyph.title = s.agent_status ?? "agent";
+      el.append(name, glyph, close);
+    } else if (!isActive && (s.bell || s.activity)) {
       // Cloche prioritaire sur l'activité ; rien pour la session active.
       const dot = document.createElement("span");
       dot.className = "dot " + (s.bell ? "bell" : "activity");
@@ -137,6 +175,63 @@ async function refresh() {
     if (!activeSession && sessions.length > 0) { await switchTo(sessions[0].name); }
   } catch { /* serveur absent : on garde l'affichage precedent (rail non modifie) */ }
 }
+
+const agentModal = document.getElementById("agent-modal")!;
+const agentTemplateSel = document.getElementById("agent-template") as HTMLSelectElement;
+const agentPrompt = document.getElementById("agent-prompt") as HTMLTextAreaElement;
+const agentCwd = document.getElementById("agent-cwd") as HTMLInputElement;
+const agentName = document.getElementById("agent-name") as HTMLInputElement;
+const agentError = document.getElementById("agent-error")!;
+
+async function openAgentModal() {
+  agentError.textContent = "";
+  agentPrompt.value = "";
+  agentCwd.value = "";
+  agentName.value = "";
+  agentTemplateSel.innerHTML = "";
+  try {
+    const templates = await invoke<AgentTemplateDto[]>("list_agent_templates");
+    for (const t of templates) {
+      const opt = document.createElement("option");
+      opt.value = t.name;
+      opt.textContent = t.name;
+      agentTemplateSel.append(opt);
+    }
+  } catch (e) {
+    agentError.textContent = "Impossible de charger les modèles : " + e;
+  }
+  agentModal.classList.remove("hidden");
+}
+
+function closeAgentModal() {
+  agentModal.classList.add("hidden");
+}
+
+document.getElementById("new-agent")!.onclick = openAgentModal;
+document.getElementById("agent-cancel")!.onclick = closeAgentModal;
+document.getElementById("agent-launch")!.onclick = async () => {
+  const template = agentTemplateSel.value;
+  if (!template) {
+    agentError.textContent = "Choisissez un modèle.";
+    return;
+  }
+  const prompt = agentPrompt.value;
+  const cwd = agentCwd.value.trim();
+  const name = agentName.value.trim();
+  try {
+    const created = await invoke<string>("create_agent", {
+      template,
+      prompt,
+      cwd: cwd || null,
+      name: name || null,
+    });
+    closeAgentModal();
+    await refresh();
+    await switchTo(created);
+  } catch (e) {
+    agentError.textContent = "Échec : " + e;
+  }
+};
 
 document.getElementById("new-session")!.onclick = async () => {
   const name = await invoke<string>("create_session", { name: null }).catch(() => null);

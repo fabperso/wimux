@@ -11,9 +11,35 @@
     <div id="app">
       <aside id="rail">
         <div id="sessions"></div>
-        <button id="new-session" title="Nouvelle session">+</button>
+        <div id="rail-actions">
+          <button id="new-session" title="Nouvelle session">+</button>
+          <button id="new-agent" title="Lancer un agent">+ agent</button>
+        </div>
       </aside>
       <div id="terminal"></div>
+    </div>
+
+    <div id="agent-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Lancer un agent</h2>
+        <label>Modèle
+          <select id="agent-template"></select>
+        </label>
+        <label>Tâche / prompt
+          <textarea id="agent-prompt" rows="4"></textarea>
+        </label>
+        <label>Répertoire (optionnel)
+          <input id="agent-cwd" type="text" placeholder="cwd du daemon par défaut" />
+        </label>
+        <label>Nom (optionnel)
+          <input id="agent-name" type="text" placeholder="auto : <modèle>-<n>" />
+        </label>
+        <div id="agent-error" class="agent-error"></div>
+        <div class="modal-buttons">
+          <button id="agent-cancel">Annuler</button>
+          <button id="agent-launch">Lancer</button>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
