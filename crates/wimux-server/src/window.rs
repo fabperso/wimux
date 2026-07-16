@@ -59,7 +59,7 @@ struct Border {
 }
 
 pub struct Window {
-    pub name: String,
+    name: Option<String>,
     root: Node,
     panes: HashMap<PaneId, Arc<Pane>>,
     active: PaneId,
@@ -70,12 +70,12 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(name: String, pane: Arc<Pane>) -> Window {
+    pub fn new(pane: Arc<Pane>) -> Window {
         let id = pane.id;
         let mut panes = HashMap::new();
         panes.insert(id, pane);
         Window {
-            name,
+            name: None,
             root: Node::Leaf(id),
             panes,
             active: id,
@@ -83,6 +83,16 @@ impl Window {
             borders: Vec::new(),
             zoomed: false,
         }
+    }
+
+    /// Nom explicite de la fenêtre, ou `None` (W2).
+    pub fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    /// Fixe (ou efface avec `None`) le nom de la fenêtre (W2).
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.name = name;
     }
 
     pub fn is_zoomed(&self) -> bool {
@@ -621,7 +631,7 @@ mod tests {
     fn split_et_close_par_id() {
         let p1 = dummy_pane();
         let id1 = p1.id;
-        let mut win = Window::new("w".into(), p1);
+        let mut win = Window::new(p1);
         let p2 = dummy_pane();
         let id2 = p2.id;
         win.split_pane(id1, SplitDir::LeftRight, p2);
@@ -644,7 +654,7 @@ mod tests {
     fn set_ratio_borne() {
         let p1 = dummy_pane();
         let id1 = p1.id;
-        let mut win = Window::new("w".into(), p1);
+        let mut win = Window::new(p1);
         win.split_pane(id1, SplitDir::TopBottom, dummy_pane());
         let node_id = match win.layout_tree() {
             wimux_protocol::LayoutNode::Split { node_id, .. } => node_id,
@@ -693,5 +703,17 @@ mod tests {
         assert!(axis_matches(SplitDir::LeftRight, true));
         assert!(axis_matches(SplitDir::TopBottom, false));
         assert!(!axis_matches(SplitDir::LeftRight, false));
+    }
+
+    #[test]
+    fn window_name_defaut_none_et_set() {
+        let p = dummy_pane();
+        let mut win = Window::new(p);
+        assert_eq!(win.name(), None);
+        win.set_name(Some("build".into()));
+        assert_eq!(win.name().as_deref(), Some("build"));
+        win.set_name(None);
+        assert_eq!(win.name(), None);
+        win.kill_all();
     }
 }

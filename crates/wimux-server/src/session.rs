@@ -47,7 +47,7 @@ impl Session {
     pub fn new(name: String, cols: u16, rows: u16, shell: &str) -> Result<Arc<Session>> {
         let notifier = Notifier::new();
         let pane = Pane::spawn(cols, content_rows(rows), shell, Arc::clone(&notifier))?;
-        let window = Window::new("win".to_string(), pane);
+        let window = Window::new(pane);
 
         let session = Arc::new(Session {
             name: Mutex::new(name),
@@ -91,7 +91,7 @@ impl Session {
             cwd,
             Arc::clone(&notifier),
         )?;
-        let window = Window::new("win".to_string(), pane);
+        let window = Window::new(pane);
 
         let session = Arc::new(Session {
             name: Mutex::new(name),
@@ -629,8 +629,7 @@ impl Session {
     pub fn new_window(&self) {
         if let Ok(pane) = Pane::spawn(1, 1, &self.shell, Arc::clone(&self.notifier)) {
             let mut inner = self.inner.lock().unwrap();
-            let n = inner.windows.len();
-            inner.windows.push(Window::new(format!("win{n}"), pane));
+            inner.windows.push(Window::new(pane));
             inner.active_window = inner.windows.len() - 1;
             let area = content_area(inner.cols, inner.rows);
             let aw = inner.active_window;
