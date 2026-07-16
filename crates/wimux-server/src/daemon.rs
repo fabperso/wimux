@@ -8,7 +8,7 @@
 //! navigation, détachement...).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -23,6 +23,11 @@ use crate::config::{Action, Config};
 use crate::pane::CopyAction;
 use crate::session::Session;
 use crate::window::{Move, SplitDir};
+use crate::worktree::{self, Worktree};
+
+/// Compteur de lots (M3), unique par démon : garantit des `group` (donc des
+/// branches `wimux/<group>/<i>`) distincts entre fan-outs successifs.
+static NEXT_BATCH_ID: AtomicU64 = AtomicU64::new(0);
 
 pub struct Server {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
@@ -84,7 +89,7 @@ impl Server {
                     agent_status: s.agent_status(std::time::Duration::from_secs(
                         self.config.agent_idle_seconds,
                     )),
-                    group: None, // vraie valeur (`s.group()`) posée en Task 5
+                    group: s.group(),
                 }
             })
             .collect();
@@ -212,6 +217,120 @@ impl Server {
             session.send_input(&line);
         }
         Ok(session)
+    }
+
+    /// Crée un **lot** de `count` sessions agent (M3), chacune dans un worktree
+    /// git de `base_repo`, sur une branche `wimux/<group>/<i>`. Le travail lourd
+    /// (git + spawn) se fait hors verrou `sessions` ; l'insertion des N membres
+    /// est atomique (un seul verrou). Rollback complet en cas d'échec partiel.
+    fn create_agent_batch(
+        &self,
+        template: &str,
+        prompt: &str,
+        base_repo: &str,
+        count: u32,
+    ) -> Result<(String, Vec<String>), String> {
+        // (1) La base doit être un dépôt git.
+        let base = std::path::PathBuf::from(base_repo);
+        if !worktree::is_git_repo(&base) {
+            return Err(format!(
+                "le répertoire de base n'est pas un dépôt git : {base_repo}"
+            ));
+        }
+
+        // (2) Résoudre le modèle par son nom.
+        let tpl = self
+            .config
+            .agent_templates
+            .iter()
+            .find(|t| t.name == template)
+            .cloned()
+            .ok_or_else(|| format!("modèle d'agent inconnu : {template}"))?;
+
+        // Substituer {prompt} dans les args (une fois, commun aux N agents) ;
+        // sinon livraison stdin après spawn (comme M2).
+        let mut has_placeholder = false;
+        let args: Vec<String> = tpl
+            .args
+            .iter()
+            .map(|a| {
+                if a.contains("{prompt}") {
+                    has_placeholder = true;
+                    a.replace("{prompt}", prompt)
+                } else {
+                    a.clone()
+                }
+            })
+            .collect();
+        let stdin_prompt = !has_placeholder;
+
+        // (3) Identifiant de lot unique.
+        let group = format!("batch{}", NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed));
+        let root = &self.config.agent_worktree_root;
+
+        // (4) Boucle i : worktree + spawn, HORS verrou `sessions`. Rollback des
+        // sessions déjà créées (chacune retire son worktree via kill).
+        let rollback = |created: &[(String, Arc<Session>)]| {
+            for (_, s) in created {
+                s.kill();
+            }
+        };
+        let mut created: Vec<(String, Arc<Session>)> = Vec::new();
+        for i in 0..count {
+            let name = format!("{template}-{group}-{i}");
+            let branch = format!("wimux/{group}/{i}");
+            let path = root.join(format!("{group}-{i}"));
+            let Some(path_str) = path.to_str().map(|s| s.to_string()) else {
+                rollback(&created);
+                return Err(format!("chemin de worktree non-UTF-8 : {}", path.display()));
+            };
+
+            // Créer le worktree.
+            if let Err(e) = worktree::add(&base, &path, &branch) {
+                rollback(&created);
+                return Err(format!("échec de création du worktree {i} : {e}"));
+            }
+
+            // Spawn l'agent dans le worktree.
+            match Session::new_agent(name.clone(), 80, 24, &tpl.program, &args, Some(&path_str)) {
+                Ok(session) => {
+                    session.set_group(group.clone());
+                    session.set_worktree(Worktree {
+                        base_repo: base.clone(),
+                        path: path.clone(),
+                        branch: branch.clone(),
+                    });
+                    created.push((name, session));
+                }
+                Err(e) => {
+                    // Worktree orphelin (aucune session ne le porte) : le retirer,
+                    // puis rollback des sessions déjà créées.
+                    worktree::remove(&base, &path, &branch);
+                    rollback(&created);
+                    return Err(format!("échec du lancement de l'agent {i} : {e}"));
+                }
+            }
+        }
+
+        // (5) Insertion atomique des N membres sous un unique verrou.
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            for (name, session) in &created {
+                sessions.insert(name.clone(), Arc::clone(session));
+            }
+        }
+
+        // (6) Livraison stdin si pas de placeholder (comme M2).
+        if stdin_prompt && !prompt.is_empty() {
+            let mut line = prompt.as_bytes().to_vec();
+            line.push(b'\r');
+            for (_, session) in &created {
+                session.send_input(&line);
+            }
+        }
+
+        let names = created.into_iter().map(|(n, _)| n).collect();
+        Ok((group, names))
     }
 
     fn rename_session(&self, from: &str, to: &str) -> Result<(), String> {
@@ -682,7 +801,19 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
-            ClientMessage::CreateAgentBatch { .. } => {} // câblé en Task 5
+            ClientMessage::CreateAgentBatch {
+                template,
+                prompt,
+                base_repo,
+                count,
+            } => {
+                let reply = match server.create_agent_batch(&template, &prompt, &base_repo, count) {
+                    Ok((group, sessions)) => ServerMessage::BatchCreated { group, sessions },
+                    Err(e) => ServerMessage::Error(e),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
             ClientMessage::Hello(_) => {}
         }
     }

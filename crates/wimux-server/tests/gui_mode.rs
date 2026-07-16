@@ -1211,3 +1211,173 @@ fn create_agent_session_modele_inconnu_renvoie_error() {
         "un modèle inconnu doit répondre Error"
     );
 }
+
+// --- M3 : orchestration fan-out (lots d'agents en worktrees) --------------
+
+/// Crée un dépôt git temporaire (init + commit vide) et renvoie son chemin.
+/// Renvoie `None` si git est absent (le test se termine alors proprement).
+fn init_temp_git_repo(label: &str) -> Option<std::path::PathBuf> {
+    let git_ok = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !git_ok {
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("wimux-m3-repo-{}-{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    assert!(git(&["init"]), "git init a échoué");
+    assert!(
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]),
+        "commit initial a échoué"
+    );
+    Some(dir)
+}
+
+#[test]
+fn create_agent_batch_cree_worktrees_puis_les_nettoie() {
+    let Some(repo) = init_temp_git_repo("ok") else {
+        eprintln!("git absent : test create_agent_batch_cree_worktrees_puis_les_nettoie ignoré");
+        return;
+    };
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-batchok", std::process::id());
+    let root = std::env::temp_dir().join(format!("wimux-m3-wt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    // Template déterministe `echo` (= cmd.exe /c echo {prompt}) + racine de worktrees.
+    let conf = format!(
+        "agent-template echo cmd.exe /c echo {{prompt}}\nset agent-worktree-root {}\n",
+        root.display()
+    );
+    common::start_daemon_with_config(&pipe, &conf);
+
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::CreateAgentBatch {
+                template: "echo".into(),
+                prompt: "salut".into(),
+                base_repo: repo.to_string_lossy().into_owned(),
+                count: 2,
+            },
+        )
+        .unwrap();
+    }
+    let (group, names) = {
+        let mut r: &PipeConn = &conn;
+        match recv::<_, ServerMessage>(&mut r).unwrap() {
+            ServerMessage::BatchCreated { group, sessions } => (group, sessions),
+            other => panic!("attendu BatchCreated, reçu {other:?}"),
+        }
+    };
+    assert_eq!(names.len(), 2, "le lot devrait avoir 2 membres : {names:?}");
+
+    // List : 2 sessions du même group, marquées agent.
+    let g = group.clone();
+    let listed = poll_list_until(&pipe, 20, |list| {
+        list.iter()
+            .filter(|s| s.group.as_deref() == Some(g.as_str()) && s.agent)
+            .count()
+            == 2
+    });
+    assert!(
+        listed,
+        "List devrait montrer 2 membres agent du group {group} : {:?}",
+        fetch_list(&pipe)
+    );
+
+    // Les 2 dossiers de worktree existent.
+    let wt0 = root.join(format!("{group}-0"));
+    let wt1 = root.join(format!("{group}-1"));
+    assert!(wt0.exists(), "worktree 0 absent : {}", wt0.display());
+    assert!(wt1.exists(), "worktree 1 absent : {}", wt1.display());
+
+    // Kill des 2 membres : chacun nettoie son worktree.
+    for name in &names {
+        let mut w: &PipeConn = &conn;
+        send(&mut w, &ClientMessage::Kill { name: name.clone() }).unwrap();
+        let mut r: &PipeConn = &conn;
+        let _ = recv::<_, ServerMessage>(&mut r); // Ok
+    }
+
+    // Les dossiers de worktree ont disparu (nettoyage).
+    let gone = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if !wt0.exists() && !wt1.exists() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    assert!(
+        gone,
+        "les worktrees devraient avoir été nettoyés après Kill : {} / {}",
+        wt0.display(),
+        wt1.display()
+    );
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn create_agent_batch_base_non_git_renvoie_error() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-batchnogit", std::process::id());
+    common::start_daemon_with_config(&pipe, "agent-template echo cmd.exe /c echo {prompt}\n");
+    // Dossier existant mais qui n'est PAS un repo git.
+    let notgit = std::env::temp_dir().join(format!("wimux-m3-notgit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&notgit);
+    std::fs::create_dir_all(&notgit).unwrap();
+
+    let conn = Arc::new(connect_retry(&pipe));
+    handshake(&conn);
+    {
+        let mut w: &PipeConn = &conn;
+        send(
+            &mut w,
+            &ClientMessage::CreateAgentBatch {
+                template: "echo".into(),
+                prompt: "x".into(),
+                base_repo: notgit.to_string_lossy().into_owned(),
+                count: 2,
+            },
+        )
+        .unwrap();
+    }
+    let mut r: &PipeConn = &conn;
+    assert!(
+        matches!(
+            recv::<_, ServerMessage>(&mut r).unwrap(),
+            ServerMessage::Error(_)
+        ),
+        "une base non-git doit répondre Error"
+    );
+
+    let _ = std::fs::remove_dir_all(&notgit);
+}
