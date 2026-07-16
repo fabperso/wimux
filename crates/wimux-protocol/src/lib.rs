@@ -67,6 +67,21 @@ pub enum HelloReply {
     },
 }
 
+/// Statut calculé d'une session agent (M1). Sérialisé sur [`SessionInfo`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum AgentStatus {
+    /// Le volet racine produit de la sortie récemment.
+    Working,
+    /// Vivant mais silencieux au-delà du seuil d'inactivité.
+    Idle,
+    /// Une cloche (BEL) est en attente d'être vue.
+    Attention,
+    /// Le volet racine a quitté avec le code 0.
+    Done,
+    /// Le volet racine a quitté avec un code non nul.
+    Error,
+}
+
 /// Résumé d'une session, tel qu'affiché par `wimux list-sessions`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -77,6 +92,10 @@ pub struct SessionInfo {
     pub activity: bool,
     /// BEL explicite reçu depuis la dernière vue GUI (G4).
     pub bell: bool,
+    /// Est-ce une session agent ? (M1)
+    pub agent: bool,
+    /// Statut de l'agent ; `None` si `agent == false` (M1).
+    pub agent_status: Option<AgentStatus>,
 }
 
 /// Sens d'une découpe de volet (miroir du `window::SplitDir` serveur).
@@ -450,6 +469,8 @@ mod tests {
             attached: true,
             activity: true,
             bell: false,
+            agent: false,
+            agent_status: None,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -463,6 +484,32 @@ mod tests {
                 assert!(v[0].attached);
                 assert!(v[0].activity);
                 assert!(!v[0].bell);
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_session_info_agent() {
+        let info = SessionInfo {
+            name: "bot".into(),
+            windows: 1,
+            attached: false,
+            activity: false,
+            bell: false,
+            agent: true,
+            agent_status: Some(AgentStatus::Working),
+        };
+        let msg = ServerMessage::Sessions(vec![info]);
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ServerMessage>(&mut cur).unwrap() {
+            ServerMessage::Sessions(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].name, "bot");
+                assert!(v[0].agent);
+                assert_eq!(v[0].agent_status, Some(AgentStatus::Working));
             }
             _ => panic!("mauvais variant"),
         }
