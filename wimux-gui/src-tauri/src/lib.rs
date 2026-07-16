@@ -91,6 +91,7 @@ struct SessionDto {
     bell: bool,
     agent: bool,
     agent_status: Option<String>,
+    group: Option<String>,
 }
 
 /// Libellé stable d'un `AgentStatus` pour le frontend (mappé sur un glyphe côté
@@ -121,6 +122,7 @@ fn list_sessions() -> Result<Vec<SessionDto>, String> {
                     bell: s.bell,
                     agent: s.agent,
                     agent_status: s.agent_status.map(agent_status_label),
+                    group: s.group,
                 })
                 .collect()),
             ServerMessage::Error(e) => Err(e),
@@ -177,6 +179,28 @@ fn create_agent(
         },
         |msg| match msg {
             ServerMessage::SessionCreated { name } => Ok(name),
+            ServerMessage::Error(e) => Err(e),
+            _ => Err("réponse inattendue".into()),
+        },
+    )
+}
+
+#[tauri::command]
+fn create_batch(
+    template: String,
+    prompt: String,
+    base_repo: String,
+    count: u32,
+) -> Result<String, String> {
+    control(
+        || ClientMessage::CreateAgentBatch {
+            template,
+            prompt,
+            base_repo,
+            count,
+        },
+        |msg| match msg {
+            ServerMessage::BatchCreated { group, .. } => Ok(group),
             ServerMessage::Error(e) => Err(e),
             _ => Err("réponse inattendue".into()),
         },
@@ -285,7 +309,8 @@ pub fn run() {
             kill_session,
             rename_session,
             list_agent_templates,
-            create_agent
+            create_agent,
+            create_batch
         ])
         .run(tauri::generate_context!())
         .expect("erreur au lancement de wimux-gui");
