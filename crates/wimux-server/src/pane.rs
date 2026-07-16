@@ -190,6 +190,9 @@ impl Pane {
 
         let reader_pane = Arc::clone(&pane);
         std::thread::spawn(move || reader_loop(reader_pane, reader));
+
+        let waiter_pane = Arc::clone(&pane);
+        std::thread::spawn(move || wait_for_exit(waiter_pane));
         Ok(pane)
     }
 
@@ -472,6 +475,33 @@ impl Pane {
     }
 }
 
+/// Détecte la sortie du process racine indépendamment du flux de lecture PTY
+/// (M1). Sous Windows, ConPTY ne ferme pas forcément le tuyau de sortie quand
+/// le shell quitte proprement — le pseudo-terminal reste ouvert tant que le
+/// `master` est vivant — donc `reader_loop` peut ne jamais observer d'EOF.
+/// On sonde directement `try_wait()` sur le process.
+fn wait_for_exit(pane: Arc<Pane>) {
+    loop {
+        let done = {
+            let mut st = pane.state.lock().unwrap();
+            if st.exit_code.is_some() {
+                return;
+            }
+            st.child.as_mut().and_then(|c| c.try_wait().ok().flatten())
+        };
+        if let Some(status) = done {
+            let mut st = pane.state.lock().unwrap();
+            if st.exit_code.is_none() {
+                st.exit_code = Some(status.exit_code());
+                drop(st);
+                pane.notifier.bump();
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
     let mut buf = [0u8; 8192];
     loop {
@@ -501,8 +531,13 @@ fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
         }
     }
 
+    // Filet de sécurité : si l'EOF du lecteur arrive avant `wait_for_exit`
+    // (ex. pseudo-console fermée), on détecte quand même la sortie ici.
     let child = {
         let mut st = pane.state.lock().unwrap();
+        if st.exit_code.is_some() {
+            return;
+        }
         st.child.take()
     };
     let code = child
@@ -510,8 +545,12 @@ fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
         .map(|status| status.exit_code())
         .unwrap_or(0);
 
-    pane.state.lock().unwrap().exit_code = Some(code);
-    pane.notifier.bump();
+    let mut st = pane.state.lock().unwrap();
+    if st.exit_code.is_none() {
+        st.exit_code = Some(code);
+        drop(st);
+        pane.notifier.bump();
+    }
 }
 
 // --- Mode copie : vue défilée, sélection, extraction ----------------------
