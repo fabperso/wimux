@@ -105,6 +105,9 @@ pub struct SessionInfo {
     pub agent: bool,
     /// Statut de l'agent ; `None` si `agent == false` (M1).
     pub agent_status: Option<AgentStatus>,
+    /// Identifiant de lot (M3) : les sessions d'un même fan-out le partagent
+    /// (`batch<N>`). `None` pour une session hors lot.
+    pub group: Option<String>,
 }
 
 /// Sens d'une découpe de volet (miroir du `window::SplitDir` serveur).
@@ -242,6 +245,14 @@ pub enum ClientMessage {
         prompt: String,
         cwd: Option<String>,
     },
+    /// Crée un **lot** (M3) : `count` sessions agent depuis un même modèle, chacune
+    /// dans un worktree git de `base_repo`. Orchestration côté serveur (atomique).
+    CreateAgentBatch {
+        template: String,
+        prompt: String,
+        base_repo: String,
+        count: u32,
+    },
 }
 
 /// Messages serveur -> client.
@@ -293,6 +304,12 @@ pub enum ServerMessage {
     Ok,
     /// Liste des modèles d'agents (réponse à `ListAgentTemplates`).
     AgentTemplates(Vec<AgentTemplate>),
+    /// Lot créé (réponse à `CreateAgentBatch`) : identifiant de groupe + noms des
+    /// sessions membres.
+    BatchCreated {
+        group: String,
+        sessions: Vec<String>,
+    },
 }
 
 // --- Cadrage (framing) longueur + postcard --------------------------------
@@ -493,6 +510,7 @@ mod tests {
             bell: false,
             agent: false,
             agent_status: None,
+            group: None,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -521,6 +539,7 @@ mod tests {
             bell: false,
             agent: true,
             agent_status: Some(AgentStatus::Working),
+            group: Some("batch0".into()),
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -532,6 +551,7 @@ mod tests {
                 assert_eq!(v[0].name, "bot");
                 assert!(v[0].agent);
                 assert_eq!(v[0].agent_status, Some(AgentStatus::Working));
+                assert_eq!(v[0].group.as_deref(), Some("batch0"));
             }
             _ => panic!("mauvais variant"),
         }
@@ -591,6 +611,51 @@ mod tests {
                 assert_eq!(template, "claude");
                 assert_eq!(prompt, "corrige le bug");
                 assert_eq!(cwd.as_deref(), Some("C:\\proj"));
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_create_agent_batch() {
+        let msg = ClientMessage::CreateAgentBatch {
+            template: "echo".into(),
+            prompt: "corrige le bug".into(),
+            base_repo: "C:\\proj".into(),
+            count: 3,
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ClientMessage>(&mut cur).unwrap() {
+            ClientMessage::CreateAgentBatch {
+                template,
+                prompt,
+                base_repo,
+                count,
+            } => {
+                assert_eq!(template, "echo");
+                assert_eq!(prompt, "corrige le bug");
+                assert_eq!(base_repo, "C:\\proj");
+                assert_eq!(count, 3);
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_batch_created() {
+        let msg = ServerMessage::BatchCreated {
+            group: "batch0".into(),
+            sessions: vec!["echo-batch0-0".into(), "echo-batch0-1".into()],
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ServerMessage>(&mut cur).unwrap() {
+            ServerMessage::BatchCreated { group, sessions } => {
+                assert_eq!(group, "batch0");
+                assert_eq!(sessions, vec!["echo-batch0-0", "echo-batch0-1"]);
             }
             _ => panic!("mauvais variant"),
         }

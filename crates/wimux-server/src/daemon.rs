@@ -84,6 +84,7 @@ impl Server {
                     agent_status: s.agent_status(std::time::Duration::from_secs(
                         self.config.agent_idle_seconds,
                     )),
+                    group: None, // vraie valeur (`s.group()`) posée en Task 5
                 }
             })
             .collect();
@@ -681,6 +682,7 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
+            ClientMessage::CreateAgentBatch { .. } => {} // câblé en Task 5
             ClientMessage::Hello(_) => {}
         }
     }
