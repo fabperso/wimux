@@ -8,3 +8,4 @@ pub mod pane;
 pub mod pty;
 pub mod session;
 pub mod window;
+pub mod worktree;
