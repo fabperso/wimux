@@ -64,6 +64,49 @@ impl Session {
         Ok(session)
     }
 
+    /// Crée une session agent (M2) : le volet racine exécute `program` + `args`
+    /// dans `cwd`, dans une unique fenêtre, puis la session est marquée agent
+    /// (non-reap + calcul de statut, cf. M1).
+    pub fn new_agent(
+        name: String,
+        cols: u16,
+        rows: u16,
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+    ) -> Result<Arc<Session>> {
+        let notifier = Notifier::new();
+        let pane = Pane::spawn_command(
+            cols,
+            content_rows(rows),
+            program,
+            args,
+            cwd,
+            Arc::clone(&notifier),
+        )?;
+        let window = Window::new("win".to_string(), pane);
+
+        let session = Arc::new(Session {
+            name: Mutex::new(name),
+            notifier,
+            shell: program.to_string(),
+            inner: Mutex::new(Inner {
+                windows: vec![window],
+                active_window: 0,
+                cols,
+                rows,
+                command_line: None,
+            }),
+            attached: AtomicUsize::new(0),
+            last_seen_gen: AtomicU64::new(0),
+            paste_buffer: Mutex::new(String::new()),
+            agent: AtomicBool::new(false),
+        });
+        session.reflow();
+        session.mark_agent();
+        Ok(session)
+    }
+
     pub fn name(&self) -> String {
         self.name.lock().unwrap().clone()
     }
@@ -904,6 +947,55 @@ mod tests {
         assert!(
             s.is_alive(),
             "une session agent survit à la mort de son processus racine"
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn new_agent_est_marquee_agent_et_se_termine() {
+        let s = Session::new_agent(
+            "a".into(),
+            40,
+            12,
+            "cmd.exe",
+            &["/c".into(), "echo".into(), "hi".into()],
+            None,
+        )
+        .unwrap();
+        assert!(
+            s.is_agent(),
+            "une session créée via new_agent doit être agent"
+        );
+        // Le volet racine (cmd /c echo hi) se termine ; l'agent n'est pas reapé.
+        assert!(
+            poll_status(&s, AgentStatus::Done, 20),
+            "l'agent one-shot aurait dû se terminer (Done), obtenu {:?}",
+            s.agent_status(Duration::from_secs(4))
+        );
+        assert!(
+            s.is_alive(),
+            "une session agent survit à la sortie de son volet racine"
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn new_agent_avec_cwd_demarre() {
+        // Un cwd valide (dossier temp du système) : le spawn réussit et vit.
+        let dir = std::env::temp_dir();
+        let dir = dir.to_str().expect("dossier temp en UTF-8");
+        let s = Session::new_agent("b".into(), 40, 12, "cmd.exe", &[], Some(dir)).unwrap();
+        assert!(s.is_agent());
+        assert!(
+            s.is_alive(),
+            "le volet racine cmd.exe dans un cwd valide doit démarrer"
+        );
+        // Piloté via stdin : exit 0 -> Done.
+        s.send_input(b"exit 0\r\n");
+        assert!(
+            poll_status(&s, AgentStatus::Done, 20),
+            "cmd.exe après exit 0 doit être Done, obtenu {:?}",
+            s.agent_status(Duration::from_secs(4))
         );
         s.kill();
     }

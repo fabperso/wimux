@@ -143,9 +143,24 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// Crée un volet : ouvre une pseudo-console, lance le shell, démarre le
-    /// thread lecteur.
+    /// Crée un volet exécutant `shell` (jeton unique, sans args). Cas particulier
+    /// de [`Pane::spawn_command`].
     pub fn spawn(cols: u16, rows: u16, shell: &str, notifier: Arc<Notifier>) -> Result<Arc<Pane>> {
+        Pane::spawn_command(cols, rows, shell, &[], None, notifier)
+    }
+
+    /// Crée un volet : ouvre une pseudo-console, lance `program` avec `args` dans
+    /// `cwd` (défaut = cwd du processus), démarre le thread lecteur. Le
+    /// **programme est un seul jeton** (piège `portable-pty`) ; les args sont
+    /// séparés. Sert de volet racine aux sessions agent (M2).
+    pub fn spawn_command(
+        cols: u16,
+        rows: u16,
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+        notifier: Arc<Notifier>,
+    ) -> Result<Arc<Pane>> {
         let cols = cols.max(1);
         let rows = rows.max(1);
         let pty = native_pty_system();
@@ -158,10 +173,15 @@ impl Pane {
             })
             .context("ouverture de la pseudo-console")?;
 
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(args);
+        if let Some(dir) = cwd {
+            cmd.cwd(dir);
+        }
         let child = pair
             .slave
-            .spawn_command(CommandBuilder::new(shell))
-            .context("lancement du shell")?;
+            .spawn_command(cmd)
+            .context("lancement du programme")?;
         let reader = pair
             .master
             .try_clone_reader()
