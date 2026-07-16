@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use wimux_protocol::transport::PipeConn;
-use wimux_protocol::{ClientMessage, LayoutNode, ServerMessage, SessionInfo, SplitDir, recv, send};
+use wimux_protocol::{
+    ClientMessage, LayoutNode, ServerMessage, SessionInfo, SplitDir, WindowInfo, recv, send,
+};
 
 #[test]
 fn attach_gui_recoit_snapshot_puis_flux() {
@@ -562,6 +564,18 @@ fn wait_layout(rx: &Receiver<ServerMessage>, secs: u64) -> (LayoutNode, u64) {
             Ok(_) => {}
             Err(_) if Instant::now() < deadline => {}
             Err(_) => panic!("pas de WindowLayout"),
+        }
+    }
+}
+
+fn wait_window_list(rx: &Receiver<ServerMessage>, secs: u64) -> (Vec<WindowInfo>, u32) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(ServerMessage::WindowList { windows, active }) => return (windows, active),
+            Ok(_) => {}
+            Err(_) if Instant::now() < deadline => {}
+            Err(_) => panic!("pas de WindowList"),
         }
     }
 }
@@ -1380,4 +1394,98 @@ fn create_agent_batch_base_non_git_renvoie_error() {
     );
 
     let _ = std::fs::remove_dir_all(&notgit);
+}
+
+#[test]
+fn onglets_cycle_de_vie() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-w2tabs", std::process::id());
+    start_daemon(&pipe);
+    let (gui, grx) = setup_attached(&pipe, "W");
+
+    // À l'attache : WindowList avec 1 fenêtre, active = 0.
+    let (windows, active) = wait_window_list(&grx, 8);
+    assert_eq!(windows.len(), 1);
+    assert_eq!(active, 0);
+
+    // Capturer le pane_id de la 1re fenêtre (via WindowLayout).
+    let (tree0, _) = wait_layout(&grx, 8);
+    let pane0 = match tree0 {
+        LayoutNode::Leaf { pane_id } => pane_id,
+        _ => panic!("session neuve : arbre attendu = feuille"),
+    };
+
+    // NewWindow -> 2 fenêtres, active = 1 ; WindowLayout d'une nouvelle feuille.
+    {
+        let mut w: &PipeConn = &gui;
+        send(&mut w, &ClientMessage::NewWindow).unwrap();
+    }
+    let (windows, active) = wait_window_list(&grx, 8);
+    assert_eq!(windows.len(), 2);
+    assert_eq!(active, 1);
+    let (tree1, _) = wait_layout(&grx, 8);
+    let pane1 = match tree1 {
+        LayoutNode::Leaf { pane_id } => pane_id,
+        _ => panic!("nouvelle fenêtre : arbre attendu = feuille"),
+    };
+    assert_ne!(pane0, pane1, "les deux fenêtres partagent un pane_id");
+
+    // SelectWindow { index: 0 } -> active = 0.
+    {
+        let mut w: &PipeConn = &gui;
+        send(&mut w, &ClientMessage::SelectWindow { index: 0 }).unwrap();
+    }
+    let (_windows, active) = wait_window_list(&grx, 8);
+    assert_eq!(active, 0);
+
+    // RenameWindow { index: 0, name: "build" } -> WindowList reflète le nom.
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::RenameWindow {
+                index: 0,
+                name: "build".into(),
+            },
+        )
+        .unwrap();
+    }
+    let named = {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match grx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ServerMessage::WindowList { windows, .. }) => {
+                    break windows.first().and_then(|w| w.name.clone());
+                }
+                Ok(_) => {}
+                Err(_) if Instant::now() < deadline => {}
+                Err(_) => panic!("pas de WindowList après RenameWindow"),
+            }
+        }
+    };
+    assert_eq!(named.as_deref(), Some("build"));
+
+    // CloseWindow { index: 1 } -> 1 fenêtre, active = 0.
+    {
+        let mut w: &PipeConn = &gui;
+        send(&mut w, &ClientMessage::CloseWindow { index: 1 }).unwrap();
+    }
+    let (windows, active) = wait_window_list(&grx, 8);
+    assert_eq!(windows.len(), 1);
+    assert_eq!(active, 0);
+
+    // 2e CloseWindow sur l'unique fenêtre : no-op (toujours 1 fenêtre).
+    {
+        let mut w: &PipeConn = &gui;
+        send(&mut w, &ClientMessage::CloseWindow { index: 0 }).unwrap();
+    }
+    let (windows, _) = wait_window_list(&grx, 8);
+    assert_eq!(
+        windows.len(),
+        1,
+        "fermer la dernière fenêtre doit être no-op"
+    );
+
+    let mut w: &PipeConn = &gui;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "W".into() });
+    std::thread::sleep(Duration::from_millis(200));
 }

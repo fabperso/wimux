@@ -462,6 +462,78 @@ impl Drop for GuiAttachment {
     }
 }
 
+/// Rejoue le cycle d'attache GUI pour la fenêtre **active** de `s` : coupe
+/// proprement la diffusion précédente (via le `Drop` de `GuiAttachment`, qui
+/// arrête et joint le thread de pompe), réabonne les volets de la fenêtre active,
+/// envoie `WindowLayout` PUIS un `PaneSnapshot` frais par volet (sous `gui_write`),
+/// puis relance le thread de pompe `PaneOutput`. Mutualisé entre l'attache
+/// initiale (`AttachGui`) et les bascules de fenêtre `NewWindow`/`SelectWindow`/
+/// `CloseWindow` (W2).
+fn reattach_active_window(
+    s: &Arc<Session>,
+    conn: &Arc<PipeConn>,
+    gui_write: &Arc<Mutex<()>>,
+    gui_attach: &mut Option<GuiAttachment>,
+) -> std::io::Result<()> {
+    // (1) Couper la diffusion précédente (Drop => join du thread de pompe).
+    *gui_attach = None;
+
+    // (2) Réabonner les volets de la fenêtre active.
+    let Some((tree, active, snaps, rx, tx)) = s.gui_attach_window() else {
+        let _g = gui_write.lock().unwrap();
+        let mut wr: &PipeConn = conn;
+        return send(
+            &mut wr,
+            &ServerMessage::Error("aucun volet dans la fenêtre active".into()),
+        );
+    };
+
+    // (3) WindowLayout D'ABORD (le frontend crée le xterm à sa réception), puis
+    //     les snapshots. Tout sous le verrou d'écriture GUI.
+    {
+        let _g = gui_write.lock().unwrap();
+        let mut wr: &PipeConn = conn;
+        send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
+        for (pane_id, bytes) in snaps {
+            let mut wr: &PipeConn = conn;
+            send(&mut wr, &ServerMessage::PaneSnapshot { pane_id, bytes })?;
+        }
+    }
+
+    // (4) Thread de pompe : rx.recv_timeout -> PaneOutput (sérialisé par gui_write).
+    let keep_going = Arc::new(AtomicBool::new(true));
+    let conn_out = Arc::clone(conn);
+    let kg = Arc::clone(&keep_going);
+    let gw = Arc::clone(gui_write);
+    let handle = std::thread::spawn(move || {
+        while kg.load(Ordering::Relaxed) {
+            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok((pane_id, bytes)) => {
+                    let mut w: &PipeConn = &conn_out;
+                    let sent = {
+                        let _g = gw.lock().unwrap();
+                        send(&mut w, &ServerMessage::PaneOutput { pane_id, bytes })
+                    };
+                    if sent.is_err() {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+
+    // (5) Stocker la nouvelle attache.
+    *gui_attach = Some(GuiAttachment {
+        keep_going,
+        handle: Some(handle),
+        tx,
+        session: Arc::clone(s),
+    });
+    Ok(())
+}
+
 /// État du décodage du préfixe pour un client.
 #[derive(Default)]
 struct PrefixState {
@@ -576,64 +648,19 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 server.set_gui_viewed(None);
                 match server.get(&session) {
                     Some(s) => {
-                        if let Some((tree, active, snaps, rx, tx)) = s.gui_attach_window() {
-                            // G4 : cette session devient « vue » ; on efface ses indicateurs.
-                            server.set_gui_viewed(Some(session.clone()));
-                            s.mark_seen();
-                            viewed_set = true;
-                            {
-                                let _g = gui_write.lock().unwrap();
-                                let mut wr: &PipeConn = &conn;
-                                send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
-                                for (pane_id, bytes) in snaps {
-                                    let mut wr: &PipeConn = &conn;
-                                    send(&mut wr, &ServerMessage::PaneSnapshot { pane_id, bytes })?;
-                                }
-                            }
-                            let keep_going = Arc::new(AtomicBool::new(true));
-                            let conn_out = Arc::clone(&conn);
-                            let kg = Arc::clone(&keep_going);
-                            let gw = Arc::clone(&gui_write);
-                            let handle = std::thread::spawn(move || {
-                                while kg.load(Ordering::Relaxed) {
-                                    match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                                        Ok((pane_id, bytes)) => {
-                                            let mut w: &PipeConn = &conn_out;
-                                            let sent = {
-                                                let _g = gw.lock().unwrap();
-                                                send(
-                                                    &mut w,
-                                                    &ServerMessage::PaneOutput { pane_id, bytes },
-                                                )
-                                            };
-                                            if sent.is_err() {
-                                                break;
-                                            }
-                                        }
-                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                            break;
-                                        }
-                                    }
-                                }
-                            });
-                            gui_attach = Some(GuiAttachment {
-                                keep_going,
-                                handle: Some(handle),
-                                tx,
-                                session: Arc::clone(&s),
-                            });
-                            gui_session = Some(s);
-                        } else {
+                        // WindowList (état initial des onglets) AVANT layout/snapshots.
+                        {
+                            let (windows, active) = s.window_list();
                             let _g = gui_write.lock().unwrap();
                             let mut wr: &PipeConn = &conn;
-                            send(
-                                &mut wr,
-                                &ServerMessage::Error(format!(
-                                    "aucun volet dans la session : {session}"
-                                )),
-                            )?;
+                            send(&mut wr, &ServerMessage::WindowList { windows, active })?;
                         }
+                        reattach_active_window(&s, &conn, &gui_write, &mut gui_attach)?;
+                        // G4 : cette session devient « vue » ; on efface ses indicateurs.
+                        server.set_gui_viewed(Some(session.clone()));
+                        s.mark_seen();
+                        viewed_set = true;
+                        gui_session = Some(s);
                     }
                     None => {
                         let _g = gui_write.lock().unwrap();
@@ -815,10 +842,69 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 send(&mut wr, &reply)?;
             }
             ClientMessage::Hello(_) => {}
-            ClientMessage::NewWindow => {}
-            ClientMessage::SelectWindow { .. } => {}
-            ClientMessage::CloseWindow { .. } => {}
-            ClientMessage::RenameWindow { .. } => {}
+            ClientMessage::NewWindow => {
+                if let Some(s) = gui_attach.as_ref().map(|ga| Arc::clone(&ga.session)) {
+                    let (windows, active) = s.gui_new_window();
+                    {
+                        let _g = gui_write.lock().unwrap();
+                        let mut wr: &PipeConn = &conn;
+                        send(&mut wr, &ServerMessage::WindowList { windows, active })?;
+                    }
+                    reattach_active_window(&s, &conn, &gui_write, &mut gui_attach)?;
+                }
+            }
+            ClientMessage::SelectWindow { index } => {
+                if let Some(s) = gui_attach.as_ref().map(|ga| Arc::clone(&ga.session)) {
+                    match s.gui_select_window(index) {
+                        Some((windows, active)) => {
+                            {
+                                let _g = gui_write.lock().unwrap();
+                                let mut wr: &PipeConn = &conn;
+                                send(&mut wr, &ServerMessage::WindowList { windows, active })?;
+                            }
+                            reattach_active_window(&s, &conn, &gui_write, &mut gui_attach)?;
+                        }
+                        None => {
+                            // Hors borne : renvoyer la liste courante sans réattache.
+                            let (windows, active) = s.window_list();
+                            let _g = gui_write.lock().unwrap();
+                            let mut wr: &PipeConn = &conn;
+                            send(&mut wr, &ServerMessage::WindowList { windows, active })?;
+                        }
+                    }
+                }
+            }
+            ClientMessage::CloseWindow { index } => {
+                if let Some(s) = gui_attach.as_ref().map(|ga| Arc::clone(&ga.session)) {
+                    match s.gui_close_window(index) {
+                        Some((windows, active)) => {
+                            {
+                                let _g = gui_write.lock().unwrap();
+                                let mut wr: &PipeConn = &conn;
+                                send(&mut wr, &ServerMessage::WindowList { windows, active })?;
+                            }
+                            reattach_active_window(&s, &conn, &gui_write, &mut gui_attach)?;
+                        }
+                        None => {
+                            // Refusé (une seule fenêtre) ou hors borne : liste courante.
+                            let (windows, active) = s.window_list();
+                            let _g = gui_write.lock().unwrap();
+                            let mut wr: &PipeConn = &conn;
+                            send(&mut wr, &ServerMessage::WindowList { windows, active })?;
+                        }
+                    }
+                }
+            }
+            ClientMessage::RenameWindow { index, name } => {
+                if let Some(s) = gui_attach.as_ref().map(|ga| Arc::clone(&ga.session)) {
+                    s.gui_rename_window(index, name);
+                    // Renommage : seule la WindowList change (contenu/fenêtre inchangés).
+                    let (windows, active) = s.window_list();
+                    let _g = gui_write.lock().unwrap();
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &ServerMessage::WindowList { windows, active })?;
+                }
+            }
         }
     }
 
