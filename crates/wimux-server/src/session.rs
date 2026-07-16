@@ -36,6 +36,11 @@ pub struct Session {
     /// Drapeau « session agent » (M1) : déclenche le calcul de statut et le
     /// non-reap. Posé par `mark_agent` (aucun chemin client en M1 ; c'est M2).
     agent: AtomicBool,
+    /// Identifiant de lot (M3), posé par `set_group` à la création du lot.
+    group: Mutex<Option<String>>,
+    /// Worktree git isolé de cette session de lot (M3), posé par `set_worktree`.
+    /// Nettoyé (`worktree::remove`) au `kill`.
+    worktree: Mutex<Option<crate::worktree::Worktree>>,
 }
 
 impl Session {
@@ -59,6 +64,8 @@ impl Session {
             last_seen_gen: AtomicU64::new(0),
             paste_buffer: Mutex::new(String::new()),
             agent: AtomicBool::new(false),
+            group: Mutex::new(None),
+            worktree: Mutex::new(None),
         });
         session.reflow();
         Ok(session)
@@ -101,6 +108,8 @@ impl Session {
             last_seen_gen: AtomicU64::new(0),
             paste_buffer: Mutex::new(String::new()),
             agent: AtomicBool::new(false),
+            group: Mutex::new(None),
+            worktree: Mutex::new(None),
         });
         session.reflow();
         session.mark_agent();
@@ -466,6 +475,26 @@ impl Session {
         self.agent.load(Ordering::Relaxed)
     }
 
+    /// M3 : rattache cette session à un lot (identifiant de groupe).
+    pub fn set_group(&self, group: String) {
+        *self.group.lock().unwrap() = Some(group);
+    }
+
+    /// M3 : identifiant de lot de cette session, ou `None` hors lot.
+    pub fn group(&self) -> Option<String> {
+        self.group.lock().unwrap().clone()
+    }
+
+    /// M3 : associe un worktree git à cette session (nettoyé au `kill`).
+    pub fn set_worktree(&self, wt: crate::worktree::Worktree) {
+        *self.worktree.lock().unwrap() = Some(wt);
+    }
+
+    /// M3 : worktree git de cette session, ou `None` s'il n'y en a pas.
+    pub fn worktree(&self) -> Option<crate::worktree::Worktree> {
+        self.worktree.lock().unwrap().clone()
+    }
+
     /// M1 : statut calculé de l'agent, ou `None` si ce n'est pas un agent.
     ///
     /// Priorité : (1) volet racine sorti → `Done`(code 0)/`Error`(≠0) ;
@@ -678,9 +707,18 @@ impl Session {
     }
 
     pub fn kill(&self) {
-        let inner = self.inner.lock().unwrap();
-        for win in &inner.windows {
-            win.kill_all();
+        // Tuer les volets sous le verrou `inner`, puis le RELÂCHER avant le
+        // nettoyage git (une commande externe lente ne doit pas tenir `inner`).
+        {
+            let inner = self.inner.lock().unwrap();
+            for win in &inner.windows {
+                win.kill_all();
+            }
+        }
+        // M3 : retirer le worktree une fois les volets tués (git worktree remove
+        // --force suffit même si le process racine vient de mourir).
+        if let Some(wt) = self.worktree.lock().unwrap().take() {
+            crate::worktree::remove(&wt.base_repo, &wt.path, &wt.branch);
         }
     }
 
@@ -997,6 +1035,27 @@ mod tests {
             "cmd.exe après exit 0 doit être Done, obtenu {:?}",
             s.agent_status(Duration::from_secs(4))
         );
+        s.kill();
+    }
+
+    #[test]
+    fn agent_sans_worktree_group_none_et_kill_ne_panique_pas() {
+        let s = Session::new_agent(
+            "a".into(),
+            40,
+            12,
+            "cmd.exe",
+            &["/c".into(), "echo".into(), "hi".into()],
+            None,
+        )
+        .unwrap();
+        // Aucun group ni worktree posé : group() est None.
+        assert_eq!(s.group(), None);
+        assert!(s.worktree().is_none());
+        // set_group est visible via group().
+        s.set_group("batch0".into());
+        assert_eq!(s.group().as_deref(), Some("batch0"));
+        // kill() sans worktree ne panique pas (rien à nettoyer).
         s.kill();
     }
 }
