@@ -128,3 +128,26 @@ lancer la GUI (`npm run tauri dev` dans `wimux-gui/`) et vérifier :
 4. Un modèle absent / un cwd invalide affiche l'erreur dans le dialogue, sans
    créer de session.
 5. Fermer un agent terminé via le `×` du rail.
+
+## Vérification manuelle M3 (lots fan-out)
+
+Prérequis : au moins un modèle configuré (cf. M2), un **repo git** local
+(`git init` + un commit), et le serveur relancé après rebuild (piège du daemon
+persistant). Racine des worktrees : `%LOCALAPPDATA%\wimux\worktrees` par défaut,
+ou une directive `set agent-worktree-root <chemin>` dans `%USERPROFILE%\.wimux.conf`.
+
+1. Cliquer **⇉ lot** : le dialogue s'ouvre (repo de base, modèle, prompt, nombre).
+2. Renseigner le **repo de base** (chemin d'un dépôt git), modèle `echo`, prompt
+   `bonjour`, nombre `2` → **Lancer**.
+   - **Attendu :** le rail affiche un **en-tête de lot** (`batch0`) avec l'agrégat
+     des statuts (`⚙2 ✓0 ✗0` puis `⚙0 ✓2 ✗0`), et **2 membres** en dessous
+     (`echo-batch0-0`, `echo-batch0-1`), chacun avec son glyphe M2 (⚙ → ✓).
+   - Sous `%LOCALAPPDATA%\wimux\worktrees`, deux dossiers `batch0-0` / `batch0-1`
+     apparaissent (worktrees git ; `git -C <repo> worktree list` les montre).
+3. Cliquer un membre : le terminal bascule sur cette session (agent dans son
+   worktree).
+4. Cliquer le **×** de l'en-tête de lot (visible au survol) : **fermer le lot**
+   tue les 2 membres ; leurs dossiers de worktree et branches `wimux/batch0/*`
+   disparaissent (`git -C <repo> worktree list` / `git branch` le confirment).
+5. Un **repo non-git** (ou un chemin invalide) affiche l'erreur dans le dialogue,
+   sans créer ni session ni worktree.

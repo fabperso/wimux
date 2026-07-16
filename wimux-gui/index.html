@@ -14,6 +14,7 @@
         <div id="rail-actions">
           <button id="new-session" title="Nouvelle session">+</button>
           <button id="new-agent" title="Lancer un agent">+ agent</button>
+          <button id="new-batch" title="Lancer un lot d'agents">⇉ lot</button>
         </div>
       </aside>
       <div id="terminal"></div>
@@ -38,6 +39,29 @@
         <div class="modal-buttons">
           <button id="agent-cancel">Annuler</button>
           <button id="agent-launch">Lancer</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="batch-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Lancer un lot d'agents</h2>
+        <label>Repo de base (git)
+          <input id="batch-repo" type="text" placeholder="C:\chemin\vers\repo" />
+        </label>
+        <label>Modèle
+          <select id="batch-template"></select>
+        </label>
+        <label>Tâche / prompt
+          <textarea id="batch-prompt" rows="4"></textarea>
+        </label>
+        <label>Nombre d'agents
+          <input id="batch-count" type="number" min="1" value="2" />
+        </label>
+        <div id="batch-error" class="agent-error"></div>
+        <div class="modal-buttons">
+          <button id="batch-cancel">Annuler</button>
+          <button id="batch-launch">Lancer</button>
         </div>
       </div>
     </div>

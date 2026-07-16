@@ -60,3 +60,14 @@ body { margin: 0; }
 .modal-buttons button { border: none; border-radius: 3px; padding: 6px 14px; cursor: pointer; }
 #agent-cancel { background: #3a3a3a; color: #ddd; }
 #agent-launch { background: #0a84ff; color: #fff; }
+
+/* M3 : bouton lot + en-tête de lot dans le rail */
+#new-batch { border: none; background: #2d2d2d; color: #ccc; padding: 8px; cursor: pointer; font-size: 13px; }
+#new-batch:hover { background: #37373d; }
+
+.batch-header { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: #202022; color: #9aa; border-left: 3px solid #6a5acd; font-size: 12px; }
+.batch-header .batch-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.batch-header .batch-agg { flex: 0 0 auto; color: #bbb; letter-spacing: 1px; }
+.batch-header .batch-close { flex: 0 0 auto; color: #999; cursor: pointer; visibility: hidden; }
+.batch-header:hover .batch-close { visibility: visible; }
+.batch-header .batch-close:hover { color: #ff453a; }

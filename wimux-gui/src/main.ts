@@ -47,6 +47,7 @@ type SessionDto = {
   bell: boolean;
   agent: boolean;
   agent_status: string | null;
+  group: string | null;
 };
 
 type AgentTemplateDto = { name: string };
@@ -94,49 +95,99 @@ function agentStatusClass(status: string | null): string {
   }
 }
 
+function renderSession(s: SessionDto): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "session" + (s.name === activeSession ? " active" : "");
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = s.name;
+  let clickTimer: number | null = null;
+  name.ondblclick = (ev) => {
+    ev.stopPropagation();
+    if (clickTimer !== null) { clearTimeout(clickTimer); clickTimer = null; }
+    startRename(el, s.name);
+  };
+  const close = document.createElement("span");
+  close.className = "close";
+  close.textContent = "×";
+  close.onclick = async (ev) => { ev.stopPropagation(); await invoke("kill_session", { name: s.name }).catch(() => {}); await refresh(); };
+  el.onclick = () => {
+    if (clickTimer !== null) return; // 2e clic d'un double-clic : ignore, laisse ondblclick gerer
+    clickTimer = window.setTimeout(() => { clickTimer = null; switchTo(s.name); }, 200);
+  };
+  const isActive = s.name === activeSession;
+  if (s.agent) {
+    // Session agent : glyphe de statut (remplace les pastilles G4).
+    const glyph = document.createElement("span");
+    glyph.className = "agent-glyph " + agentStatusClass(s.agent_status);
+    glyph.textContent = agentStatusGlyph(s.agent_status);
+    glyph.title = s.agent_status ?? "agent";
+    el.append(name, glyph, close);
+  } else if (!isActive && (s.bell || s.activity)) {
+    // Cloche prioritaire sur l'activité ; rien pour la session active.
+    const dot = document.createElement("span");
+    dot.className = "dot " + (s.bell ? "bell" : "activity");
+    dot.textContent = s.bell ? "🔔" : "";
+    el.append(name, dot, close);
+  } else {
+    el.append(name, close);
+  }
+  return el;
+}
+
+function renderBatchHeader(group: string, members: SessionDto[]): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "batch-header";
+  const title = document.createElement("span");
+  title.className = "batch-name";
+  title.textContent = group;
+  // Agrégat des statuts : ⚙ Working, ✓ Done, ✗ Error.
+  let working = 0, done = 0, error = 0;
+  for (const m of members) {
+    if (m.agent_status === "Working") working++;
+    else if (m.agent_status === "Done") done++;
+    else if (m.agent_status === "Error") error++;
+  }
+  const agg = document.createElement("span");
+  agg.className = "batch-agg";
+  agg.textContent = `⚙${working} ✓${done} ✗${error}`;
+  const close = document.createElement("span");
+  close.className = "batch-close";
+  close.textContent = "×";
+  close.title = "Fermer le lot";
+  close.onclick = async (ev) => {
+    ev.stopPropagation();
+    for (const m of members) {
+      await invoke("kill_session", { name: m.name }).catch(() => {});
+    }
+    await refresh();
+  };
+  el.append(title, agg, close);
+  return el;
+}
+
 function renderRail(sessions: SessionDto[]) {
   lastSessions = sessions;
   const container = document.getElementById("sessions")!;
   container.innerHTML = "";
+  // Regrouper par `group` en préservant l'ordre d'apparition ; les sessions
+  // sans group sont rendues comme avant, après les lots.
+  const groups = new Map<string, SessionDto[]>();
+  const ungrouped: SessionDto[] = [];
   for (const s of sessions) {
-    const el = document.createElement("div");
-    el.className = "session" + (s.name === activeSession ? " active" : "");
-    const name = document.createElement("span");
-    name.className = "name";
-    name.textContent = s.name;
-    let clickTimer: number | null = null;
-    name.ondblclick = (ev) => {
-      ev.stopPropagation();
-      if (clickTimer !== null) { clearTimeout(clickTimer); clickTimer = null; }
-      startRename(el, s.name);
-    };
-    const close = document.createElement("span");
-    close.className = "close";
-    close.textContent = "×";
-    close.onclick = async (ev) => { ev.stopPropagation(); await invoke("kill_session", { name: s.name }).catch(() => {}); await refresh(); };
-    el.onclick = () => {
-      if (clickTimer !== null) return; // 2e clic d'un double-clic : ignore, laisse ondblclick gerer
-      clickTimer = window.setTimeout(() => { clickTimer = null; switchTo(s.name); }, 200);
-    };
-    const isActive = s.name === activeSession;
-    if (s.agent) {
-      // Session agent : glyphe de statut (remplace les pastilles G4).
-      const glyph = document.createElement("span");
-      glyph.className = "agent-glyph " + agentStatusClass(s.agent_status);
-      glyph.textContent = agentStatusGlyph(s.agent_status);
-      glyph.title = s.agent_status ?? "agent";
-      el.append(name, glyph, close);
-    } else if (!isActive && (s.bell || s.activity)) {
-      // Cloche prioritaire sur l'activité ; rien pour la session active.
-      const dot = document.createElement("span");
-      dot.className = "dot " + (s.bell ? "bell" : "activity");
-      dot.textContent = s.bell ? "🔔" : "";
-      el.append(name, dot, close);
+    if (s.group) {
+      let arr = groups.get(s.group);
+      if (!arr) { arr = []; groups.set(s.group, arr); }
+      arr.push(s);
     } else {
-      el.append(name, close);
+      ungrouped.push(s);
     }
-    container.append(el);
   }
+  for (const [group, members] of groups) {
+    container.append(renderBatchHeader(group, members));
+    for (const s of members) container.append(renderSession(s));
+  }
+  for (const s of ungrouped) container.append(renderSession(s));
 }
 
 function startRename(el: HTMLElement, oldName: string) {
@@ -230,6 +281,71 @@ document.getElementById("agent-launch")!.onclick = async () => {
     await switchTo(created);
   } catch (e) {
     agentError.textContent = "Échec : " + e;
+  }
+};
+
+const batchModal = document.getElementById("batch-modal")!;
+const batchRepo = document.getElementById("batch-repo") as HTMLInputElement;
+const batchTemplateSel = document.getElementById("batch-template") as HTMLSelectElement;
+const batchPrompt = document.getElementById("batch-prompt") as HTMLTextAreaElement;
+const batchCount = document.getElementById("batch-count") as HTMLInputElement;
+const batchError = document.getElementById("batch-error")!;
+
+async function openBatchModal() {
+  batchError.textContent = "";
+  batchRepo.value = "";
+  batchPrompt.value = "";
+  batchCount.value = "2";
+  batchTemplateSel.innerHTML = "";
+  try {
+    const templates = await invoke<AgentTemplateDto[]>("list_agent_templates");
+    for (const t of templates) {
+      const opt = document.createElement("option");
+      opt.value = t.name;
+      opt.textContent = t.name;
+      batchTemplateSel.append(opt);
+    }
+  } catch (e) {
+    batchError.textContent = "Impossible de charger les modèles : " + e;
+  }
+  batchModal.classList.remove("hidden");
+}
+
+function closeBatchModal() {
+  batchModal.classList.add("hidden");
+}
+
+document.getElementById("new-batch")!.onclick = openBatchModal;
+document.getElementById("batch-cancel")!.onclick = closeBatchModal;
+document.getElementById("batch-launch")!.onclick = async () => {
+  const template = batchTemplateSel.value;
+  if (!template) {
+    batchError.textContent = "Choisissez un modèle.";
+    return;
+  }
+  const baseRepo = batchRepo.value.trim();
+  if (!baseRepo) {
+    batchError.textContent = "Indiquez le repo de base.";
+    return;
+  }
+  const count = parseInt(batchCount.value, 10);
+  if (!Number.isFinite(count) || count < 1) {
+    batchError.textContent = "Le nombre d'agents doit être ≥ 1.";
+    return;
+  }
+  const prompt = batchPrompt.value;
+  try {
+    const group = await invoke<string>("create_batch", {
+      template,
+      prompt,
+      baseRepo,
+      count,
+    });
+    closeBatchModal();
+    await refresh();
+    console.log("lot créé:", group);
+  } catch (e) {
+    batchError.textContent = "Échec : " + e;
   }
 };
 
