@@ -3,12 +3,13 @@
 //! chaque changement les clients attachés sont réveillés puis reçoivent une
 //! composition (volets + bordures + barre de statut) rendue par le serveur.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
-use wimux_protocol::{Frame, LayoutNode};
+use wimux_protocol::{AgentStatus, Frame, LayoutNode};
 use wimux_vt::{Color, Grid, Pen};
 
 use crate::pane::{CopyAction, Notifier, Pane, PaneId};
@@ -32,6 +33,9 @@ pub struct Session {
     /// Génération du Notifier vue par la GUI la dernière fois (G4).
     last_seen_gen: AtomicU64,
     paste_buffer: Mutex<String>,
+    /// Drapeau « session agent » (M1) : déclenche le calcul de statut et le
+    /// non-reap. Posé par `mark_agent` (aucun chemin client en M1 ; c'est M2).
+    agent: AtomicBool,
 }
 
 impl Session {
@@ -54,6 +58,7 @@ impl Session {
             attached: AtomicUsize::new(0),
             last_seen_gen: AtomicU64::new(0),
             paste_buffer: Mutex::new(String::new()),
+            agent: AtomicBool::new(false),
         });
         session.reflow();
         Ok(session)
@@ -407,6 +412,44 @@ impl Session {
         self.notifier.bell()
     }
 
+    /// M1 : marque cette session comme une session agent (setter interne,
+    /// exercé par les tests ; la création exposée arrive en M2).
+    pub fn mark_agent(&self) {
+        self.agent.store(true, Ordering::Relaxed);
+    }
+
+    /// M1 : cette session est-elle une session agent ?
+    pub fn is_agent(&self) -> bool {
+        self.agent.load(Ordering::Relaxed)
+    }
+
+    /// M1 : statut calculé de l'agent, ou `None` si ce n'est pas un agent.
+    ///
+    /// Priorité : (1) volet racine sorti → `Done`(code 0)/`Error`(≠0) ;
+    /// (2) cloche → `Attention` ; (3) sortie récente (< `idle_threshold`) →
+    /// `Working` ; (4) sinon `Idle`.
+    pub fn agent_status(&self, idle_threshold: Duration) -> Option<AgentStatus> {
+        if !self.is_agent() {
+            return None;
+        }
+        if let Some(pane) = self.active_pane()
+            && let Some(code) = pane.exit_code()
+        {
+            return Some(if code == 0 {
+                AgentStatus::Done
+            } else {
+                AgentStatus::Error
+            });
+        }
+        if self.has_bell() {
+            return Some(AgentStatus::Attention);
+        }
+        if self.notifier.last_output_elapsed() < idle_threshold {
+            return Some(AgentStatus::Working);
+        }
+        Some(AgentStatus::Idle)
+    }
+
     pub fn attached_count(&self) -> usize {
         self.attached.load(Ordering::Relaxed)
     }
@@ -560,7 +603,14 @@ impl Session {
     }
 
     /// Retire les volets/fenêtres morts. Renvoie `true` s'il reste de la vie.
+    ///
+    /// M1 : pour une **session agent**, court-circuite sans rien retirer — la
+    /// fenêtre morte est conservée (statut `Done`/`Error` visible) jusqu'à un
+    /// `kill` manuel.
     fn reap(&self) -> bool {
+        if self.is_agent() {
+            return true;
+        }
         let mut inner = self.inner.lock().unwrap();
         let mut i = 0;
         while i < inner.windows.len() {
@@ -743,6 +793,118 @@ mod tests {
         s.mark_seen();
         assert!(!s.has_bell(), "mark_seen efface la cloche");
 
+        s.kill();
+    }
+
+    /// Sonde `agent_status` jusqu'à obtenir `want`, dans la limite du délai.
+    fn poll_status(s: &Session, want: AgentStatus, secs: u64) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if s.agent_status(Duration::from_secs(4)) == Some(want) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
+    #[test]
+    fn agent_status_none_si_pas_agent() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        assert_eq!(s.agent_status(Duration::from_secs(4)), None);
+        s.kill();
+    }
+
+    #[test]
+    fn agent_sortie_code_zero_donne_done() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        s.mark_agent();
+        std::thread::sleep(Duration::from_millis(800));
+        // Cloche posée AVANT la sortie : prouve que la SORTIE prime sur la cloche.
+        s.notifier().signal_bell();
+        s.send_input(b"exit 0\r\n");
+        assert!(
+            poll_status(&s, AgentStatus::Done, 20),
+            "un agent dont le volet racine sort avec 0 doit être Done, obtenu {:?}",
+            s.agent_status(Duration::from_secs(4))
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn agent_sortie_code_non_nul_donne_error() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        s.mark_agent();
+        std::thread::sleep(Duration::from_millis(800));
+        s.send_input(b"exit 3\r\n");
+        assert!(
+            poll_status(&s, AgentStatus::Error, 20),
+            "un agent dont le volet racine sort avec 3 doit être Error, obtenu {:?}",
+            s.agent_status(Duration::from_secs(4))
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn agent_vivant_avec_cloche_donne_attention() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        s.mark_agent();
+        std::thread::sleep(Duration::from_millis(800));
+        s.notifier().signal_bell();
+        // Seuil long : sans la cloche ce serait Working ; la cloche prime.
+        assert_eq!(
+            s.agent_status(Duration::from_secs(60)),
+            Some(AgentStatus::Attention)
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn agent_vivant_sortie_recente_donne_working() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        s.mark_agent();
+        std::thread::sleep(Duration::from_millis(800));
+        s.mark_seen(); // efface une éventuelle cloche de démarrage
+        s.notifier().bump(); // horodatage de sortie « maintenant »
+        assert_eq!(
+            s.agent_status(Duration::from_secs(60)),
+            Some(AgentStatus::Working)
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn agent_vivant_silencieux_donne_idle() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        s.mark_agent();
+        std::thread::sleep(Duration::from_millis(800));
+        s.mark_seen(); // efface une éventuelle cloche de démarrage
+        s.notifier().bump();
+        std::thread::sleep(Duration::from_millis(20));
+        // Seuil 1 ms : la dernière sortie (≥ 20 ms) est « ancienne » → Idle.
+        assert_eq!(
+            s.agent_status(Duration::from_millis(1)),
+            Some(AgentStatus::Idle)
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn agent_non_reape_apres_sortie() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        s.mark_agent();
+        std::thread::sleep(Duration::from_millis(800));
+        s.send_input(b"exit 0\r\n");
+        assert!(
+            poll_status(&s, AgentStatus::Done, 20),
+            "l'agent aurait dû se terminer (Done)"
+        );
+        // Non-reap : reap() court-circuite et conserve la fenêtre morte.
+        assert!(s.reap(), "reap d'un agent renvoie true sans rien retirer");
+        assert!(
+            s.is_alive(),
+            "une session agent survit à la mort de son processus racine"
+        );
         s.kill();
     }
 }
