@@ -11,6 +11,7 @@
 //! `%APPDATA%\wimux\wimux.conf`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use wimux_protocol::AgentTemplate;
 
@@ -52,6 +53,8 @@ pub struct Config {
     pub agent_idle_seconds: u64,
     /// Modèles d'agents configurés (M2), directive `agent-template`.
     pub agent_templates: Vec<AgentTemplate>,
+    /// Racine des worktrees de lots (M3), directive `set agent-worktree-root`.
+    pub agent_worktree_root: PathBuf,
 }
 
 impl Default for Config {
@@ -84,6 +87,7 @@ impl Default for Config {
             bindings,
             agent_idle_seconds: 4,
             agent_templates: Vec::new(),
+            agent_worktree_root: default_worktree_root(),
         }
     }
 }
@@ -121,6 +125,9 @@ impl Config {
                         self.agent_idle_seconds = v;
                     }
                 }
+                ["set", "agent-worktree-root", rest @ ..] if !rest.is_empty() => {
+                    self.agent_worktree_root = PathBuf::from(rest.join(" "));
+                }
                 ["agent-template", name, program, args @ ..] => {
                     self.agent_templates.push(AgentTemplate {
                         name: name.to_string(),
@@ -155,6 +162,16 @@ fn config_path() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// Racine par défaut des worktrees de lots : `%LOCALAPPDATA%\wimux\worktrees`,
+/// avec repli sur le dossier temp du système si `LOCALAPPDATA` est absent.
+fn default_worktree_root() -> PathBuf {
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        PathBuf::from(local).join("wimux").join("worktrees")
+    } else {
+        std::env::temp_dir().join("wimux-worktrees")
+    }
 }
 
 /// Convertit une description de touche en octet : `C-a`..`C-z`, `Space`, `Enter`,
@@ -299,5 +316,20 @@ mod tests {
         );
         assert_eq!(c.agent_templates[1].name, "b");
         assert!(c.agent_templates[1].args.is_empty());
+    }
+
+    #[test]
+    fn agent_worktree_root_defaut_non_vide() {
+        assert!(
+            !Config::default().agent_worktree_root.as_os_str().is_empty(),
+            "la racine de worktrees par défaut doit être non vide"
+        );
+    }
+
+    #[test]
+    fn set_agent_worktree_root_modifie_le_chemin() {
+        let mut c = Config::default();
+        c.apply("set agent-worktree-root C:\\x\\y\n");
+        assert_eq!(c.agent_worktree_root, std::path::PathBuf::from("C:\\x\\y"));
     }
 }
