@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use wimux_protocol::{AgentStatus, Frame, LayoutNode};
+use wimux_protocol::{AgentStatus, Frame, LayoutNode, WindowInfo};
 use wimux_vt::{Color, Grid, Pen};
 
 use crate::pane::{CopyAction, Notifier, Pane, PaneId};
@@ -256,6 +256,107 @@ impl Session {
         let inner = self.inner.lock().unwrap();
         let win = inner.windows.get(inner.active_window)?;
         Some((win.layout_tree(), win.active_pane_id()))
+    }
+
+    /// Projette les fenêtres en `WindowInfo` (nom de chaque fenêtre) + l'index de
+    /// la fenêtre active (W2).
+    pub fn window_list(&self) -> (Vec<WindowInfo>, u32) {
+        let inner = self.inner.lock().unwrap();
+        let windows = inner
+            .windows
+            .iter()
+            .map(|w| WindowInfo { name: w.name() })
+            .collect();
+        (windows, inner.active_window as u32)
+    }
+
+    /// Crée une fenêtre (onglet) : spawn un volet shell HORS verrou (comme
+    /// `gui_split`), pousse une `Window` neuve (comme `Session::new`) et la rend
+    /// active. Renvoie la nouvelle `window_list()` (W2).
+    pub fn gui_new_window(&self) -> (Vec<WindowInfo>, u32) {
+        // Ne pas tenir le verrou pendant le spawn (qui lance un processus).
+        let new_pane = Pane::spawn(1, 1, &self.shell, Arc::clone(&self.notifier));
+        let result = {
+            let mut inner = self.inner.lock().unwrap();
+            if let Ok(pane) = new_pane {
+                inner.windows.push(Window::new(pane));
+                inner.active_window = inner.windows.len() - 1;
+                let area = content_area(inner.cols, inner.rows);
+                let aw = inner.active_window;
+                inner.windows[aw].reflow(area);
+            }
+            let windows = inner
+                .windows
+                .iter()
+                .map(|w| WindowInfo { name: w.name() })
+                .collect();
+            (windows, inner.active_window as u32)
+        };
+        self.notifier.bump();
+        result
+    }
+
+    /// Rend active la fenêtre `index` (bornée). `None` si l'index est hors borne (W2).
+    pub fn gui_select_window(&self, index: u32) -> Option<(Vec<WindowInfo>, u32)> {
+        let result = {
+            let mut inner = self.inner.lock().unwrap();
+            let idx = index as usize;
+            if idx >= inner.windows.len() {
+                return None;
+            }
+            inner.active_window = idx;
+            let area = content_area(inner.cols, inner.rows);
+            inner.windows[idx].reflow(area);
+            let windows = inner
+                .windows
+                .iter()
+                .map(|w| WindowInfo { name: w.name() })
+                .collect();
+            (windows, inner.active_window as u32)
+        };
+        self.notifier.bump();
+        Some(result)
+    }
+
+    /// Ferme la fenêtre `index` (tue ses volets) et réajuste `active_window`.
+    /// `None` (no-op) si l'index est hors borne OU s'il ne reste qu'une fenêtre (W2).
+    pub fn gui_close_window(&self, index: u32) -> Option<(Vec<WindowInfo>, u32)> {
+        let result = {
+            let mut inner = self.inner.lock().unwrap();
+            let idx = index as usize;
+            if idx >= inner.windows.len() || inner.windows.len() == 1 {
+                return None;
+            }
+            inner.windows[idx].kill_all();
+            inner.windows.remove(idx);
+            // Borne `active_window` comme `gui_close` (il reste ≥ 1 fenêtre ici).
+            if inner.active_window >= inner.windows.len() {
+                inner.active_window = inner.windows.len() - 1;
+            }
+            let area = content_area(inner.cols, inner.rows);
+            let aw = inner.active_window;
+            inner.windows[aw].reflow(area);
+            let windows = inner
+                .windows
+                .iter()
+                .map(|w| WindowInfo { name: w.name() })
+                .collect();
+            (windows, inner.active_window as u32)
+        };
+        self.notifier.bump();
+        Some(result)
+    }
+
+    /// Nomme la fenêtre `index` ; un nom vide efface le nom (`None`) (W2).
+    pub fn gui_rename_window(&self, index: u32, name: String) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(win) = inner.windows.get_mut(index as usize) {
+                let name = if name.is_empty() { None } else { Some(name) };
+                win.set_name(name);
+            }
+        }
+        self.notifier.bump();
     }
 
     /// Frappe GUI vers le volet DÉSIGNÉ de la fenêtre active (repli : volet actif
@@ -1055,6 +1156,69 @@ mod tests {
         s.set_group("batch0".into());
         assert_eq!(s.group().as_deref(), Some("batch0"));
         // kill() sans worktree ne panique pas (rien à nettoyer).
+        s.kill();
+    }
+
+    #[test]
+    fn window_list_reflete_une_fenetre_neuve() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        let (windows, active) = s.window_list();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(active, 0);
+        assert_eq!(windows[0].name, None);
+        s.kill();
+    }
+
+    #[test]
+    fn gui_new_window_ajoute_un_onglet_actif() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        let (windows, active) = s.gui_new_window();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(active, 1);
+        s.kill();
+    }
+
+    #[test]
+    fn gui_select_window_hors_borne_est_none() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        assert!(s.gui_select_window(5).is_none());
+        // Index valide : active mis à jour.
+        let _ = s.gui_new_window(); // 2 fenêtres, active = 1
+        let (_, active) = s.gui_select_window(0).unwrap();
+        assert_eq!(active, 0);
+        s.kill();
+    }
+
+    #[test]
+    fn gui_close_window_refuse_la_derniere() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        assert!(
+            s.gui_close_window(0).is_none(),
+            "fermer l'unique fenêtre doit être refusé"
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn gui_close_window_retire_et_reajuste() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        let _ = s.gui_new_window(); // 2 fenêtres, active = 1
+        let (windows, active) = s.gui_close_window(1).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(active, 0);
+        s.kill();
+    }
+
+    #[test]
+    fn gui_rename_window_reflete_le_nom() {
+        let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
+        s.gui_rename_window(0, "build".into());
+        let (windows, _) = s.window_list();
+        assert_eq!(windows[0].name.as_deref(), Some("build"));
+        // Nom vide -> None.
+        s.gui_rename_window(0, String::new());
+        let (windows, _) = s.window_list();
+        assert_eq!(windows[0].name, None);
         s.kill();
     }
 }
