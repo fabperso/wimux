@@ -67,6 +67,15 @@ pub enum HelloReply {
     },
 }
 
+/// Modèle d'agent configuré côté serveur (M2). Le frontend n'en lit que le nom ;
+/// le serveur possède `program`/`args` et effectue la substitution `{prompt}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentTemplate {
+    pub name: String,
+    pub program: String,
+    pub args: Vec<String>,
+}
+
 /// Statut calculé d'une session agent (M1). Sérialisé sur [`SessionInfo`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum AgentStatus {
@@ -222,6 +231,17 @@ pub enum ClientMessage {
     Shutdown,
     /// Vérifier que le serveur répond.
     Ping,
+    /// Lister les modèles d'agents configurés (mode GUI, pour le lanceur).
+    ListAgentTemplates,
+    /// Crée une session agent depuis un modèle. Le serveur substitue `{prompt}`
+    /// dans les args s'il est présent, sinon envoie le prompt + Entrée sur le
+    /// stdin du volet racine après le spawn. Nom auto `<template>-<n>` si `None`.
+    CreateAgentSession {
+        name: Option<String>,
+        template: String,
+        prompt: String,
+        cwd: Option<String>,
+    },
 }
 
 /// Messages serveur -> client.
@@ -271,6 +291,8 @@ pub enum ServerMessage {
     Pong,
     /// Acquittement générique.
     Ok,
+    /// Liste des modèles d'agents (réponse à `ListAgentTemplates`).
+    AgentTemplates(Vec<AgentTemplate>),
 }
 
 // --- Cadrage (framing) longueur + postcard --------------------------------
@@ -510,6 +532,65 @@ mod tests {
                 assert_eq!(v[0].name, "bot");
                 assert!(v[0].agent);
                 assert_eq!(v[0].agent_status, Some(AgentStatus::Working));
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_agent_template() {
+        let tpl = AgentTemplate {
+            name: "claude".into(),
+            program: "claude".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+        };
+        let msg = ServerMessage::AgentTemplates(vec![tpl.clone()]);
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ServerMessage>(&mut cur).unwrap() {
+            ServerMessage::AgentTemplates(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0], tpl);
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_list_agent_templates() {
+        let msg = ClientMessage::ListAgentTemplates;
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        assert!(matches!(
+            recv::<_, ClientMessage>(&mut cur).unwrap(),
+            ClientMessage::ListAgentTemplates
+        ));
+    }
+
+    #[test]
+    fn aller_retour_create_agent_session() {
+        let msg = ClientMessage::CreateAgentSession {
+            name: Some("bot".into()),
+            template: "claude".into(),
+            prompt: "corrige le bug".into(),
+            cwd: Some("C:\\proj".into()),
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ClientMessage>(&mut cur).unwrap() {
+            ClientMessage::CreateAgentSession {
+                name,
+                template,
+                prompt,
+                cwd,
+            } => {
+                assert_eq!(name.as_deref(), Some("bot"));
+                assert_eq!(template, "claude");
+                assert_eq!(prompt, "corrige le bug");
+                assert_eq!(cwd.as_deref(), Some("C:\\proj"));
             }
             _ => panic!("mauvais variant"),
         }

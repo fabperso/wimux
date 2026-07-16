@@ -567,6 +567,8 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
+            ClientMessage::ListAgentTemplates => {} // câblé en Task 5
+            ClientMessage::CreateAgentSession { .. } => {} // câblé en Task 5
             ClientMessage::Hello(_) => {}
         }
     }
