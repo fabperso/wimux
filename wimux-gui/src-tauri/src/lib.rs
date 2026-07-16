@@ -68,6 +68,9 @@ fn attach_session(session: String, app: AppHandle, bridge: State<Bridge>) -> Res
                         ServerMessage::WindowLayout { tree, active } => {
                             let _ = app2.emit("window-layout", (tree, active));
                         }
+                        ServerMessage::WindowList { windows, active } => {
+                            let _ = app2.emit("window-list", (windows, active));
+                        }
                         ServerMessage::Error(m) => {
                             let _ = app2.emit("pane-error", m);
                         }
@@ -292,6 +295,42 @@ fn pane_resize(pane_id: u64, cols: u16, rows: u16, bridge: State<Bridge>) -> Res
     Ok(())
 }
 
+#[tauri::command]
+fn new_window(bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::NewWindow).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn select_window(index: u32, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::SelectWindow { index }).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn close_window(index: u32, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::CloseWindow { index }).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn rename_window(index: u32, name: String, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::RenameWindow { index, name }).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -310,7 +349,11 @@ pub fn run() {
             rename_session,
             list_agent_templates,
             create_agent,
-            create_batch
+            create_batch,
+            new_window,
+            select_window,
+            close_window,
+            rename_window
         ])
         .run(tauri::generate_context!())
         .expect("erreur au lancement de wimux-gui");
