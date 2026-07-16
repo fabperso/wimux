@@ -48,6 +48,7 @@ const tabsEl = document.getElementById("tabs")!;
 // `reset()` du PaneManager avant le prochain window-layout (pane_id globaux, les
 // snapshots frais repeignent le contenu).
 let lastActiveWindow = -1;
+let lastWindows: WindowInfo[] = [];
 
 listen<[WindowInfo[], number]>("window-list", (e) => {
   const [windows, active] = e.payload;
@@ -55,6 +56,7 @@ listen<[WindowInfo[], number]>("window-list", (e) => {
     paneManager.reset();
   }
   lastActiveWindow = active;
+  lastWindows = windows;
   renderTabs(windows, active);
 });
 
@@ -118,7 +120,10 @@ function startTabRename(tab: HTMLElement, index: number, oldName: string) {
   };
   input.onkeydown = (ev) => {
     if (ev.key === "Enter") commit();
-    else if (ev.key === "Escape") { committed = true; input.blur(); }
+    else if (ev.key === "Escape") {
+      committed = true;
+      renderTabs(lastWindows, lastActiveWindow);
+    }
   };
   input.onblur = () => commit();
 }
