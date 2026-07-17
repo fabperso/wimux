@@ -173,3 +173,23 @@ Prérequis : rebuild + redémarrage du daemon (changement de protocole), puis
 6. **Non-régression volets** : dans un onglet, découper un volet (W1/G3),
    redimensionner la bordure, fermer un volet — tout fonctionne comme avant, par
    onglet.
+
+## Vérification manuelle W3 (rail enrichi : cwd + branche git)
+
+Prérequis : rebuild + **redémarrage du daemon détaché** (changement de protocole
+`SessionInfo`), shell par défaut PowerShell/pwsh, puis `cd wimux-gui && npm run tauri dev`.
+
+1. **Session PowerShell** : créer/attacher une session (shell par défaut). Sous
+   son nom dans le rail apparaît une **2e ligne** : le cwd abrégé (`~` pour le
+   profil utilisateur) et, si le dossier est un dépôt git, la branche (`⎇ <nom>`).
+2. **Suivi des `cd`** : dans le terminal, `cd` vers un **dépôt git** (ex. le repo
+   `wimux`). En ~1 s (sondage `list-sessions`), la 2e ligne se met à jour : le
+   cwd suit, et la branche affiche la branche courante (ex. `⎇ main`).
+   Changer de branche (`git switch -c essai`) → la ligne reflète `⎇ essai`.
+3. **Hors dépôt** : `cd C:\Windows` → le cwd s'affiche, **sans** branche.
+4. **Repli cmd.exe** : lancer une session avec un shell non-PowerShell
+   (`set default-shell cmd.exe` dans `%USERPROFILE%\.wimux.conf`, ou
+   `WIMUX_SHELL=cmd.exe`). Cette session n'émet pas d'OSC 7 → le rail affiche le
+   **nom seul** (pas de 2e ligne, aucune erreur). Aucune régression.
+5. **Non-régression indicateurs** : les pastilles d'activité/cloche (G4) et les
+   glyphes d'agent (M-series) restent affichés à droite du nom, sur la 1re ligne.

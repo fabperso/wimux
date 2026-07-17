@@ -95,6 +95,8 @@ struct SessionDto {
     agent: bool,
     agent_status: Option<String>,
     group: Option<String>,
+    cwd: Option<String>,
+    branch: Option<String>,
 }
 
 /// Libellé stable d'un `AgentStatus` pour le frontend (mappé sur un glyphe côté
@@ -126,6 +128,8 @@ fn list_sessions() -> Result<Vec<SessionDto>, String> {
                     agent: s.agent,
                     agent_status: s.agent_status.map(agent_status_label),
                     group: s.group,
+                    cwd: s.cwd,
+                    branch: s.branch,
                 })
                 .collect()),
             ServerMessage::Error(e) => Err(e),

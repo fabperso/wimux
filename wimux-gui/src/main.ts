@@ -136,6 +136,8 @@ type SessionDto = {
   agent: boolean;
   agent_status: string | null;
   group: string | null;
+  cwd: string | null;
+  branch: string | null;
 };
 
 type AgentTemplateDto = { name: string };
@@ -184,12 +186,41 @@ function agentStatusClass(status: string | null): string {
   }
 }
 
+function abbreviateCwd(cwd: string): string {
+  // Remplace un préfixe de profil utilisateur par `~` (heuristique).
+  let p = cwd.replace(/^[A-Za-z]:\\Users\\[^\\]+/i, "~");
+  const MAX = 30;
+  if (p.length > MAX) p = "…" + p.slice(p.length - (MAX - 1));
+  return p;
+}
+
 function renderSession(s: SessionDto): HTMLElement {
   const el = document.createElement("div");
   el.className = "session" + (s.name === activeSession ? " active" : "");
+  const main = document.createElement("div");
+  main.className = "session-main";
   const name = document.createElement("span");
   name.className = "name";
   name.textContent = s.name;
+  main.appendChild(name);
+  // 2e ligne : cwd abrégé + branche. Masquée si cwd inconnu (cmd.exe, agent…).
+  if (s.cwd) {
+    const meta = document.createElement("div");
+    meta.className = "session-meta";
+    const cwd = document.createElement("span");
+    cwd.className = "meta-cwd";
+    cwd.textContent = abbreviateCwd(s.cwd);
+    cwd.title = s.cwd;
+    meta.appendChild(cwd);
+    if (s.branch) {
+      const br = document.createElement("span");
+      br.className = "meta-branch";
+      br.textContent = "⎇ " + s.branch;
+      br.title = s.branch;
+      meta.appendChild(br);
+    }
+    main.appendChild(meta);
+  }
   let clickTimer: number | null = null;
   name.ondblclick = (ev) => {
     ev.stopPropagation();
@@ -211,15 +242,15 @@ function renderSession(s: SessionDto): HTMLElement {
     glyph.className = "agent-glyph " + agentStatusClass(s.agent_status);
     glyph.textContent = agentStatusGlyph(s.agent_status);
     glyph.title = s.agent_status ?? "agent";
-    el.append(name, glyph, close);
+    el.append(main, glyph, close);
   } else if (!isActive && (s.bell || s.activity)) {
     // Cloche prioritaire sur l'activité ; rien pour la session active.
     const dot = document.createElement("span");
     dot.className = "dot " + (s.bell ? "bell" : "activity");
     dot.textContent = s.bell ? "🔔" : "";
-    el.append(name, dot, close);
+    el.append(main, dot, close);
   } else {
-    el.append(name, close);
+    el.append(main, close);
   }
   return el;
 }
