@@ -46,7 +46,7 @@ pub struct Session {
 impl Session {
     pub fn new(name: String, cols: u16, rows: u16, shell: &str) -> Result<Arc<Session>> {
         let notifier = Notifier::new();
-        let pane = Pane::spawn(cols, content_rows(rows), shell, Arc::clone(&notifier))?;
+        let pane = spawn_shell_pane_with(cols, content_rows(rows), shell, &notifier)?;
         let window = Window::new(pane);
 
         let session = Arc::new(Session {
@@ -174,7 +174,7 @@ impl Session {
         dir: SplitDir,
         tx: Sender<(PaneId, Vec<u8>)>,
     ) -> Option<(u64, Vec<u8>, LayoutNode, u64)> {
-        let new_pane = Pane::spawn(1, 1, &self.shell, Arc::clone(&self.notifier)).ok()?;
+        let new_pane = self.spawn_shell_pane(1, 1).ok()?;
         let new_id = new_pane.id;
         let (layout, active) = {
             let mut inner = self.inner.lock().unwrap();
@@ -280,7 +280,7 @@ impl Session {
     /// active. Renvoie la nouvelle `window_list()` (W2).
     pub fn gui_new_window(&self) -> (Vec<WindowInfo>, u32) {
         // Ne pas tenir le verrou pendant le spawn (qui lance un processus).
-        let new_pane = Pane::spawn(1, 1, &self.shell, Arc::clone(&self.notifier));
+        let new_pane = self.spawn_shell_pane(1, 1);
         let result = {
             let mut inner = self.inner.lock().unwrap();
             if let Ok(pane) = new_pane {
@@ -652,6 +652,11 @@ impl Session {
         }
     }
 
+    /// Spawn d'un volet du shell de la session, avec injection OSC 7 (W3).
+    fn spawn_shell_pane(&self, cols: u16, rows: u16) -> Result<Arc<Pane>> {
+        spawn_shell_pane_with(cols, rows, &self.shell, &self.notifier)
+    }
+
     /// Transmet des octets au volet actif de la fenêtre active.
     pub fn send_input(&self, bytes: &[u8]) {
         let pane = {
@@ -935,6 +940,46 @@ fn draw_status_bar(
     if let Some(status) = copy_status {
         let x = grid.cols().saturating_sub(status.len() as u16 + 1);
         grid.set_str(x, row, status, bar);
+    }
+}
+
+/// Hook de prompt PowerShell (une seule ligne = un seul argument `-Command`).
+/// Capture le prompt courant (`$function:prompt`, déjà défini par le profil s'il
+/// existe, car `-Command` s'exécute APRÈS le profil), puis le remplace par une
+/// version qui, à chaque invite, émet `ESC ]7;file:///<cwd-url-encodé> BEL` sur
+/// la console AVANT de rappeler l'ancien prompt (préservation). L'hôte est laissé
+/// vide (`file:///…`, accepté par le renifleur). Pas de guillemets doubles :
+/// évite tout double-échappement à la frontière du spawn (portable-pty).
+const OSC7_PS_SNIPPET: &str = "$__wimux_op=$function:prompt;function global:prompt{$__wimux_u=[uri]::EscapeUriString(((Get-Location).ProviderPath -replace '\\\\','/'));[Console]::Write(([string][char]27)+']7;file:///'+$__wimux_u+([string][char]7));& $__wimux_op}";
+
+/// Détermine les arguments de spawn injectant l'émission OSC 7 pour un shell
+/// PowerShell/pwsh. `None` pour tout autre shell (cmd.exe, bash…) → pas
+/// d'injection (repli sans régression : le cwd restera `None`).
+pub fn osc7_prompt_injection(shell: &str) -> Option<Vec<String>> {
+    let base = shell.rsplit(['\\', '/']).next().unwrap_or(shell);
+    let base = base.to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    if base == "powershell" || base == "pwsh" {
+        Some(vec![
+            "-NoExit".to_string(),
+            "-Command".to_string(),
+            OSC7_PS_SNIPPET.to_string(),
+        ])
+    } else {
+        None
+    }
+}
+
+/// Spawn d'un volet shell avec injection OSC 7 conditionnelle (PowerShell/pwsh).
+fn spawn_shell_pane_with(
+    cols: u16,
+    rows: u16,
+    shell: &str,
+    notifier: &Arc<Notifier>,
+) -> Result<Arc<Pane>> {
+    match osc7_prompt_injection(shell) {
+        Some(args) => Pane::spawn_command(cols, rows, shell, &args, None, Arc::clone(notifier)),
+        None => Pane::spawn(cols, rows, shell, Arc::clone(notifier)),
     }
 }
 
@@ -1225,5 +1270,36 @@ mod tests {
         let (windows, _) = s.window_list();
         assert_eq!(windows[0].name, None);
         s.kill();
+    }
+
+    #[test]
+    fn injection_powershell_renvoie_les_args() {
+        let args = osc7_prompt_injection("powershell.exe").expect("powershell -> Some");
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "-NoExit");
+        assert_eq!(args[1], "-Command");
+        assert_eq!(args[2], OSC7_PS_SNIPPET);
+    }
+
+    #[test]
+    fn injection_pwsh_renvoie_les_args() {
+        assert!(osc7_prompt_injection("pwsh").is_some());
+        assert!(osc7_prompt_injection("pwsh.exe").is_some());
+    }
+
+    #[test]
+    fn injection_insensible_casse_et_chemin() {
+        assert!(osc7_prompt_injection("PowerShell.EXE").is_some());
+        assert!(
+            osc7_prompt_injection(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn injection_autre_shell_renvoie_none() {
+        assert!(osc7_prompt_injection("cmd.exe").is_none());
+        assert!(osc7_prompt_injection("bash").is_none());
+        assert!(osc7_prompt_injection("cmd").is_none());
     }
 }
