@@ -214,7 +214,7 @@ impl Osc7Sniffer {
                         }
                     }
                     0x07 => self.state = SniffState::Ground, // BEL prématuré
-                    0x1b => self.state = SniffState::SkipEsc,
+                    0x1b => self.state = SniffState::Esc,
                     _ => self.state = SniffState::Skip,
                 },
                 SniffState::Payload => match b {
@@ -237,10 +237,15 @@ impl Osc7Sniffer {
                         if let Some(p) = decode_osc7_uri(&self.payload) {
                             last = Some(p);
                         }
+                        // ESC suivi de `\` (ST) : séquence terminée.
+                        self.state = SniffState::Ground;
+                    } else if b == 0x1b {
+                        // ESC nu (pas suivi de `\`) : redémarrer une nouvelle séquence.
+                        self.state = SniffState::Esc;
+                    } else {
+                        // Autre octet : séquence abandonnée.
+                        self.state = SniffState::Ground;
                     }
-                    // ESC suivi de `\` (ST) : séquence terminée. Autre chose :
-                    // séquence abandonnée. Dans les deux cas on repart à Ground.
-                    self.state = SniffState::Ground;
                 }
                 SniffState::Skip => match b {
                     0x07 => self.state = SniffState::Ground,
@@ -248,16 +253,16 @@ impl Osc7Sniffer {
                     _ => {}
                 },
                 SniffState::SkipEsc => {
-                    self.state = if b == 0x1b {
-                        SniffState::SkipEsc
+                    if b == 0x1b {
+                        // ESC nu (pas suivi de `\`) : redémarrer une nouvelle séquence.
+                        self.state = SniffState::Esc;
+                    } else if b == b'\\' {
+                        // `\` (ST) => fin de la séquence qu'on jette.
+                        self.state = SniffState::Ground;
                     } else {
-                        // `\` (ST) => fin, tout autre octet => on continue à jeter.
-                        if b == b'\\' {
-                            SniffState::Ground
-                        } else {
-                            SniffState::Skip
-                        }
-                    };
+                        // Tout autre octet => on continue à jeter.
+                        self.state = SniffState::Skip;
+                    }
                 }
             }
         }
@@ -1239,5 +1244,14 @@ mod tests {
             decode_osc7_uri(b"file:///C:/foo/bar").as_deref(),
             Some("C:\\foo\\bar")
         );
+    }
+
+    #[test]
+    fn sniffer_esc_parasite_mi_sequence_recupere_le_suivant() {
+        let mut s = Osc7Sniffer::default();
+        // Payload interrompu par un ESC nu, immédiatement suivi d'un nouvel OSC 7 complet.
+        // Le second OSC 7 doit être capté malgré l'ESC parasite au milieu.
+        let out = s.feed(b"\x1b]7;file:///C:/a\x1b\x1b]7;file:///C:/b\x07");
+        assert_eq!(out.as_deref(), Some("C:\\b"));
     }
 }
