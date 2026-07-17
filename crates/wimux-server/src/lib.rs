@@ -4,6 +4,7 @@
 pub mod commands;
 pub mod config;
 pub mod daemon;
+pub mod git;
 pub mod pane;
 pub mod pty;
 pub mod session;
