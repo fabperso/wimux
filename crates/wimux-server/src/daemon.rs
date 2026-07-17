@@ -909,6 +909,14 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                     }
                 }
             }
+            ClientMessage::ListWindows => {
+                if let Some(s) = gui_attach.as_ref().map(|ga| Arc::clone(&ga.session)) {
+                    let (windows, active) = s.window_list();
+                    let _g = gui_write.lock().unwrap();
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &ServerMessage::WindowList { windows, active })?;
+                }
+            }
             ClientMessage::RenameWindow { index, name } => {
                 if let Some(s) = gui_attach.as_ref().map(|ga| Arc::clone(&ga.session)) {
                     s.gui_rename_window(index, name);

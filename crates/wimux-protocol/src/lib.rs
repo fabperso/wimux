@@ -153,8 +153,12 @@ pub struct Frame {
 /// `name` s'il est présent, sinon la position (1-based).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowInfo {
-    /// Nom explicite de la fenêtre, ou `None` (la GUI affiche alors la position).
+    /// Nom explicite de la fenêtre, ou `None` (la GUI affiche alors, à défaut, le
+    /// nom du répertoire courant `cwd`, sinon la position).
     pub name: Option<String>,
+    /// Répertoire courant du volet actif de la fenêtre (W3/W4), ou `None`. Sert de
+    /// libellé d'onglet par défaut (basename) façon CMUX.
+    pub cwd: Option<String>,
 }
 
 /// Messages client -> serveur.
@@ -281,6 +285,10 @@ pub enum ClientMessage {
         index: u32,
         name: String,
     },
+    /// Demande la liste courante des fenêtres (onglets) de la session GUI-attachée
+    /// (W4, sondage périodique) : le serveur répond par `WindowList` sur la
+    /// connexion persistante, ce qui rafraîchit les libellés d'onglet (cwd).
+    ListWindows,
 }
 
 /// Messages serveur -> client.
@@ -705,8 +713,12 @@ mod tests {
             windows: vec![
                 WindowInfo {
                     name: Some("build".into()),
+                    cwd: Some("C:\\proj".into()),
                 },
-                WindowInfo { name: None },
+                WindowInfo {
+                    name: None,
+                    cwd: None,
+                },
             ],
             active: 1,
         };

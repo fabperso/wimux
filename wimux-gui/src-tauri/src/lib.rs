@@ -309,6 +309,15 @@ fn new_window(bridge: State<Bridge>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn list_windows(bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(&mut w, &ClientMessage::ListWindows).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn select_window(index: u32, bridge: State<Bridge>) -> Result<(), String> {
     if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
         let mut w: &PipeConn = conn;
@@ -355,6 +364,7 @@ pub fn run() {
             create_agent,
             create_batch,
             new_window,
+            list_windows,
             select_window,
             close_window,
             rename_window

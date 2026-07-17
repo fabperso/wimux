@@ -2,6 +2,26 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { PaneManager, type LayoutNode } from "./panes";
 
+// --- Icônes SVG (monochrome, héritent de la couleur du texte) --------------
+const SVG = {
+  terminal: '<path d="M4 6l5 6-5 6"/><path d="M12 18h8"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  branch: '<circle cx="6" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="8" r="2.2"/><path d="M6 8.2v7.6"/><path d="M18 10.2c0 4-4 3.4-6 5.6"/>',
+  splitCols: '<rect x="3.5" y="4.5" width="7" height="15" rx="1.2"/><rect x="13.5" y="4.5" width="7" height="15" rx="1.2"/>',
+  splitRows: '<rect x="4.5" y="3.5" width="15" height="7" rx="1.2"/><rect x="4.5" y="13.5" width="15" height="7" rx="1.2"/>',
+  closePane: '<path d="M6 6l12 12"/><path d="M18 6L6 18"/>',
+  panel: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9 4.5v15"/>',
+};
+
+function icon(shape: string, cls = "ic"): HTMLElement {
+  const s = document.createElement("span");
+  s.className = cls;
+  s.innerHTML =
+    `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" ` +
+    `stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${shape}</svg>`;
+  return s;
+}
+
 const mount = document.getElementById("terminal")!;
 const paneManager = new PaneManager(mount, {
   onInput: (paneId, bytes) => {
@@ -25,9 +45,13 @@ const paneManager = new PaneManager(mount, {
 });
 
 let activeSession: string | null = null;
+// Volet actif courant (payload[1] de window-layout) : cible des contrôles de
+// split/fermeture de la barre d'onglets.
+let activePaneId: number | null = null;
 
 // Disposition + flux serveur -> volets.
 listen<[LayoutNode, number]>("window-layout", (e) => {
+  activePaneId = e.payload[1];
   paneManager.renderLayout(e.payload[0], e.payload[1]);
 });
 listen<[number, number[]]>("pane-snapshot", (e) => {
@@ -41,7 +65,15 @@ listen<string>("pane-error", (e) => {
 });
 
 // --- W2 : barre d'onglets (fenêtres de la session GUI-attachée) -------------
-type WindowInfo = { name: string | null };
+type WindowInfo = { name: string | null; cwd: string | null };
+
+// Dernier segment d'un chemin (basename), façon CMUX pour nommer un onglet.
+function baseName(p: string | null): string | null {
+  if (!p) return null;
+  const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
+  const last = parts[parts.length - 1];
+  return last || null;
+}
 
 const tabsEl = document.getElementById("tabs")!;
 // Dernière fenêtre active connue : une bascule (changement d'`active`) impose un
@@ -49,8 +81,10 @@ const tabsEl = document.getElementById("tabs")!;
 // snapshots frais repeignent le contenu).
 let lastActiveWindow = -1;
 let lastWindows: WindowInfo[] = [];
+let editingTab = false; // suspend le rafraîchissement des onglets pendant un renommage
 
 listen<[WindowInfo[], number]>("window-list", (e) => {
+  if (editingTab) return; // ne pas écraser l'input de renommage d'onglet en cours
   const [windows, active] = e.payload;
   if (active !== lastActiveWindow) {
     paneManager.reset();
@@ -60,14 +94,22 @@ listen<[WindowInfo[], number]>("window-list", (e) => {
   renderTabs(windows, active);
 });
 
+// Repli du panneau des workspaces (bouton en haut du rail).
+const railCollapseBtn = document.getElementById("rail-collapse")!;
+railCollapseBtn.appendChild(icon(SVG.panel));
+railCollapseBtn.onclick = () => {
+  document.getElementById("app")!.classList.toggle("rail-collapsed");
+};
+
 function renderTabs(windows: WindowInfo[], active: number) {
   tabsEl.innerHTML = "";
   windows.forEach((win, i) => {
     const tab = document.createElement("div");
     tab.className = "tab" + (i === active ? " active" : "");
+    tab.appendChild(icon(SVG.terminal, "tab-ic"));
     const label = document.createElement("span");
     label.className = "tab-label";
-    label.textContent = win.name ?? String(i + 1);
+    label.textContent = win.name ?? baseName(win.cwd) ?? String(i + 1);
     tab.appendChild(label);
     let clickTimer: number | null = null;
     label.ondblclick = (ev) => {
@@ -101,9 +143,49 @@ function renderTabs(windows: WindowInfo[], active: number) {
   add.title = "Nouvel onglet";
   add.onclick = () => { invoke("new_window", {}).catch(() => {}); };
   tabsEl.appendChild(add);
+
+  // Contrôles de volet TOUJOURS visibles (à droite), agissant sur le volet actif.
+  const controls = document.createElement("div");
+  controls.className = "tab-controls";
+  controls.append(
+    ctrlButton(SVG.splitCols, "Découper gauche/droite", () => {
+      if (activePaneId !== null) invoke("split_pane", { paneId: activePaneId, dir: "LeftRight" }).catch(() => {});
+    }),
+    ctrlButton(SVG.splitRows, "Découper haut/bas", () => {
+      if (activePaneId !== null) invoke("split_pane", { paneId: activePaneId, dir: "TopBottom" }).catch(() => {});
+    }),
+    ctrlButton(SVG.closePane, "Fermer le volet actif", () => {
+      if (activePaneId !== null) invoke("close_pane", { paneId: activePaneId }).catch(() => {});
+    }),
+  );
+  tabsEl.appendChild(controls);
+
+  updateWsHeader();
+}
+
+function ctrlButton(shape: string, title: string, onClick: () => void): HTMLElement {
+  const b = document.createElement("button");
+  b.className = "ctrl-btn";
+  b.title = title;
+  b.appendChild(icon(shape));
+  b.onclick = (ev) => { ev.stopPropagation(); onClick(); };
+  return b;
+}
+
+function updateWsHeader() {
+  const h = document.getElementById("ws-header")!;
+  h.replaceChildren();
+  if (!activeSession) { h.classList.add("empty"); return; }
+  h.classList.remove("empty");
+  h.append(icon(SVG.folder, "ws-ic"));
+  const dto = lastSessions.find((s) => s.name === activeSession);
+  const n = document.createElement("span");
+  n.textContent = dto ? sessionTitle(dto) : activeSession;
+  h.appendChild(n);
 }
 
 function startTabRename(tab: HTMLElement, index: number, oldName: string) {
+  editingTab = true;
   const input = document.createElement("input");
   input.className = "tab-edit";
   input.value = oldName;
@@ -114,14 +196,16 @@ function startTabRename(tab: HTMLElement, index: number, oldName: string) {
   const commit = () => {
     if (committed) return;
     committed = true;
+    editingTab = false;
     const name = input.value.trim();
-    // Nom vide => le serveur remet le nom à None (affiche la position).
+    // Nom vide => le serveur remet le nom à None (affiche le répertoire ou la position).
     invoke("rename_window", { index, name }).catch(() => {});
   };
   input.onkeydown = (ev) => {
     if (ev.key === "Enter") commit();
     else if (ev.key === "Escape") {
       committed = true;
+      editingTab = false;
       renderTabs(lastWindows, lastActiveWindow);
     }
   };
@@ -159,6 +243,7 @@ async function switchTo(name: string) {
     console.error("attach:", e),
   );
   renderRail(lastSessions);
+  updateWsHeader();
 }
 
 let lastSessions: SessionDto[] = [];
@@ -186,6 +271,14 @@ function agentStatusClass(status: string | null): string {
   }
 }
 
+// Titre affiché d'une session : si elle porte un nom auto-généré (numérique),
+// afficher le nom du répertoire courant (façon CMUX) ; sinon le nom explicite.
+// `s.name` reste l'identité (switch/kill/rename).
+function sessionTitle(s: SessionDto): string {
+  if (s.cwd && /^\d+$/.test(s.name)) return baseName(s.cwd) ?? s.name;
+  return s.name;
+}
+
 function abbreviateCwd(cwd: string): string {
   // Remplace un préfixe de profil utilisateur par `~` (heuristique).
   let p = cwd.replace(/^[A-Za-z]:\\Users\\[^\\]+/i, "~");
@@ -199,14 +292,18 @@ function renderSession(s: SessionDto): HTMLElement {
   el.className = "session" + (s.name === activeSession ? " active" : "");
   const main = document.createElement("div");
   main.className = "session-main";
+  const nameRow = document.createElement("div");
+  nameRow.className = "name-row";
   const name = document.createElement("span");
   name.className = "name";
-  name.textContent = s.name;
-  main.appendChild(name);
+  name.textContent = sessionTitle(s);
+  nameRow.appendChild(name);
+  main.appendChild(nameRow);
   // 2e ligne : cwd abrégé + branche. Masquée si cwd inconnu (cmd.exe, agent…).
   if (s.cwd) {
     const meta = document.createElement("div");
     meta.className = "session-meta";
+    meta.appendChild(icon(SVG.folder, "meta-ic"));
     const cwd = document.createElement("span");
     cwd.className = "meta-cwd";
     cwd.textContent = abbreviateCwd(s.cwd);
@@ -215,7 +312,10 @@ function renderSession(s: SessionDto): HTMLElement {
     if (s.branch) {
       const br = document.createElement("span");
       br.className = "meta-branch";
-      br.textContent = "⎇ " + s.branch;
+      br.appendChild(icon(SVG.branch, "meta-ic"));
+      const bn = document.createElement("span");
+      bn.textContent = s.branch;
+      br.appendChild(bn);
       br.title = s.branch;
       meta.appendChild(br);
     }
@@ -344,6 +444,9 @@ async function refresh() {
     renderRail(sessions); // peuple le rail + lastSessions d'abord
     // Auto-sélection : si aucune session active mais il en existe, prendre la première.
     if (!activeSession && sessions.length > 0) { await switchTo(sessions[0].name); }
+    // Rafraîchit aussi les onglets (leurs cwd/libellés) : le serveur répond par un
+    // window-list sur la connexion persistante. Suspendu pendant une édition d'onglet.
+    if (activeSession && !editingTab) invoke("list_windows").catch(() => {});
   } catch { /* serveur absent : on garde l'affichage precedent (rail non modifie) */ }
 }
 

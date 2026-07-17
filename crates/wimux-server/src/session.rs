@@ -270,7 +270,10 @@ impl Session {
         let windows = inner
             .windows
             .iter()
-            .map(|w| WindowInfo { name: w.name() })
+            .map(|w| WindowInfo {
+                name: w.name(),
+                cwd: w.active_pane().cwd(),
+            })
             .collect();
         (windows, inner.active_window as u32)
     }
@@ -293,7 +296,10 @@ impl Session {
             let windows = inner
                 .windows
                 .iter()
-                .map(|w| WindowInfo { name: w.name() })
+                .map(|w| WindowInfo {
+                    name: w.name(),
+                    cwd: w.active_pane().cwd(),
+                })
                 .collect();
             (windows, inner.active_window as u32)
         };
@@ -315,7 +321,10 @@ impl Session {
             let windows = inner
                 .windows
                 .iter()
-                .map(|w| WindowInfo { name: w.name() })
+                .map(|w| WindowInfo {
+                    name: w.name(),
+                    cwd: w.active_pane().cwd(),
+                })
                 .collect();
             (windows, inner.active_window as u32)
         };
@@ -344,7 +353,10 @@ impl Session {
             let windows = inner
                 .windows
                 .iter()
-                .map(|w| WindowInfo { name: w.name() })
+                .map(|w| WindowInfo {
+                    name: w.name(),
+                    cwd: w.active_pane().cwd(),
+                })
                 .collect();
             (windows, inner.active_window as u32)
         };

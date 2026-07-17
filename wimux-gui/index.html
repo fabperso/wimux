@@ -10,9 +10,12 @@
   <body>
     <div id="app">
       <aside id="rail">
+        <div id="rail-top">
+          <button id="rail-collapse" class="rail-icon-btn" title="Replier le panneau"></button>
+          <button id="new-session" class="rail-icon-btn" title="Nouvelle session">+</button>
+        </div>
         <div id="sessions"></div>
         <div id="rail-actions">
-          <button id="new-session" title="Nouvelle session">+</button>
           <!-- Features agent (M2) + lot (M3) masquees le temps de se concentrer sur
                la parite CMUX (W-serie). Backend conserve ; retirer `hidden` pour reactiver. -->
           <button id="new-agent" title="Lancer un agent" hidden>+ agent</button>
@@ -20,6 +23,7 @@
         </div>
       </aside>
       <div id="workspace">
+        <div id="ws-header"></div>
         <div id="tabs"></div>
         <div id="terminal"></div>
       </div>
