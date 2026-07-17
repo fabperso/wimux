@@ -1489,3 +1489,92 @@ fn onglets_cycle_de_vie() {
     let _ = send(&mut w, &ClientMessage::Kill { name: "W".into() });
     std::thread::sleep(Duration::from_millis(200));
 }
+
+// --- W3 : cwd (OSC 7) + branche git dans SessionInfo ----------------------
+
+/// Crée un dépôt git temporaire sur une branche nommée. `None` si git absent.
+fn init_temp_git_repo_on_branch(label: &str, branch: &str) -> Option<std::path::PathBuf> {
+    let git_ok = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !git_ok {
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("wimux-w3-repo-{}-{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    assert!(git(&["init"]), "git init a échoué");
+    assert!(
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]),
+        "commit initial a échoué"
+    );
+    assert!(git(&["checkout", "-b", branch]), "checkout -b a échoué");
+    Some(dir)
+}
+
+#[test]
+fn cwd_et_branche_via_osc7() {
+    let Some(repo) = init_temp_git_repo_on_branch("cb", "w3-branch") else {
+        eprintln!("git absent : test cwd_et_branche_via_osc7 ignoré");
+        return;
+    };
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-w3cwd", std::process::id());
+    start_daemon(&pipe); // shell par défaut = powershell.exe
+
+    create_detached(&pipe, "W3");
+
+    // Chemin natif (pour comparaison) et URL (slashes avant, hôte vide).
+    let repo_native = repo.to_string_lossy().into_owned(); // C:\...\repo
+    let repo_url = repo_native.replace('\\', "/"); // C:/...:/repo
+
+    // Une seule ligne PowerShell : se placer dans le dépôt PUIS émettre un OSC 7
+    // FIXE (indépendant du hook de prompt) pointant sur ce dépôt.
+    let cmd = format!(
+        "Set-Location -LiteralPath '{repo_native}'; [Console]::Out.Write(\"$([char]27)]7;file:///{repo_url}$([char]7)\")\r"
+    );
+    send_keys(&pipe, "W3", cmd.as_bytes());
+
+    let want_native = repo_native.clone();
+    let ok = poll_list_until(&pipe, 25, |list| {
+        list.iter().find(|s| s.name == "W3").is_some_and(|s| {
+            s.cwd
+                .as_deref()
+                .is_some_and(|c| c.eq_ignore_ascii_case(&want_native))
+                && s.branch.as_deref() == Some("w3-branch")
+        })
+    });
+    assert!(
+        ok,
+        "W3 devrait exposer cwd={repo_native} et branch=w3-branch : {:?}",
+        fetch_list(&pipe)
+    );
+
+    let c = Arc::new(connect_retry(&pipe));
+    handshake(&c);
+    {
+        let mut w: &PipeConn = &c;
+        let _ = send(&mut w, &ClientMessage::Kill { name: "W3".into() });
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::fs::remove_dir_all(&repo);
+}

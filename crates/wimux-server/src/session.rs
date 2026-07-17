@@ -132,6 +132,11 @@ impl Session {
             .map(|w| w.active_pane())
     }
 
+    /// cwd du volet actif de la fenêtre active (source du cwd de session, W3).
+    pub fn active_pane_cwd(&self) -> Option<String> {
+        self.active_pane().and_then(|p| p.cwd())
+    }
+
     /// Prépare l'attache GUI de la fenêtre active : crée UN canal fusionné, abonne
     /// chaque volet, renvoie la disposition, le volet actif, les snapshots par
     /// volet, le récepteur fusionné ET un `Sender` (pour abonner les futurs volets).

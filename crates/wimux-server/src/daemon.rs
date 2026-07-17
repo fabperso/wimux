@@ -79,6 +79,10 @@ impl Server {
                 } else {
                     (s.has_activity(), s.has_bell())
                 };
+                let cwd = s.active_pane_cwd();
+                let branch = cwd
+                    .as_deref()
+                    .and_then(|c| crate::git::git_branch(std::path::Path::new(c)));
                 SessionInfo {
                     name,
                     windows: s.window_count() as u32,
@@ -90,8 +94,8 @@ impl Server {
                         self.config.agent_idle_seconds,
                     )),
                     group: s.group(),
-                    cwd: None,
-                    branch: None,
+                    cwd,
+                    branch,
                 }
             })
             .collect();
