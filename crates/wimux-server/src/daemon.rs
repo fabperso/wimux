@@ -66,9 +66,17 @@ impl Server {
     fn list(&self) -> Vec<SessionInfo> {
         self.reap();
         let viewed = self.gui_viewed.lock().unwrap().clone();
-        let sessions = self.sessions.lock().unwrap();
-        let mut infos: Vec<SessionInfo> = sessions
-            .values()
+
+        // Collecter les Arc<Session> SOUS le verrou, puis dropper le guard
+        // avant tout calcul lent (git_branch fait de l'I/O disque).
+        let sessions_vec = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions.values().cloned().collect::<Vec<_>>()
+        };
+
+        // Construire les SessionInfo HORS verrou global.
+        let mut infos: Vec<SessionInfo> = sessions_vec
+            .iter()
             .map(|s| {
                 let name = s.name();
                 // La session vue n'a jamais d'indicateur : on efface et on
