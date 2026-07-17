@@ -134,6 +134,186 @@ struct PaneState {
     exit_code: Option<u32>,
     copy: Option<CopyMode>,
     subscribers: Vec<std::sync::mpsc::Sender<(PaneId, Vec<u8>)>>,
+    /// cwd courant du volet, mis à jour par le renifleur OSC 7 (W3).
+    cwd: Option<String>,
+    /// État du renifleur OSC 7 (partiels d'une séquence coupée entre lectures).
+    sniffer: Osc7Sniffer,
+}
+
+/// Garde-fou : un payload OSC 7 plausible (une URI de chemin) ne dépasse pas
+/// cette taille ; au-delà on abandonne la séquence (protection anti-emballement).
+const OSC7_MAX: usize = 4096;
+
+/// Renifleur OSC 7 **à état** : reconnaît `ESC ] 7 ; <payload> (BEL | ESC \)`
+/// dans le flux brut d'un volet. À état car une séquence peut être coupée entre
+/// deux lectures PTY (le `payload` partiel survit d'un `feed` au suivant).
+#[derive(Default)]
+struct Osc7Sniffer {
+    state: SniffState,
+    /// Chiffres du paramètre `Ps` (avant le premier `;`).
+    ps: Vec<u8>,
+    /// Octets du payload d'un OSC 7 (après `7;`), jusqu'au terminateur.
+    payload: Vec<u8>,
+}
+
+#[derive(Default, PartialEq)]
+enum SniffState {
+    /// Hors séquence.
+    #[default]
+    Ground,
+    /// Vu `ESC` (0x1b).
+    Esc,
+    /// Vu `ESC ]` : on lit `Ps` jusqu'au `;`.
+    Ps,
+    /// Dans le payload d'un OSC 7.
+    Payload,
+    /// Vu `ESC` dans le payload (attend `\` pour le terminateur ST).
+    PayloadEsc,
+    /// OSC non-7 : on jette jusqu'au terminateur.
+    Skip,
+    /// Vu `ESC` dans un OSC non-7.
+    SkipEsc,
+}
+
+impl Osc7Sniffer {
+    /// Fait avancer la machine sur `bytes`. Renvoie le DERNIER cwd complété dans
+    /// ce chunk (le plus récent l'emporte), ou `None` si aucun.
+    fn feed(&mut self, bytes: &[u8]) -> Option<String> {
+        let mut last: Option<String> = None;
+        for &b in bytes {
+            match self.state {
+                SniffState::Ground => {
+                    if b == 0x1b {
+                        self.state = SniffState::Esc;
+                    }
+                }
+                SniffState::Esc => {
+                    if b == 0x5d {
+                        // ESC ]
+                        self.ps.clear();
+                        self.state = SniffState::Ps;
+                    } else if b == 0x1b {
+                        self.state = SniffState::Esc;
+                    } else {
+                        self.state = SniffState::Ground;
+                    }
+                }
+                SniffState::Ps => match b {
+                    b';' => {
+                        if self.ps.len() == 1 && self.ps[0] == b'7' {
+                            self.payload.clear();
+                            self.state = SniffState::Payload;
+                        } else {
+                            self.state = SniffState::Skip;
+                        }
+                    }
+                    0x30..=0x39 => {
+                        self.ps.push(b);
+                        if self.ps.len() > 4 {
+                            self.state = SniffState::Skip;
+                        }
+                    }
+                    0x07 => self.state = SniffState::Ground, // BEL prématuré
+                    0x1b => self.state = SniffState::SkipEsc,
+                    _ => self.state = SniffState::Skip,
+                },
+                SniffState::Payload => match b {
+                    0x07 => {
+                        if let Some(p) = decode_osc7_uri(&self.payload) {
+                            last = Some(p);
+                        }
+                        self.state = SniffState::Ground;
+                    }
+                    0x1b => self.state = SniffState::PayloadEsc,
+                    _ => {
+                        self.payload.push(b);
+                        if self.payload.len() > OSC7_MAX {
+                            self.state = SniffState::Ground;
+                        }
+                    }
+                },
+                SniffState::PayloadEsc => {
+                    if b == b'\\' {
+                        if let Some(p) = decode_osc7_uri(&self.payload) {
+                            last = Some(p);
+                        }
+                    }
+                    // ESC suivi de `\` (ST) : séquence terminée. Autre chose :
+                    // séquence abandonnée. Dans les deux cas on repart à Ground.
+                    self.state = SniffState::Ground;
+                }
+                SniffState::Skip => match b {
+                    0x07 => self.state = SniffState::Ground,
+                    0x1b => self.state = SniffState::SkipEsc,
+                    _ => {}
+                },
+                SniffState::SkipEsc => {
+                    self.state = if b == 0x1b {
+                        SniffState::SkipEsc
+                    } else {
+                        // `\` (ST) => fin, tout autre octet => on continue à jeter.
+                        if b == b'\\' {
+                            SniffState::Ground
+                        } else {
+                            SniffState::Skip
+                        }
+                    };
+                }
+            }
+        }
+        last
+    }
+}
+
+/// Décode un payload OSC 7 (`file://<host>/<chemin>`) en chemin natif Windows.
+/// `host` doit être vide ou `localhost` (insensible à la casse), sinon `None`
+/// (repli : on ignore un host distant, dont le chemin n'a pas de sens local).
+/// URL-décode les `%XX`. `None` si le payload n'est pas une URI `file://`
+/// exploitable.
+fn decode_osc7_uri(payload: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(payload).ok()?;
+    let rest = s.strip_prefix("file://")?;
+    // Séparer host (jusqu'au premier '/') du chemin (qui commence par ce '/').
+    let slash = rest.find('/')?;
+    let host = &rest[..slash];
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    let decoded = percent_decode(&rest[slash..]);
+    Some(uri_path_to_windows(&decoded))
+}
+
+/// URL-décodage minimal des `%XX` (les autres octets sont conservés tels quels).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Convertit un chemin d'URI `/C:/a/b` en chemin natif Windows `C:\a\b` : retire
+/// le `/` de tête devant une lettre de lecteur, puis remplace `/` par `\`.
+fn uri_path_to_windows(path: &str) -> String {
+    let b = path.as_bytes();
+    let trimmed = if b.len() >= 3 && b[0] == b'/' && b[2] == b':' && b[1].is_ascii_alphabetic() {
+        &path[1..]
+    } else {
+        path
+    };
+    trimmed.replace('/', "\\")
 }
 
 pub struct Pane {
@@ -204,6 +384,8 @@ impl Pane {
                 exit_code: None,
                 copy: None,
                 subscribers: Vec::new(),
+                cwd: None,
+                sniffer: Osc7Sniffer::default(),
             }),
             notifier,
         });
@@ -256,6 +438,11 @@ impl Pane {
     pub fn size(&self) -> (u16, u16) {
         let st = self.state.lock().unwrap();
         (st.cols, st.rows)
+    }
+
+    /// cwd courant du volet (dernier OSC 7 capté), `None` si aucun (W3).
+    pub fn cwd(&self) -> Option<String> {
+        self.state.lock().unwrap().cwd.clone()
     }
 
     /// Sous un seul verrou : reconstruit l'instantané FIDÈLE ET inscrit un abonné
@@ -538,6 +725,11 @@ fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
                 let rang = {
                     let mut st = pane.state.lock().unwrap();
                     st.terminal.advance(&buf[..n]);
+                    // Renifleur OSC 7 passif (W3) : sous le même verrou, sur les
+                    // mêmes octets bruts ; met à jour le cwd sans toucher au reste.
+                    if let Some(cwd) = st.sniffer.feed(&buf[..n]) {
+                        st.cwd = Some(cwd);
+                    }
                     let responses = st.terminal.take_responses();
                     if !responses.is_empty() {
                         let _ = st.writer.write_all(&responses);
@@ -983,6 +1175,69 @@ mod tests {
             Arc::strong_count(&pane),
             1,
             "après kill (master fermé), le thread lecteur doit relâcher son Arc<Pane>"
+        );
+    }
+
+    #[test]
+    fn sniffer_bel_extrait_le_cwd() {
+        let mut s = Osc7Sniffer::default();
+        let out = s.feed(b"before\x1b]7;file:///C:/a/b\x07after");
+        assert_eq!(out.as_deref(), Some("C:\\a\\b"));
+    }
+
+    #[test]
+    fn sniffer_st_extrait_le_cwd() {
+        let mut s = Osc7Sniffer::default();
+        let out = s.feed(b"\x1b]7;file:///C:/a/b\x1b\\");
+        assert_eq!(out.as_deref(), Some("C:\\a\\b"));
+    }
+
+    #[test]
+    fn sniffer_sequence_coupee_en_deux_lectures() {
+        let mut s = Osc7Sniffer::default();
+        assert_eq!(s.feed(b"\x1b]7;file:///C:/a"), None);
+        let out = s.feed(b"/b\x07");
+        assert_eq!(out.as_deref(), Some("C:\\a\\b"));
+    }
+
+    #[test]
+    fn sniffer_url_decode_espace() {
+        let mut s = Osc7Sniffer::default();
+        let out = s.feed(b"\x1b]7;file:///C:/a%20b\x07");
+        assert_eq!(out.as_deref(), Some("C:\\a b"));
+    }
+
+    #[test]
+    fn sniffer_localhost_accepte() {
+        let mut s = Osc7Sniffer::default();
+        let out = s.feed(b"\x1b]7;file://localhost/C:/x\x07");
+        assert_eq!(out.as_deref(), Some("C:\\x"));
+    }
+
+    #[test]
+    fn sniffer_host_distant_ignore() {
+        let mut s = Osc7Sniffer::default();
+        assert_eq!(s.feed(b"\x1b]7;file://autremachine/C:/x\x07"), None);
+    }
+
+    #[test]
+    fn sniffer_sans_osc7_pas_de_faux_positif() {
+        let mut s = Osc7Sniffer::default();
+        assert_eq!(s.feed(b"texte ordinaire\r\nPS C:\\> "), None);
+    }
+
+    #[test]
+    fn sniffer_osc_autre_que_7_ignore() {
+        let mut s = Osc7Sniffer::default();
+        // OSC 0 (titre de fenêtre) : ignoré, pas de cwd.
+        assert_eq!(s.feed(b"\x1b]0;mon titre\x07"), None);
+    }
+
+    #[test]
+    fn decode_osc7_uri_hote_vide() {
+        assert_eq!(
+            decode_osc7_uri(b"file:///C:/foo/bar").as_deref(),
+            Some("C:\\foo\\bar")
         );
     }
 }
