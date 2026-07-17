@@ -13,8 +13,10 @@
         <div id="sessions"></div>
         <div id="rail-actions">
           <button id="new-session" title="Nouvelle session">+</button>
-          <button id="new-agent" title="Lancer un agent">+ agent</button>
-          <button id="new-batch" title="Lancer un lot d'agents">⇉ lot</button>
+          <!-- Features agent (M2) + lot (M3) masquees le temps de se concentrer sur
+               la parite CMUX (W-serie). Backend conserve ; retirer `hidden` pour reactiver. -->
+          <button id="new-agent" title="Lancer un agent" hidden>+ agent</button>
+          <button id="new-batch" title="Lancer un lot d'agents" hidden>⇉ lot</button>
         </div>
       </aside>
       <div id="workspace">
