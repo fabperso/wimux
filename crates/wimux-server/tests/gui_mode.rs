@@ -1554,13 +1554,25 @@ fn cwd_et_branche_via_osc7() {
     );
     send_keys(&pipe, "W3", cmd.as_bytes());
 
+    // Comparaison robuste à la forme courte (8.3) vs longue du chemin : sur
+    // certains profils Windows, `std::env::temp_dir()` renvoie un chemin
+    // court (ex. `FABRIC~1.AND`) alors que PowerShell, via l'OSC 7 émis
+    // réellement au spawn, rapporte la forme longue du même dossier. On
+    // canonicalise les deux côtés (même dossier => même racine `\\?\...`)
+    // pour ne pas dépendre de la forme retournée.
+    fn canon_or_raw(p: &str) -> String {
+        std::fs::canonicalize(p)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| p.to_string())
+    }
     let want_native = repo_native.clone();
+    let want_canon = canon_or_raw(&want_native);
     let ok = poll_list_until(&pipe, 25, |list| {
         list.iter().find(|s| s.name == "W3").is_some_and(|s| {
-            s.cwd
-                .as_deref()
-                .is_some_and(|c| c.eq_ignore_ascii_case(&want_native))
-                && s.branch.as_deref() == Some("w3-branch")
+            s.cwd.as_deref().is_some_and(|c| {
+                c.eq_ignore_ascii_case(&want_native)
+                    || canon_or_raw(c).eq_ignore_ascii_case(&want_canon)
+            }) && s.branch.as_deref() == Some("w3-branch")
         })
     });
     assert!(

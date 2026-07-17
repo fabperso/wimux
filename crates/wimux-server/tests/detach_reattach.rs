@@ -294,11 +294,20 @@ fn split_compose_deux_volets_avec_bordure() {
 
     // Consommer l'Attached et attendre l'invite du premier volet.
     let _ = rx.recv_timeout(Duration::from_secs(5));
-    let (ready, _) = wait_for_marker(&rx, "PS", Duration::from_secs(15));
+    let (ready, prompt_screen) = wait_for_marker(&rx, "PS", Duration::from_secs(15));
     assert!(ready, "invite du premier volet absente");
 
-    // Barre de statut : la dernière frame doit montrer « [s] ».
-    let (status, _) = wait_for_marker(&rx, "[s]", Duration::from_secs(3));
+    // Barre de statut : elle doit montrer « [s] ». L'injection OSC 7 réelle
+    // (Task 5, W3) décale le timing/l'ordre des frames : la barre de statut
+    // peut avoir affiché « [s] » dans une frame consommée AVANT que « PS »
+    // ne soit trouvé (donc perdue par `wait_for_marker`, qui ne garde que la
+    // dernière frame vue). On vérifie donc d'abord la frame qui contenait
+    // déjà « PS » (accumulé), puis on retente une fenêtre d'attente dédiée
+    // si besoin, sans dépendre de l'ordre relatif à « PS ».
+    let status = prompt_screen.contains("[s]") || {
+        let (found, _) = wait_for_marker(&rx, "[s]", Duration::from_secs(8));
+        found
+    };
     assert!(status, "la barre de statut ne montre pas le nom de session");
 
     // Découpe verticale (Ctrl-b %). Une bordure « │ » doit apparaître.
