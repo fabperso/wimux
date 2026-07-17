@@ -90,6 +90,8 @@ impl Server {
                         self.config.agent_idle_seconds,
                     )),
                     group: s.group(),
+                    cwd: None,
+                    branch: None,
                 }
             })
             .collect();

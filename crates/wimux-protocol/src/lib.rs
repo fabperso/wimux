@@ -108,6 +108,10 @@ pub struct SessionInfo {
     /// Identifiant de lot (M3) : les sessions d'un même fan-out le partagent
     /// (`batch<N>`). `None` pour une session hors lot.
     pub group: Option<String>,
+    /// cwd courant du volet actif (chemin natif affichable), `None` si inconnu (W3).
+    pub cwd: Option<String>,
+    /// Branche git du cwd, `None` si hors repo / inconnu (W3).
+    pub branch: Option<String>,
 }
 
 /// Sens d'une découpe de volet (miroir du `window::SplitDir` serveur).
@@ -541,6 +545,8 @@ mod tests {
             agent: false,
             agent_status: None,
             group: None,
+            cwd: None,
+            branch: None,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -570,6 +576,8 @@ mod tests {
             agent: true,
             agent_status: Some(AgentStatus::Working),
             group: Some("batch0".into()),
+            cwd: None,
+            branch: None,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -756,6 +764,34 @@ mod tests {
             ClientMessage::RenameWindow { index, name } => {
                 assert_eq!(index, 0);
                 assert_eq!(name, "build");
+            }
+            _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_session_info_cwd_branche() {
+        let info = SessionInfo {
+            name: "dev".into(),
+            windows: 1,
+            attached: true,
+            activity: false,
+            bell: false,
+            agent: false,
+            agent_status: None,
+            group: None,
+            cwd: Some("C:\\proj\\wimux".into()),
+            branch: Some("main".into()),
+        };
+        let msg = ServerMessage::Sessions(vec![info]);
+        let mut buf = Vec::new();
+        send(&mut buf, &msg).unwrap();
+        let mut cur = io::Cursor::new(buf);
+        match recv::<_, ServerMessage>(&mut cur).unwrap() {
+            ServerMessage::Sessions(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].cwd.as_deref(), Some("C:\\proj\\wimux"));
+                assert_eq!(v[0].branch.as_deref(), Some("main"));
             }
             _ => panic!("mauvais variant"),
         }
