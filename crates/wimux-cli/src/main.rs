@@ -689,12 +689,13 @@ fn agent_logs(args: &[String]) -> io::Result<()> {
     if !follow {
         return Ok(());
     }
-    // Suivi : relire les octets ajoutés au fichier (best-effort, dé-ANSI par bloc).
-    loop {
-        std::thread::sleep(Duration::from_millis(300));
+    // Imprime les octets ajoutés depuis `last_len` (dé-ANSI par bloc si `!raw`)
+    // et avance `last_len`. Factorisé car appelé à chaque tour ET une dernière
+    // fois après détection de la fin de l'agent.
+    let print_new = |last_len: &mut u64| {
         let content = std::fs::read(&path).unwrap_or_default();
-        if (content.len() as u64) > last_len {
-            let slice = &content[last_len as usize..];
+        if (content.len() as u64) > *last_len {
+            let slice = &content[*last_len as usize..];
             let chunk = String::from_utf8_lossy(slice);
             let text = if raw {
                 chunk.to_string()
@@ -703,7 +704,47 @@ fn agent_logs(args: &[String]) -> io::Result<()> {
             };
             print!("{text}");
             let _ = io::stdout().flush();
-            last_len = content.len() as u64;
+            *last_len = content.len() as u64;
+        }
+    };
+
+    // Suivi : relire les octets ajoutés au fichier (best-effort, dé-ANSI par
+    // bloc). S'arrête dès que le volet n'est plus « running » (agent terminé) :
+    // sans TTY côté appelant (Claude), un `--follow` sans fin bloquerait pour
+    // toujours faute de Ctrl-C possible.
+    loop {
+        std::thread::sleep(Duration::from_millis(300));
+        print_new(&mut last_len);
+
+        // Re-interroger l'état du volet via une connexion courte (comme le
+        // reste du CLI) : absent ou non-running -> volet terminé, dernière
+        // lecture puis sortie de boucle.
+        let still_running = (|| -> io::Result<bool> {
+            let conn = connected()?;
+            let mut w: &PipeConn = &conn;
+            send(
+                &mut w,
+                &ClientMessage::ListPanes {
+                    session: session.clone(),
+                },
+            )?;
+            let mut r: &PipeConn = &conn;
+            match recv::<_, ServerMessage>(&mut r)? {
+                ServerMessage::PaneList(panes) => Ok(panes
+                    .into_iter()
+                    .find(|p| p.pane_id == pane)
+                    .map(|p| p.running)
+                    .unwrap_or(false)),
+                _ => Ok(false),
+            }
+        })()
+        .unwrap_or(false);
+
+        if !still_running {
+            // Dernière lecture pour ne rien perdre entre la dernière boucle et
+            // la fin effective de l'écriture dans le journal.
+            print_new(&mut last_len);
+            return Ok(());
         }
     }
 }
