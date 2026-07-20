@@ -100,8 +100,9 @@ la CLI `wimux agent` en déduit les défauts `-t`/`-p`.
 ### Journal (volets agents seulement)
 
 Le `reader_loop` tee les octets bruts lus du PTY dans
-`~/.wimux/logs/<session>/<pane_id>.log` (chemin natif via le dossier profil
-utilisateur). Fichier **brut** (fidèle aux octets VT). Seuls les volets créés via
+`%LOCALAPPDATA%\wimux\logs\<session>\<pane_id>.log` (même racine applicative que
+l'`agent-worktree-root` de M3, sous `%LOCALAPPDATA%\wimux`). Fichier **brut**
+(fidèle aux octets VT). Seuls les volets créés via
 `SpawnPane` sont journalisés (`PaneSpawnCtx.log = true`) — borne l'usage disque et
 évite de journaliser les shells interactifs. Ajout à `PaneState` d'un
 `log: Option<Mutex<BufWriter<File>>>` ouvert au spawn ; échec d'ouverture =
@@ -184,7 +185,7 @@ distribuable (`npx skills add …`, `agents/openai.yaml`) = évolution future.
 2. La CLI lit `WIMUX_SESSION=S`, `WIMUX_PANE=P` → envoie
    `SpawnPane { session: S, from_pane: Some(P), dir: TopBottom, cwd: None, program: "claude", args: ["-p","tâche"] }`.
 3. Le daemon découpe la fenêtre, spawn le volet Q (env `WIMUX_SESSION=S`/
-   `WIMUX_PANE=Q` + journal `~/.wimux/logs/S/Q.log`), répond `PaneSpawned { Q }`.
+   `WIMUX_PANE=Q` + journal `%LOCALAPPDATA%\wimux\logs\S\Q.log`), répond `PaneSpawned { Q }`.
 4. La CLI imprime `{"pane_id":Q}` ; la GUI (si attachée) affiche Q en direct.
 5. Claude lit ensuite `wimux agent logs -p Q --tail 40` / `wimux agent list`
    (running → exit_code) jusqu'à complétion.
@@ -246,4 +247,4 @@ distribuable (`npx skills add …`, `agents/openai.yaml`) = évolution future.
 | Séquence VT coupée entre deux chunks à la dé-ANSI | Dé-ANSI sur le **contenu entier** lu (one-shot) ; `--follow` best-effort, `--raw` disponible |
 | Nom de session à threader jusqu'au spawn de volet | `PaneSpawnCtx { session, log }` passé depuis `Session`/`Window` |
 | Changement de protocole vs daemon persistant | Ajouts **en fin d'enum** ; rebuild release + redémarrage du daemon (piège consigné) |
-| Chemin journal non-UTF-8 / dossier profil introuvable | Ouverture tolérante (non-fatal) → `log_path = None` |
+| Chemin journal non-UTF-8 / `%LOCALAPPDATA%` introuvable | Ouverture tolérante (non-fatal) → `log_path = None` ; création best-effort de `%LOCALAPPDATA%\wimux\logs` |
