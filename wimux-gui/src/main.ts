@@ -234,6 +234,7 @@ type SessionDto = {
   branch: string | null;
   color: string | null;
   pinned: boolean;
+  layout_rev: number;
 };
 
 type AgentTemplateDto = { name: string };
@@ -241,6 +242,7 @@ type AgentTemplateDto = { name: string };
 async function switchTo(name: string) {
   if (name === activeSession) return;
   activeSession = name;
+  lastLayoutRev = -1; // nouvelle session active : on resondera son layout_rev au prochain refresh (A1.5)
   // Effacement optimiste : la session qu'on regarde n'a plus d'indicateur, sans
   // attendre le prochain sondage.
   for (const s of lastSessions) {
@@ -258,7 +260,20 @@ async function switchTo(name: string) {
   updateWsHeader();
 }
 
+// Réattache la session active (réutilisé quand un volet a été créé/fermé hors GUI,
+// ex. `wimux agent spawn` : le serveur ne pousse pas WindowLayout à cette
+// connexion, on redemande donc un attachement complet). (A1.5)
+async function reattachActive() {
+  if (!activeSession) return;
+  paneManager.reset();
+  lastActiveWindow = -1;
+  await invoke("attach_session", { session: activeSession }).catch((e) =>
+    console.error("reattach:", e),
+  );
+}
+
 let lastSessions: SessionDto[] = [];
+let lastLayoutRev = -1; // révision de layout vue pour la session active (A1.5)
 let renaming = false; // suspend le sondage tant qu'une edition de nom est en cours
 let draggedName: string | null = null; // session en cours de glisser-déposer (réordonnancement)
 
@@ -823,6 +838,19 @@ async function refresh() {
       lastActiveWindow = -1;
       lastWindows = [];
       updateWsHeader();
+    }
+    // A1.5 : un volet a-t-il été créé/fermé hors GUI ? (layout_rev de la session
+    // active a changé) → réattachement pour refléter la nouvelle topologie.
+    if (activeSession) {
+      const active = sessions.find((s) => s.name === activeSession);
+      if (active) {
+        if (lastLayoutRev === -1) {
+          lastLayoutRev = active.layout_rev;
+        } else if (active.layout_rev !== lastLayoutRev) {
+          lastLayoutRev = active.layout_rev;
+          await reattachActive();
+        }
+      }
     }
     // Auto-sélection : si aucune session active mais il en existe, prendre la première.
     if (!activeSession && sessions.length > 0) { await switchTo(sessions[0].name); }

@@ -99,6 +99,7 @@ struct SessionDto {
     branch: Option<String>,
     color: Option<String>,
     pinned: bool,
+    layout_rev: u64,
 }
 
 /// Libellé stable d'un `AgentStatus` pour le frontend (mappé sur un glyphe côté
@@ -134,6 +135,7 @@ fn list_sessions() -> Result<Vec<SessionDto>, String> {
                     branch: s.branch,
                     color: s.color,
                     pinned: s.pinned,
+                    layout_rev: s.layout_rev,
                 })
                 .collect()),
             ServerMessage::Error(e) => Err(e),
