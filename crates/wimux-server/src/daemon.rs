@@ -15,8 +15,8 @@ use std::thread::JoinHandle;
 use anyhow::Result;
 use wimux_protocol::transport::{PipeConn, PipeListener, user_pipe_name};
 use wimux_protocol::{
-    AgentTemplate, ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, SessionInfo,
-    recv, send,
+    AgentTemplate, ClientMessage, Hello, HelloReply, NotificationInfo, PROTOCOL_VERSION,
+    ServerMessage, SessionInfo, recv, send,
 };
 
 use crate::config::{Action, Config};
@@ -144,6 +144,27 @@ impl Server {
         if let Some(s) = self.sessions.lock().unwrap().get(name) {
             s.set_pinned(pinned);
         }
+    }
+
+    /// Draine les notifications OSC 9/777 de toutes les sessions, taguées de leur
+    /// nom (W6). Collecte les Arc sous verrou puis draine hors verrou global.
+    fn take_notifications(&self) -> Vec<NotificationInfo> {
+        let sessions = {
+            let s = self.sessions.lock().unwrap();
+            s.values().cloned().collect::<Vec<_>>()
+        };
+        let mut out = Vec::new();
+        for s in sessions {
+            let name = s.name();
+            for n in s.drain_notifications() {
+                out.push(NotificationInfo {
+                    session: name.clone(),
+                    title: n.title,
+                    body: n.body,
+                });
+            }
+        }
+        out
     }
 
     fn kill(&self, name: &str) -> bool {
@@ -702,6 +723,11 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 server.set_session_pinned(&name, pinned);
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &ServerMessage::Ok)?;
+            }
+            ClientMessage::TakeNotifications => {
+                let notifs = server.take_notifications();
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &ServerMessage::Notifications(notifs))?;
             }
             ClientMessage::AttachGui { session } => {
                 // Arrêter proprement la diffusion précédente avant d'en démarrer une.

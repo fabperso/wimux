@@ -266,6 +266,32 @@ fn set_session_pinned(name: String, pinned: bool) -> Result<(), String> {
     )
 }
 
+#[derive(serde::Serialize)]
+struct NotificationDto {
+    session: String,
+    title: Option<String>,
+    body: String,
+}
+
+#[tauri::command]
+fn take_notifications() -> Result<Vec<NotificationDto>, String> {
+    control(
+        || ClientMessage::TakeNotifications,
+        |msg| match msg {
+            ServerMessage::Notifications(v) => Ok(v
+                .into_iter()
+                .map(|n| NotificationDto {
+                    session: n.session,
+                    title: n.title,
+                    body: n.body,
+                })
+                .collect()),
+            ServerMessage::Error(e) => Err(e),
+            _ => Err("réponse inattendue".into()),
+        },
+    )
+}
+
 #[tauri::command]
 fn rename_session(from: String, to: String) -> Result<(), String> {
     control(
@@ -387,6 +413,7 @@ fn rename_window(index: u32, name: String, bridge: State<Bridge>) -> Result<(), 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(Bridge::default())
         .invoke_handler(tauri::generate_handler![
             attach_session,
@@ -402,6 +429,7 @@ pub fn run() {
             reorder_sessions,
             set_session_color,
             set_session_pinned,
+            take_notifications,
             rename_session,
             list_agent_templates,
             create_agent,

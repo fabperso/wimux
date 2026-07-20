@@ -60,6 +60,9 @@ pub struct Notifier {
     /// Horodatage de la dernière sortie (dernier `bump`), pour le calcul du
     /// statut d'agent (M1).
     last_output_at: Mutex<Instant>,
+    /// Notifications OSC 9/777 en attente de remontée à la GUI (W6). Partagée par
+    /// tous les volets de la session (le `Notifier` est partagé).
+    notifications: Mutex<Vec<PaneNotif>>,
 }
 
 impl Notifier {
@@ -69,7 +72,18 @@ impl Notifier {
             cond: Condvar::new(),
             bell: AtomicBool::new(false),
             last_output_at: Mutex::new(Instant::now()),
+            notifications: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Empile une notification OSC 9/777 (W6).
+    pub fn push_notification(&self, n: PaneNotif) {
+        self.notifications.lock().unwrap().push(n);
+    }
+
+    /// Draine les notifications en attente (W6).
+    pub fn drain_notifications(&self) -> Vec<PaneNotif> {
+        std::mem::take(&mut *self.notifications.lock().unwrap())
     }
 
     /// Signale un changement (nouvelle sortie, changement de layout...).
@@ -144,6 +158,25 @@ struct PaneState {
 /// cette taille ; au-delà on abandonne la séquence (protection anti-emballement).
 const OSC7_MAX: usize = 4096;
 
+/// Notification émise par un programme via `OSC 9` / `OSC 777` (W6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaneNotif {
+    pub title: Option<String>,
+    pub body: String,
+}
+
+/// Nature du payload OSC en cours de capture par le renifleur.
+#[derive(Default, PartialEq)]
+enum PayloadKind {
+    /// `OSC 7` : cwd (`file://…`).
+    #[default]
+    Cwd,
+    /// `OSC 9 ; <body>` : notification simple (iTerm2).
+    Notif9,
+    /// `OSC 777 ; notify ; <title> ; <body>` : notification avec titre.
+    Notif777,
+}
+
 /// Renifleur OSC 7 **à état** : reconnaît `ESC ] 7 ; <payload> (BEL | ESC \)`
 /// dans le flux brut d'un volet. À état car une séquence peut être coupée entre
 /// deux lectures PTY (le `payload` partiel survit d'un `feed` au suivant).
@@ -152,8 +185,12 @@ struct Osc7Sniffer {
     state: SniffState,
     /// Chiffres du paramètre `Ps` (avant le premier `;`).
     ps: Vec<u8>,
-    /// Octets du payload d'un OSC 7 (après `7;`), jusqu'au terminateur.
+    /// Octets du payload (après `Ps ;`), jusqu'au terminateur.
     payload: Vec<u8>,
+    /// Nature du payload courant (cwd OSC 7, ou notification OSC 9/777).
+    payload_kind: PayloadKind,
+    /// Notifications OSC 9/777 complétées, en attente de drainage (W6).
+    notifs: Vec<PaneNotif>,
 }
 
 #[derive(Default, PartialEq)]
@@ -200,11 +237,19 @@ impl Osc7Sniffer {
                 }
                 SniffState::Ps => match b {
                     b';' => {
-                        if self.ps.len() == 1 && self.ps[0] == b'7' {
-                            self.payload.clear();
-                            self.state = SniffState::Payload;
-                        } else {
-                            self.state = SniffState::Skip;
+                        let kind = match self.ps.as_slice() {
+                            b"7" => Some(PayloadKind::Cwd),
+                            b"9" => Some(PayloadKind::Notif9),
+                            b"777" => Some(PayloadKind::Notif777),
+                            _ => None,
+                        };
+                        match kind {
+                            Some(k) => {
+                                self.payload.clear();
+                                self.payload_kind = k;
+                                self.state = SniffState::Payload;
+                            }
+                            None => self.state = SniffState::Skip,
                         }
                     }
                     0x30..=0x39 => {
@@ -219,9 +264,7 @@ impl Osc7Sniffer {
                 },
                 SniffState::Payload => match b {
                     0x07 => {
-                        if let Some(p) = decode_osc7_uri(&self.payload) {
-                            last = Some(p);
-                        }
+                        self.finish_payload(&mut last);
                         self.state = SniffState::Ground;
                     }
                     0x1b => self.state = SniffState::PayloadEsc,
@@ -234,9 +277,7 @@ impl Osc7Sniffer {
                 },
                 SniffState::PayloadEsc => {
                     if b == b'\\' {
-                        if let Some(p) = decode_osc7_uri(&self.payload) {
-                            last = Some(p);
-                        }
+                        self.finish_payload(&mut last);
                         // ESC suivi de `\` (ST) : séquence terminée.
                         self.state = SniffState::Ground;
                     } else if b == 0x1b {
@@ -268,6 +309,58 @@ impl Osc7Sniffer {
         }
         last
     }
+
+    /// Termine le payload courant selon sa nature : cwd (met à jour `last`) ou
+    /// notification OSC 9/777 (empile dans `notifs`).
+    fn finish_payload(&mut self, last: &mut Option<String>) {
+        match self.payload_kind {
+            PayloadKind::Cwd => {
+                if let Some(p) = decode_osc7_uri(&self.payload) {
+                    *last = Some(p);
+                }
+            }
+            PayloadKind::Notif9 => {
+                if let Some(n) = parse_osc9(&self.payload) {
+                    self.notifs.push(n);
+                }
+            }
+            PayloadKind::Notif777 => {
+                if let Some(n) = parse_osc777(&self.payload) {
+                    self.notifs.push(n);
+                }
+            }
+        }
+    }
+
+    /// Draine les notifications OSC 9/777 accumulées (W6).
+    fn take_notifs(&mut self) -> Vec<PaneNotif> {
+        std::mem::take(&mut self.notifs)
+    }
+}
+
+/// `OSC 9 ; <body>` -> notification simple (corps seul, style iTerm2).
+fn parse_osc9(payload: &[u8]) -> Option<PaneNotif> {
+    let body = String::from_utf8_lossy(payload).trim().to_string();
+    if body.is_empty() {
+        None
+    } else {
+        Some(PaneNotif { title: None, body })
+    }
+}
+
+/// `OSC 777 ; notify ; <title> ; <body>` -> notification avec titre.
+fn parse_osc777(payload: &[u8]) -> Option<PaneNotif> {
+    let s = String::from_utf8_lossy(payload);
+    let mut parts = s.splitn(3, ';');
+    if parts.next()? != "notify" {
+        return None;
+    }
+    let title = parts.next()?.to_string();
+    let body = parts.next().unwrap_or("").to_string();
+    Some(PaneNotif {
+        title: if title.is_empty() { None } else { Some(title) },
+        body,
+    })
 }
 
 /// Décode un payload OSC 7 (`file://<host>/<chemin>`) en chemin natif Windows.
@@ -734,6 +827,10 @@ fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
                     // mêmes octets bruts ; met à jour le cwd sans toucher au reste.
                     if let Some(cwd) = st.sniffer.feed(&buf[..n]) {
                         st.cwd = Some(cwd);
+                    }
+                    // Notifications OSC 9/777 (W6) : vers le Notifier partagé de la session.
+                    for notif in st.sniffer.take_notifs() {
+                        pane.notifier.push_notification(notif);
                     }
                     let responses = st.terminal.take_responses();
                     if !responses.is_empty() {
@@ -1234,8 +1331,45 @@ mod tests {
     #[test]
     fn sniffer_osc_autre_que_7_ignore() {
         let mut s = Osc7Sniffer::default();
-        // OSC 0 (titre de fenêtre) : ignoré, pas de cwd.
+        // OSC 0 (titre de fenêtre) : ignoré, pas de cwd NI de notif.
         assert_eq!(s.feed(b"\x1b]0;mon titre\x07"), None);
+        assert!(s.take_notifs().is_empty());
+    }
+
+    #[test]
+    fn sniffer_osc9_notification() {
+        let mut s = Osc7Sniffer::default();
+        assert_eq!(s.feed(b"\x1b]9;Build termine\x07"), None); // pas de cwd
+        let n = s.take_notifs();
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].title, None);
+        assert_eq!(n[0].body, "Build termine");
+    }
+
+    #[test]
+    fn sniffer_osc777_notification() {
+        let mut s = Osc7Sniffer::default();
+        s.feed(b"\x1b]777;notify;Titre;Corps du message\x07");
+        let n = s.take_notifs();
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].title.as_deref(), Some("Titre"));
+        assert_eq!(n[0].body, "Corps du message");
+    }
+
+    #[test]
+    fn sniffer_notif_et_cwd_coexistent() {
+        let mut s = Osc7Sniffer::default();
+        // Une notif OSC 9 puis un OSC 7 : le cwd est renvoyé, la notif est drainée.
+        let cwd = s.feed(b"\x1b]9;msg\x07\x1b]7;file:///C:/a\x07");
+        assert_eq!(cwd.as_deref(), Some("C:\\a"));
+        assert_eq!(s.take_notifs().len(), 1);
+    }
+
+    #[test]
+    fn sniffer_osc777_sans_notify_ignore() {
+        let mut s = Osc7Sniffer::default();
+        s.feed(b"\x1b]777;autre;x\x07");
+        assert!(s.take_notifs().is_empty());
     }
 
     #[test]

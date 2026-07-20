@@ -630,6 +630,11 @@ impl Session {
         self.notifier.bell()
     }
 
+    /// W6 : draine les notifications OSC 9/777 émises par les volets de la session.
+    pub fn drain_notifications(&self) -> Vec<crate::pane::PaneNotif> {
+        self.notifier.drain_notifications()
+    }
+
     /// M1 : marque cette session comme une session agent (setter interne,
     /// exercé par les tests ; la création exposée arrive en M2).
     pub fn mark_agent(&self) {

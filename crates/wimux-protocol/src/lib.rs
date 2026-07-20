@@ -165,6 +165,18 @@ pub struct WindowInfo {
     pub cwd: Option<String>,
 }
 
+/// Notification émise par un programme dans une session via `OSC 9` / `OSC 777`,
+/// remontée à la GUI (toast OS + panneau) (W6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotificationInfo {
+    /// Session (workspace) d'origine.
+    pub session: String,
+    /// Titre (OSC 777), ou `None` (OSC 9).
+    pub title: Option<String>,
+    /// Corps du message.
+    pub body: String,
+}
+
 /// Messages client -> serveur.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -308,6 +320,9 @@ pub enum ClientMessage {
         name: String,
         pinned: bool,
     },
+    /// Récupère (et draine) les notifications OSC 9/777 en attente, toutes sessions
+    /// confondues (W6, sondage). Le serveur répond par `Notifications`.
+    TakeNotifications,
 }
 
 /// Messages serveur -> client.
@@ -371,6 +386,8 @@ pub enum ServerMessage {
         windows: Vec<WindowInfo>,
         active: u32,
     },
+    /// Notifications OSC 9/777 en attente (réponse à `TakeNotifications`) (W6).
+    Notifications(Vec<NotificationInfo>),
 }
 
 // --- Cadrage (framing) longueur + postcard --------------------------------

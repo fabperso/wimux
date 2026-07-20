@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { PaneManager, type LayoutNode } from "./panes";
 
 // --- Icônes SVG (monochrome, héritent de la couleur du texte) --------------
@@ -12,6 +13,7 @@ const SVG = {
   closePane: '<path d="M6 6l12 12"/><path d="M18 6L6 18"/>',
   panel: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9 4.5v15"/>',
   pin: '<path d="M9 3h6l-1 6 3 3v2h-4v5l-1 2-1-2v-5H6v-2l3-3z"/>',
+  bell: '<path d="M6 9a6 6 0 0 1 12 0c0 4 1.5 5.5 2 6H4c0.5-0.5 2-2 2-6"/><path d="M10 20a2 2 0 0 0 4 0"/>',
 };
 
 function icon(shape: string, cls = "ic"): HTMLElement {
@@ -645,16 +647,142 @@ function startRename(el: HTMLElement, oldName: string) {
   input.onblur = () => commit();
 }
 
+// --- Notifications (cloche/BEL + toasts OS) --------------------------------
+type Notif = { session: string; title: string | null; body: string; time: number; read: boolean };
+let notifications: Notif[] = [];
+const prevBell = new Map<string, boolean>();
+let osNotifAllowed = false;
+let notifPanelOpen = false;
+
+async function initNotifications() {
+  try {
+    osNotifAllowed = await isPermissionGranted();
+    if (!osNotifAllowed) osNotifAllowed = (await requestPermission()) === "granted";
+  } catch { osNotifAllowed = false; }
+}
+
+function sessionDisplayName(name: string): string {
+  const s = lastSessions.find((x) => x.name === name);
+  return s ? sessionTitle(s) : name;
+}
+
+function unreadCount(): number {
+  return notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
+}
+
+function updateNotifBadge() {
+  const bell = document.getElementById("notif-bell");
+  if (!bell) return;
+  let badge = bell.querySelector<HTMLElement>(".notif-badge");
+  const n = unreadCount();
+  if (n > 0) {
+    if (!badge) { badge = document.createElement("span"); badge.className = "notif-badge"; bell.appendChild(badge); }
+    badge.textContent = n > 9 ? "9+" : String(n);
+  } else badge?.remove();
+}
+
+function addNotification(session: string, title: string | null, body: string) {
+  notifications.unshift({ session, title, body, time: Date.now(), read: notifPanelOpen });
+  if (notifications.length > 50) notifications.length = 50;
+  updateNotifBadge();
+  if (notifPanelOpen) renderNotifPanel();
+  if (osNotifAllowed) {
+    try { sendNotification({ title: title ?? `wimux — ${sessionDisplayName(session)}`, body }); } catch { /* ignore */ }
+  }
+}
+
+// Détecte les nouvelles cloches (BEL) sur les sessions en arrière-plan (front, W6).
+function detectBellNotifications(sessions: SessionDto[]) {
+  const live = new Set<string>();
+  for (const s of sessions) {
+    live.add(s.name);
+    const was = prevBell.get(s.name) ?? false;
+    if (s.bell && !was && s.name !== activeSession) addNotification(s.name, null, "Cloche (BEL)");
+    prevBell.set(s.name, s.bell);
+  }
+  for (const k of [...prevBell.keys()]) if (!live.has(k)) prevBell.delete(k);
+}
+
+function closeNotifPanel() {
+  notifPanelOpen = false;
+  document.getElementById("notif-panel")?.remove();
+}
+
+function renderNotifPanel() {
+  document.getElementById("notif-panel")?.remove();
+  const panel = document.createElement("div");
+  panel.id = "notif-panel";
+  const head = document.createElement("div");
+  head.className = "notif-head";
+  const title = document.createElement("span");
+  title.textContent = "Notifications";
+  const clear = document.createElement("span");
+  clear.className = "notif-clear";
+  clear.textContent = "Tout effacer";
+  clear.onclick = (ev) => { ev.stopPropagation(); notifications = []; updateNotifBadge(); renderNotifPanel(); };
+  head.append(title, clear);
+  panel.appendChild(head);
+  if (notifications.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "notif-empty";
+    empty.textContent = "Aucune notification";
+    panel.appendChild(empty);
+  } else {
+    for (const n of notifications) {
+      const row = document.createElement("div");
+      row.className = "notif-item";
+      const t = document.createElement("div");
+      t.className = "notif-item-title";
+      t.textContent = (n.title ? n.title + " — " : "") + sessionDisplayName(n.session);
+      const b = document.createElement("div");
+      b.className = "notif-item-body";
+      b.textContent = n.body;
+      row.append(t, b);
+      row.onclick = () => { closeNotifPanel(); switchTo(n.session); };
+      panel.appendChild(row);
+    }
+  }
+  document.body.appendChild(panel);
+  const bell = document.getElementById("notif-bell")!;
+  const r = bell.getBoundingClientRect();
+  panel.style.left = Math.max(4, r.left) + "px";
+  panel.style.top = r.bottom + 4 + "px";
+}
+
+function toggleNotifPanel() {
+  if (notifPanelOpen) { closeNotifPanel(); return; }
+  notifPanelOpen = true;
+  notifications.forEach((n) => (n.read = true));
+  updateNotifBadge();
+  renderNotifPanel();
+}
+
+const notifBellBtn = document.getElementById("notif-bell")!;
+notifBellBtn.appendChild(icon(SVG.bell));
+notifBellBtn.onclick = (ev) => { ev.stopPropagation(); toggleNotifPanel(); };
+document.addEventListener("mousedown", (ev) => {
+  if (!notifPanelOpen) return;
+  const t = ev.target as Node;
+  if (document.getElementById("notif-panel")?.contains(t) || notifBellBtn.contains(t)) return;
+  closeNotifPanel();
+});
+initNotifications();
+
 async function refresh() {
   if (renaming || draggedName !== null) return; // pas de rebuild pendant renommage/glisser
   try {
     const sessions = await invoke<SessionDto[]>("list_sessions");
     renderRail(sessions); // peuple le rail + lastSessions d'abord
+    detectBellNotifications(sessions); // notifie sur cloche d'une session en arrière-plan
     // Auto-sélection : si aucune session active mais il en existe, prendre la première.
     if (!activeSession && sessions.length > 0) { await switchTo(sessions[0].name); }
     // Rafraîchit aussi les onglets (leurs cwd/libellés) : le serveur répond par un
     // window-list sur la connexion persistante. Suspendu pendant une édition d'onglet.
     if (activeSession && !editingTab) invoke("list_windows").catch(() => {});
+    // Notifications OSC 9/777 en attente côté serveur (drainées) (W6).
+    invoke<Array<{ session: string; title: string | null; body: string }>>("take_notifications")
+      .then((ns) => ns.forEach((n) => addNotification(n.session, n.title, n.body)))
+      .catch(() => {});
   } catch { /* serveur absent : on garde l'affichage precedent (rail non modifie) */ }
 }
 
