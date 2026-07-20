@@ -76,8 +76,9 @@ impl Server {
         // Ordre d'affichage du rail : ordre custom (glisser-déposer, W4/W5) puis
         // nom en tiebreak (déterministe).
         sessions_vec.sort_by(|a, b| {
-            a.order()
-                .cmp(&b.order())
+            b.pinned()
+                .cmp(&a.pinned())
+                .then_with(|| a.order().cmp(&b.order()))
                 .then_with(|| a.name().cmp(&b.name()))
         });
 
@@ -111,6 +112,8 @@ impl Server {
                     group: s.group(),
                     cwd,
                     branch,
+                    color: s.color(),
+                    pinned: s.pinned(),
                 }
             })
             .collect();
@@ -126,6 +129,20 @@ impl Server {
             if let Some(s) = sessions.get(name) {
                 s.set_order(i as u64);
             }
+        }
+    }
+
+    /// Fixe la couleur d'accent d'un workspace (W5).
+    fn set_session_color(&self, name: &str, color: Option<String>) {
+        if let Some(s) = self.sessions.lock().unwrap().get(name) {
+            s.set_color(color);
+        }
+    }
+
+    /// Épingle/désépingle un workspace (W5).
+    fn set_session_pinned(&self, name: &str, pinned: bool) {
+        if let Some(s) = self.sessions.lock().unwrap().get(name) {
+            s.set_pinned(pinned);
         }
     }
 
@@ -673,6 +690,16 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
             }
             ClientMessage::ReorderSessions { names } => {
                 server.reorder_sessions(&names);
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &ServerMessage::Ok)?;
+            }
+            ClientMessage::SetSessionColor { name, color } => {
+                server.set_session_color(&name, color);
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &ServerMessage::Ok)?;
+            }
+            ClientMessage::SetSessionPinned { name, pinned } => {
+                server.set_session_pinned(&name, pinned);
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &ServerMessage::Ok)?;
             }

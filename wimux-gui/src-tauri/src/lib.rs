@@ -97,6 +97,8 @@ struct SessionDto {
     group: Option<String>,
     cwd: Option<String>,
     branch: Option<String>,
+    color: Option<String>,
+    pinned: bool,
 }
 
 /// Libellé stable d'un `AgentStatus` pour le frontend (mappé sur un glyphe côté
@@ -130,6 +132,8 @@ fn list_sessions() -> Result<Vec<SessionDto>, String> {
                     group: s.group,
                     cwd: s.cwd,
                     branch: s.branch,
+                    color: s.color,
+                    pinned: s.pinned,
                 })
                 .collect()),
             ServerMessage::Error(e) => Err(e),
@@ -230,6 +234,30 @@ fn kill_session(name: String) -> Result<(), String> {
 fn reorder_sessions(names: Vec<String>) -> Result<(), String> {
     control(
         || ClientMessage::ReorderSessions { names },
+        |msg| match msg {
+            ServerMessage::Ok => Ok(()),
+            ServerMessage::Error(e) => Err(e),
+            _ => Err("réponse inattendue".into()),
+        },
+    )
+}
+
+#[tauri::command]
+fn set_session_color(name: String, color: Option<String>) -> Result<(), String> {
+    control(
+        || ClientMessage::SetSessionColor { name, color },
+        |msg| match msg {
+            ServerMessage::Ok => Ok(()),
+            ServerMessage::Error(e) => Err(e),
+            _ => Err("réponse inattendue".into()),
+        },
+    )
+}
+
+#[tauri::command]
+fn set_session_pinned(name: String, pinned: bool) -> Result<(), String> {
+    control(
+        || ClientMessage::SetSessionPinned { name, pinned },
         |msg| match msg {
             ServerMessage::Ok => Ok(()),
             ServerMessage::Error(e) => Err(e),
@@ -372,6 +400,8 @@ pub fn run() {
             create_session,
             kill_session,
             reorder_sessions,
+            set_session_color,
+            set_session_pinned,
             rename_session,
             list_agent_templates,
             create_agent,

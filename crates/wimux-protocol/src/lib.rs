@@ -112,6 +112,10 @@ pub struct SessionInfo {
     pub cwd: Option<String>,
     /// Branche git du cwd, `None` si hors repo / inconnu (W3).
     pub branch: Option<String>,
+    /// Couleur d'accent du workspace (hex `#rrggbb`), `None` = défaut (W5).
+    pub color: Option<String>,
+    /// Workspace épinglé : trié en tête du rail (W5).
+    pub pinned: bool,
 }
 
 /// Sens d'une découpe de volet (miroir du `window::SplitDir` serveur).
@@ -293,6 +297,16 @@ pub enum ClientMessage {
     /// chaque session prend l'ordre de sa position dans la liste.
     ReorderSessions {
         names: Vec<String>,
+    },
+    /// Fixe la couleur d'accent d'un workspace (hex `#rrggbb`), `None` = défaut (W5).
+    SetSessionColor {
+        name: String,
+        color: Option<String>,
+    },
+    /// Épingle ou désépingle un workspace (trié en tête du rail) (W5).
+    SetSessionPinned {
+        name: String,
+        pinned: bool,
     },
 }
 
@@ -560,6 +574,8 @@ mod tests {
             group: None,
             cwd: None,
             branch: None,
+            color: None,
+            pinned: false,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -591,6 +607,8 @@ mod tests {
             group: Some("batch0".into()),
             cwd: None,
             branch: None,
+            color: None,
+            pinned: false,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -799,6 +817,8 @@ mod tests {
             group: None,
             cwd: Some("C:\\proj\\wimux".into()),
             branch: Some("main".into()),
+            color: Some("#e8833a".into()),
+            pinned: true,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();

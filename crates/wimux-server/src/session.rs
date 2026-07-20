@@ -49,6 +49,10 @@ pub struct Session {
     /// Ordre d'affichage dans le rail (W4/W5) : `list` trie dessus, le
     /// glisser-déposer le réaffecte.
     order: AtomicU64,
+    /// Couleur d'accent du workspace (hex `#rrggbb`), `None` = défaut (W5).
+    color: Mutex<Option<String>>,
+    /// Workspace épinglé : trié en tête du rail (W5).
+    pinned: AtomicBool,
 }
 
 impl Session {
@@ -75,6 +79,8 @@ impl Session {
             group: Mutex::new(None),
             worktree: Mutex::new(None),
             order: AtomicU64::new(NEXT_SESSION_ORDER.fetch_add(1, Ordering::Relaxed)),
+            color: Mutex::new(None),
+            pinned: AtomicBool::new(false),
         });
         session.reflow();
         Ok(session)
@@ -120,6 +126,8 @@ impl Session {
             group: Mutex::new(None),
             worktree: Mutex::new(None),
             order: AtomicU64::new(NEXT_SESSION_ORDER.fetch_add(1, Ordering::Relaxed)),
+            color: Mutex::new(None),
+            pinned: AtomicBool::new(false),
         });
         session.reflow();
         session.mark_agent();
@@ -142,6 +150,26 @@ impl Session {
     /// Réaffecte l'ordre d'affichage (glisser-déposer).
     pub fn set_order(&self, order: u64) {
         self.order.store(order, Ordering::Relaxed);
+    }
+
+    /// Couleur d'accent du workspace (hex `#rrggbb`), `None` = défaut (W5).
+    pub fn color(&self) -> Option<String> {
+        self.color.lock().unwrap().clone()
+    }
+
+    /// Fixe (ou efface avec `None`) la couleur d'accent du workspace (W5).
+    pub fn set_color(&self, color: Option<String>) {
+        *self.color.lock().unwrap() = color;
+    }
+
+    /// Le workspace est-il épinglé (trié en tête du rail) ? (W5)
+    pub fn pinned(&self) -> bool {
+        self.pinned.load(Ordering::Relaxed)
+    }
+
+    /// Épingle ou désépingle le workspace (W5).
+    pub fn set_pinned(&self, pinned: bool) {
+        self.pinned.store(pinned, Ordering::Relaxed);
     }
 
     fn active_pane(&self) -> Option<Arc<Pane>> {

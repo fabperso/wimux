@@ -11,6 +11,7 @@ const SVG = {
   splitRows: '<rect x="4.5" y="3.5" width="15" height="7" rx="1.2"/><rect x="4.5" y="13.5" width="15" height="7" rx="1.2"/>',
   closePane: '<path d="M6 6l12 12"/><path d="M18 6L6 18"/>',
   panel: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9 4.5v15"/>',
+  pin: '<path d="M9 3h6l-1 6 3 3v2h-4v5l-1 2-1-2v-5H6v-2l3-3z"/>',
 };
 
 function icon(shape: string, cls = "ic"): HTMLElement {
@@ -222,6 +223,8 @@ type SessionDto = {
   group: string | null;
   cwd: string | null;
   branch: string | null;
+  color: string | null;
+  pinned: boolean;
 };
 
 type AgentTemplateDto = { name: string };
@@ -262,6 +265,153 @@ function reorderSessions(dragged: string, target: string, before: boolean) {
   renderRail(reordered); // optimiste
   invoke("reorder_sessions", { names: order }).catch(() => {});
 }
+
+// Déplace une session dans le rail (menu contextuel : monter/descendre/en haut).
+function moveSession(name: string, target: "up" | "down" | "top") {
+  const names = lastSessions.map((s) => s.name);
+  const i = names.indexOf(name);
+  if (i < 0) return;
+  names.splice(i, 1);
+  const j = target === "top" ? 0 : target === "up" ? Math.max(0, i - 1) : Math.min(names.length, i + 1);
+  names.splice(j, 0, name);
+  const byName = new Map(lastSessions.map((s) => [s.name, s] as const));
+  const reordered = names.map((n) => byName.get(n)).filter((s): s is SessionDto => !!s);
+  renderRail(reordered);
+  invoke("reorder_sessions", { names }).catch(() => {});
+}
+
+// Palette de couleurs de workspace (nom -> hex), façon CMUX.
+const WORKSPACE_COLORS: Array<[string, string]> = [
+  ["Rouge", "#e2504a"], ["Cramoisi", "#d0355b"], ["Orange", "#e8833a"], ["Ambre", "#e0a92e"],
+  ["Olive", "#a0a52a"], ["Vert", "#4fa64f"], ["Sarcelle", "#2bb0a0"], ["Aqua", "#33b5c9"],
+  ["Bleu", "#3d7ee0"], ["Marine", "#3a5bbf"], ["Indigo", "#6a5acd"], ["Violet", "#9b59b6"],
+  ["Magenta", "#c0399b"], ["Rose", "#d6538a"], ["Brun", "#a0703a"], ["Anthracite", "#7a7a7a"],
+];
+
+// Ferme une liste de workspaces puis rafraîchit.
+async function closeSessions(names: string[]) {
+  for (const n of names) await invoke("kill_session", { name: n }).catch(() => {});
+  await refresh();
+}
+
+// Applique une couleur de façon optimiste (avant la confirmation serveur).
+function optimisticColor(name: string, color: string | null) {
+  const s = lastSessions.find((x) => x.name === name);
+  if (s) s.color = color;
+  renderRail(lastSessions);
+}
+
+// --- Menu contextuel (clic droit) sur un workspace -------------------------
+let contextMenuEl: HTMLElement | null = null;
+
+function closeContextMenu() {
+  contextMenuEl?.remove();
+  contextMenuEl = null;
+  document.querySelectorAll(".context-submenu").forEach((n) => n.remove());
+}
+
+function menuRow(menu: HTMLElement, label: string, run: () => void, opts: { danger?: boolean; disabled?: boolean } = {}) {
+  const row = document.createElement("div");
+  row.className = "context-item" + (opts.danger ? " danger" : "") + (opts.disabled ? " disabled" : "");
+  row.textContent = label;
+  if (!opts.disabled) row.onclick = () => { closeContextMenu(); run(); };
+  menu.appendChild(row);
+}
+
+function menuSep(menu: HTMLElement) {
+  const sep = document.createElement("div");
+  sep.className = "context-sep";
+  menu.appendChild(sep);
+}
+
+// Sous-menu couleur (palette + « Défaut »), ouvert au survol de la ligne « Couleur ».
+function attachColorSubmenu(menu: HTMLElement, s: SessionDto) {
+  const row = document.createElement("div");
+  row.className = "context-item has-submenu";
+  row.textContent = "Couleur du workspace";
+  const arrow = document.createElement("span");
+  arrow.className = "submenu-arrow";
+  arrow.textContent = "›";
+  row.appendChild(arrow);
+  let sub: HTMLElement | null = null;
+  const openSub = () => {
+    if (sub) return;
+    sub = document.createElement("div");
+    sub.className = "context-menu context-submenu";
+    const def = document.createElement("div");
+    def.className = "context-item";
+    def.textContent = "Défaut (aucune)";
+    def.onclick = () => { closeContextMenu(); optimisticColor(s.name, null); invoke("set_session_color", { name: s.name, color: null }).catch(() => {}); };
+    sub.appendChild(def);
+    for (const [label, hex] of WORKSPACE_COLORS) {
+      const r = document.createElement("div");
+      r.className = "context-item color-item";
+      const dot = document.createElement("span");
+      dot.className = "color-dot";
+      dot.style.background = hex;
+      r.append(dot, document.createTextNode(label));
+      r.onclick = () => { closeContextMenu(); optimisticColor(s.name, hex); invoke("set_session_color", { name: s.name, color: hex }).catch(() => {}); };
+      sub!.appendChild(r);
+    }
+    document.body.appendChild(sub);
+    const rr = row.getBoundingClientRect();
+    let x = rr.right - 2;
+    if (x + sub.offsetWidth > window.innerWidth) x = rr.left - sub.offsetWidth + 2;
+    let y = rr.top;
+    if (y + sub.offsetHeight > window.innerHeight) y = window.innerHeight - sub.offsetHeight - 4;
+    sub.style.left = Math.max(4, x) + "px";
+    sub.style.top = Math.max(4, y) + "px";
+  };
+  row.addEventListener("mouseenter", openSub);
+  menu.appendChild(row);
+}
+
+function showSessionMenu(ev: MouseEvent, s: SessionDto, el: HTMLElement) {
+  closeContextMenu();
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+  const i = lastSessions.findIndex((x) => x.name === s.name);
+  const last = lastSessions.length - 1;
+
+  menuRow(menu, s.pinned ? "Désépingler" : "Épingler le workspace", async () => {
+    await invoke("set_session_pinned", { name: s.name, pinned: !s.pinned }).catch(() => {});
+    await refresh();
+  });
+  menuRow(menu, "Renommer…", () => {
+    // Récupérer l'élément vivant (le rail a pu être re-rendu depuis l'ouverture
+    // du menu ; un `el` détaché laisserait `renaming` coincé).
+    const live = document.querySelector<HTMLElement>(`.session[data-name="${CSS.escape(s.name)}"]`) ?? el;
+    startRename(live, s.name);
+  });
+  attachColorSubmenu(menu, s);
+  menuSep(menu);
+  menuRow(menu, "Monter", () => moveSession(s.name, "up"), { disabled: i <= 0 });
+  menuRow(menu, "Descendre", () => moveSession(s.name, "down"), { disabled: i < 0 || i >= last });
+  menuRow(menu, "Placer en haut", () => moveSession(s.name, "top"), { disabled: i <= 0 });
+  menuSep(menu);
+  menuRow(menu, "Fermer le workspace", async () => { await invoke("kill_session", { name: s.name }).catch(() => {}); await refresh(); }, { danger: true });
+  menuRow(menu, "Fermer les autres", () => closeSessions(lastSessions.filter((x) => x.name !== s.name).map((x) => x.name)), { danger: true, disabled: lastSessions.length <= 1 });
+  menuRow(menu, "Fermer ceux en dessous", () => closeSessions(lastSessions.slice(i + 1).map((x) => x.name)), { danger: true, disabled: i < 0 || i >= last });
+  menuRow(menu, "Fermer ceux au-dessus", () => closeSessions(lastSessions.slice(0, i).map((x) => x.name)), { danger: true, disabled: i <= 0 });
+
+  document.body.appendChild(menu);
+  const x = Math.min(ev.clientX, window.innerWidth - menu.offsetWidth - 4);
+  const y = Math.min(ev.clientY, window.innerHeight - menu.offsetHeight - 4);
+  menu.style.left = Math.max(4, x) + "px";
+  menu.style.top = Math.max(4, y) + "px";
+  contextMenuEl = menu;
+}
+
+// Fermer le menu sur clic ailleurs (hors menu ET sous-menu), Échap, ou molette.
+document.addEventListener("mousedown", (ev) => {
+  if (!contextMenuEl) return;
+  const t = ev.target as Node;
+  if (contextMenuEl.contains(t)) return;
+  if ([...document.querySelectorAll(".context-submenu")].some((n) => n.contains(t))) return;
+  closeContextMenu();
+});
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeContextMenu(); });
+window.addEventListener("wheel", () => closeContextMenu(), { passive: true });
 
 function agentStatusGlyph(status: string | null): string {
   switch (status) {
@@ -304,10 +454,14 @@ function abbreviateCwd(cwd: string): string {
 function renderSession(s: SessionDto): HTMLElement {
   const el = document.createElement("div");
   el.className = "session" + (s.name === activeSession ? " active" : "");
+  el.dataset.name = s.name;
+  // Couleur d'accent du workspace (bordure gauche) si définie (W5).
+  if (s.color) el.style.borderLeftColor = s.color;
   const main = document.createElement("div");
   main.className = "session-main";
   const nameRow = document.createElement("div");
   nameRow.className = "name-row";
+  if (s.pinned) nameRow.appendChild(icon(SVG.pin, "pin-ic"));
   const name = document.createElement("span");
   name.className = "name";
   name.textContent = sessionTitle(s);
@@ -375,9 +529,19 @@ function renderSession(s: SessionDto): HTMLElement {
   el.ondrop = (ev) => {
     if (draggedName === null || draggedName === s.name) return;
     ev.preventDefault();
+    const dragged = draggedName;
+    // Le drop termine le glisser : remettre draggedName à null MAINTENANT.
+    // reorderSessions va appeler renderRail qui retire l'élément traîné du DOM,
+    // ce qui empêche ondragend de se déclencher (sinon draggedName resterait
+    // coincé et bloquerait le sondage refresh()).
+    draggedName = null;
     const r = el.getBoundingClientRect();
     const before = ev.clientY < r.top + r.height / 2;
-    reorderSessions(draggedName, s.name, before);
+    reorderSessions(dragged, s.name, before);
+  };
+  el.oncontextmenu = (ev) => {
+    ev.preventDefault();
+    showSessionMenu(ev, s, el);
   };
   const isActive = s.name === activeSession;
   if (s.agent) {
