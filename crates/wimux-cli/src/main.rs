@@ -12,7 +12,6 @@ use wimux_protocol::{
     ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, recv, send,
 };
 
-#[allow(dead_code)] // Utilisé par les tests et la tâche 7 (cmd_agent)
 mod agent {
     use std::io;
     use wimux_protocol::SplitDir;
@@ -619,9 +618,94 @@ fn agent_whoami() -> io::Result<()> {
     Ok(())
 }
 
-/// TEMPORAIRE (Task 8 l'implémente réellement) : lecture du journal d'un volet.
-fn agent_logs(_args: &[String]) -> io::Result<()> {
-    Err(io::Error::other("wimux agent logs : implémenté en Task 8"))
+/// Lecture (et suivi) du journal d'un volet, avec dé-ANSI par défaut.
+fn agent_logs(args: &[String]) -> io::Result<()> {
+    let (session, pane, rest) = agent::parse_target_pane(args);
+    let session = default_session(session)?;
+    let pane = default_pane(pane)?;
+    let mut tail: Option<usize> = None;
+    let mut follow = false;
+    let mut raw = false;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--tail" => {
+                tail = rest.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
+            "--follow" | "-f" => {
+                follow = true;
+                i += 1;
+            }
+            "--raw" => {
+                raw = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    // Résoudre le chemin du journal via ListPanes.
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(
+        &mut w,
+        &ClientMessage::ListPanes {
+            session: session.clone(),
+        },
+    )?;
+    let mut r: &PipeConn = &conn;
+    let path = match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::PaneList(panes) => panes
+            .into_iter()
+            .find(|p| p.pane_id == pane)
+            .and_then(|p| p.log_path)
+            .ok_or_else(|| io::Error::other(format!("volet {pane} sans journal")))?,
+        ServerMessage::Error(e) => return Err(io::Error::other(e)),
+        _ => return Err(io::Error::other("réponse inattendue du serveur")),
+    };
+
+    let render = |content: &str| -> String {
+        let text = if raw {
+            content.to_string()
+        } else {
+            agent::strip_ansi(content)
+        };
+        match tail {
+            Some(n) => {
+                let lines: Vec<&str> = text.lines().collect();
+                let start = lines.len().saturating_sub(n);
+                lines[start..].join("\n")
+            }
+            None => text,
+        }
+    };
+
+    // Lecture initiale.
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    println!("{}", render(&content));
+    let mut last_len = content.len() as u64;
+
+    if !follow {
+        return Ok(());
+    }
+    // Suivi : relire les octets ajoutés au fichier (best-effort, dé-ANSI par bloc).
+    loop {
+        std::thread::sleep(Duration::from_millis(300));
+        let content = std::fs::read(&path).unwrap_or_default();
+        if (content.len() as u64) > last_len {
+            let slice = &content[last_len as usize..];
+            let chunk = String::from_utf8_lossy(slice);
+            let text = if raw {
+                chunk.to_string()
+            } else {
+                agent::strip_ansi(&chunk)
+            };
+            print!("{text}");
+            let _ = io::stdout().flush();
+            last_len = content.len() as u64;
+        }
+    }
 }
 
 /// Traduit des jetons de touches en octets.
