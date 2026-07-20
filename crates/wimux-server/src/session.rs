@@ -58,7 +58,7 @@ pub struct Session {
 impl Session {
     pub fn new(name: String, cols: u16, rows: u16, shell: &str) -> Result<Arc<Session>> {
         let notifier = Notifier::new();
-        let pane = spawn_shell_pane_with(cols, content_rows(rows), shell, &notifier)?;
+        let pane = spawn_shell_pane_with(cols, content_rows(rows), shell, &notifier, &name)?;
         let window = Window::new(pane);
 
         let session = Arc::new(Session {
@@ -105,6 +105,7 @@ impl Session {
             args,
             cwd,
             Arc::clone(&notifier),
+            crate::pane::PaneSpawnCtx::shell(&name),
         )?;
         let window = Window::new(pane);
 
@@ -725,7 +726,8 @@ impl Session {
 
     /// Spawn d'un volet du shell de la session, avec injection OSC 7 (W3).
     fn spawn_shell_pane(&self, cols: u16, rows: u16) -> Result<Arc<Pane>> {
-        spawn_shell_pane_with(cols, rows, &self.shell, &self.notifier)
+        let name = self.name();
+        spawn_shell_pane_with(cols, rows, &self.shell, &self.notifier, &name)
     }
 
     /// Transmet des octets au volet actif de la fenêtre active.
@@ -757,7 +759,13 @@ impl Session {
 
     pub fn split(&self, dir: SplitDir) {
         // Ne pas tenir le verrou pendant le spawn (qui lance un processus).
-        let new_pane = Pane::spawn(1, 1, &self.shell, Arc::clone(&self.notifier));
+        let new_pane = Pane::spawn(
+            1,
+            1,
+            &self.shell,
+            Arc::clone(&self.notifier),
+            crate::pane::PaneSpawnCtx::shell(&self.name()),
+        );
         if let Ok(pane) = new_pane {
             let mut inner = self.inner.lock().unwrap();
             let aw = inner.active_window;
@@ -809,7 +817,13 @@ impl Session {
     }
 
     pub fn new_window(&self) {
-        if let Ok(pane) = Pane::spawn(1, 1, &self.shell, Arc::clone(&self.notifier)) {
+        if let Ok(pane) = Pane::spawn(
+            1,
+            1,
+            &self.shell,
+            Arc::clone(&self.notifier),
+            crate::pane::PaneSpawnCtx::shell(&self.name()),
+        ) {
             let mut inner = self.inner.lock().unwrap();
             inner.windows.push(Window::new(pane));
             inner.active_window = inner.windows.len() - 1;
@@ -1047,10 +1061,14 @@ fn spawn_shell_pane_with(
     rows: u16,
     shell: &str,
     notifier: &Arc<Notifier>,
+    session: &str,
 ) -> Result<Arc<Pane>> {
+    let ctx = crate::pane::PaneSpawnCtx::shell(session);
     match osc7_prompt_injection(shell) {
-        Some(args) => Pane::spawn_command(cols, rows, shell, &args, None, Arc::clone(notifier)),
-        None => Pane::spawn(cols, rows, shell, Arc::clone(notifier)),
+        Some(args) => {
+            Pane::spawn_command(cols, rows, shell, &args, None, Arc::clone(notifier), ctx)
+        }
+        None => Pane::spawn(cols, rows, shell, Arc::clone(notifier), ctx),
     }
 }
 

@@ -583,7 +583,14 @@ mod tests {
     }
 
     fn dummy_pane() -> Arc<Pane> {
-        Pane::spawn(10, 5, "cmd.exe", crate::pane::Notifier::new()).unwrap()
+        Pane::spawn(
+            10,
+            5,
+            "cmd.exe",
+            crate::pane::Notifier::new(),
+            crate::pane::PaneSpawnCtx::shell("test"),
+        )
+        .unwrap()
     }
 
     #[test]

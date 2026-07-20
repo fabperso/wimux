@@ -6,13 +6,16 @@
 //! produit de la sortie, il incrémente une génération globale et réveille les
 //! clients attachés, qui redemandent alors une composition de la session.
 
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use wimux_protocol::transport::user_pipe_name;
 use wimux_vt::{Cell, Color, Grid, Pen, Terminal};
 
 /// Résultat du traitement d'une touche en mode copie.
@@ -50,6 +53,60 @@ static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Identifiant unique de volet.
 pub type PaneId = u64;
+
+/// Contexte de spawn d'un volet (A1) : le nom de session (pour l'env de contexte)
+/// et un drapeau de journalisation (posé pour les volets agents).
+#[derive(Clone)]
+pub struct PaneSpawnCtx {
+    pub session: String,
+    pub log: bool,
+}
+
+impl PaneSpawnCtx {
+    /// Volet shell ordinaire : env de contexte, pas de journal.
+    pub fn shell(session: &str) -> Self {
+        Self {
+            session: session.to_string(),
+            log: false,
+        }
+    }
+    /// Volet agent (A1) : env de contexte + journalisation.
+    pub fn agent(session: &str) -> Self {
+        Self {
+            session: session.to_string(),
+            log: true,
+        }
+    }
+}
+
+/// Ouvre (crée) le fichier journal d'un volet agent sous
+/// `%LOCALAPPDATA%\wimux\logs\<session-assaini>\<pane_id>.log`. Best-effort :
+/// renvoie `None` si `%LOCALAPPDATA%` est absent ou l'ouverture échoue.
+fn open_pane_log(session: &str, pane_id: PaneId) -> Option<(File, String)> {
+    let sanitized: String = session
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    let dir = PathBuf::from(base)
+        .join("wimux")
+        .join("logs")
+        .join(sanitized);
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{pane_id}.log"));
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    Some((file, path.to_string_lossy().into_owned()))
+}
 
 /// Signal de changement d'affichage partagé par tous les volets d'une session.
 pub struct Notifier {
@@ -152,6 +209,13 @@ struct PaneState {
     cwd: Option<String>,
     /// État du renifleur OSC 7 (partiels d'une séquence coupée entre lectures).
     sniffer: Osc7Sniffer,
+    /// Fichier journal du volet (A1), `None` si non journalisé. Pas encore lu
+    /// (la tee dans `reader_loop` arrive en Task 3) : `allow(dead_code)`
+    /// temporaire, à retirer quand ce champ sera exploité.
+    #[allow(dead_code)]
+    log: Option<File>,
+    /// Chemin du journal, exposé via `pane_infos` (A1).
+    log_path: Option<String>,
 }
 
 /// Garde-fou : un payload OSC 7 plausible (une URI de chemin) ne dépasse pas
@@ -423,8 +487,14 @@ pub struct Pane {
 impl Pane {
     /// Crée un volet exécutant `shell` (jeton unique, sans args). Cas particulier
     /// de [`Pane::spawn_command`].
-    pub fn spawn(cols: u16, rows: u16, shell: &str, notifier: Arc<Notifier>) -> Result<Arc<Pane>> {
-        Pane::spawn_command(cols, rows, shell, &[], None, notifier)
+    pub fn spawn(
+        cols: u16,
+        rows: u16,
+        shell: &str,
+        notifier: Arc<Notifier>,
+        ctx: PaneSpawnCtx,
+    ) -> Result<Arc<Pane>> {
+        Pane::spawn_command(cols, rows, shell, &[], None, notifier, ctx)
     }
 
     /// Crée un volet : ouvre une pseudo-console, lance `program` avec `args` dans
@@ -438,9 +508,12 @@ impl Pane {
         args: &[String],
         cwd: Option<&str>,
         notifier: Arc<Notifier>,
+        ctx: PaneSpawnCtx,
     ) -> Result<Arc<Pane>> {
         let cols = cols.max(1);
         let rows = rows.max(1);
+        // Allouer l'id AVANT la CommandBuilder pour pouvoir l'injecter en env.
+        let id = NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed);
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -456,6 +529,11 @@ impl Pane {
         if let Some(dir) = cwd {
             cmd.cwd(dir);
         }
+        // Contexte d'orchestration (A1) : un process lancé dans ce volet sait où il tourne.
+        cmd.env("WIMUX_SESSION", &ctx.session);
+        cmd.env("WIMUX_PANE", id.to_string());
+        cmd.env("WIMUX_PIPE", user_pipe_name());
+
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -470,8 +548,18 @@ impl Pane {
             .context("prise de l'écrivain PTY")?;
         drop(pair.slave);
 
+        // Journalisation (A1) : uniquement pour les volets agents.
+        let (log, log_path) = if ctx.log {
+            match open_pane_log(&ctx.session, id) {
+                Some((f, p)) => (Some(f), Some(p)),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
         let pane = Arc::new(Pane {
-            id: NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed),
+            id,
             state: Mutex::new(PaneState {
                 terminal: Terminal::new(cols, rows),
                 writer,
@@ -484,16 +572,22 @@ impl Pane {
                 subscribers: Vec::new(),
                 cwd: None,
                 sniffer: Osc7Sniffer::default(),
+                log,
+                log_path,
             }),
             notifier,
         });
 
         let reader_pane = Arc::clone(&pane);
         std::thread::spawn(move || reader_loop(reader_pane, reader));
-
         let waiter_pane = Arc::clone(&pane);
         std::thread::spawn(move || wait_for_exit(waiter_pane));
         Ok(pane)
+    }
+
+    /// Chemin du fichier journal du volet (A1), `None` si non journalisé.
+    pub fn log_path(&self) -> Option<String> {
+        self.state.lock().unwrap().log_path.clone()
     }
 
     pub fn send_input(&self, bytes: &[u8]) {
@@ -1241,7 +1335,7 @@ mod tests {
     #[test]
     fn exit_code_none_pour_volet_vivant() {
         let n = Notifier::new();
-        let p = Pane::spawn(20, 5, "cmd.exe", n).unwrap();
+        let p = Pane::spawn(20, 5, "cmd.exe", n, PaneSpawnCtx::shell("test")).unwrap();
         assert_eq!(
             p.exit_code(),
             None,
@@ -1253,7 +1347,7 @@ mod tests {
     #[test]
     fn kill_ferme_le_master_et_libere_le_lecteur() {
         let n = Notifier::new();
-        let pane = Pane::spawn(20, 5, "cmd.exe", n).unwrap();
+        let pane = Pane::spawn(20, 5, "cmd.exe", n, PaneSpawnCtx::shell("test")).unwrap();
         // Faire sortir le shell proprement (code 0).
         pane.send_input(b"exit 0\r\n");
         // Attendre la détection de la sortie (wait_for_exit renseigne exit_code).
