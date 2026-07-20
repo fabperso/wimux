@@ -780,6 +780,7 @@ fn print_help() {
              attach <nom>        S'attache à une session existante (alias : a)\n    \
              ls                  Liste les sessions (alias : list-sessions)\n    \
              send-keys -t <nom> <touches...>  Injecte des frappes (scriptable)\n    \
+             agent <sous-cmd>    Orchestration d'agents (spawn/list/logs/capture/send/kill/whoami)\n    \
              kill-session <nom>  Termine une session\n    \
              kill-server         Arrête le serveur et toutes les sessions\n\
          \n\
