@@ -209,10 +209,7 @@ struct PaneState {
     cwd: Option<String>,
     /// État du renifleur OSC 7 (partiels d'une séquence coupée entre lectures).
     sniffer: Osc7Sniffer,
-    /// Fichier journal du volet (A1), `None` si non journalisé. Pas encore lu
-    /// (la tee dans `reader_loop` arrive en Task 3) : `allow(dead_code)`
-    /// temporaire, à retirer quand ce champ sera exploité.
-    #[allow(dead_code)]
+    /// Fichier journal du volet (A1), `None` si non journalisé.
     log: Option<File>,
     /// Chemin du journal, exposé via `pane_infos` (A1).
     log_path: Option<String>,
@@ -917,6 +914,10 @@ fn reader_loop(pane: Arc<Pane>, mut reader: Box<dyn Read + Send>) {
                 let rang = {
                     let mut st = pane.state.lock().unwrap();
                     st.terminal.advance(&buf[..n]);
+                    // Journalisation (A1) : tee des octets bruts vers le fichier.
+                    if let Some(f) = st.log.as_mut() {
+                        let _ = f.write_all(&buf[..n]);
+                    }
                     // Renifleur OSC 7 passif (W3) : sous le même verrou, sur les
                     // mêmes octets bruts ; met à jour le cwd sans toucher au reste.
                     if let Some(cwd) = st.sniffer.feed(&buf[..n]) {
