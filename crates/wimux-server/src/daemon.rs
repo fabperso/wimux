@@ -114,8 +114,7 @@ impl Server {
                     branch,
                     color: s.color(),
                     pinned: s.pinned(),
-                    // A1 (intérim) : placeholder ; Task 5 remplacera par s.layout_rev().
-                    layout_rev: 0,
+                    layout_rev: s.layout_rev(),
                 }
             })
             .collect();
@@ -873,14 +872,77 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
-            // A1 (intérim) : ces messages ne sont émis par aucun client tant que la
-            // CLI `wimux agent` n'existe pas ; Task 5 REMPLACE ce bras par de vrais
-            // handlers (SpawnPane/CapturePane/ListPanes/SendKeysPane/KillPane).
-            ClientMessage::SpawnPane { .. }
-            | ClientMessage::CapturePane { .. }
-            | ClientMessage::ListPanes { .. }
-            | ClientMessage::SendKeysPane { .. }
-            | ClientMessage::KillPane { .. } => {}
+            ClientMessage::SpawnPane {
+                session,
+                from_pane,
+                dir,
+                cwd,
+                program,
+                args,
+            } => {
+                let reply = match server.get(&session) {
+                    Some(s) => {
+                        match s.spawn_pane(from_pane, dir.into(), cwd.as_deref(), &program, &args) {
+                            Some(pane_id) => ServerMessage::PaneSpawned { pane_id },
+                            None => ServerMessage::Error("échec du spawn de volet".into()),
+                        }
+                    }
+                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::CapturePane { session, pane } => {
+                let reply = match server.get(&session) {
+                    Some(s) => match s.capture_pane(pane) {
+                        Some(text) => ServerMessage::PaneCapture(text),
+                        None => ServerMessage::Error(format!("volet introuvable : {pane}")),
+                    },
+                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::ListPanes { session } => {
+                let reply = match server.get(&session) {
+                    Some(s) => ServerMessage::PaneList(s.pane_infos()),
+                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::SendKeysPane {
+                session,
+                pane,
+                keys,
+            } => {
+                let reply = match server.get(&session) {
+                    Some(s) => {
+                        if s.send_keys_pane(pane, &keys) {
+                            ServerMessage::Ok
+                        } else {
+                            ServerMessage::Error(format!("volet introuvable : {pane}"))
+                        }
+                    }
+                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::KillPane { session, pane } => {
+                let reply = match server.get(&session) {
+                    Some(s) => {
+                        if s.kill_pane(pane) {
+                            ServerMessage::Ok
+                        } else {
+                            ServerMessage::Error(format!("volet introuvable : {pane}"))
+                        }
+                    }
+                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
                     let outcome = route_input(&a.session, &server.config, &mut prefix, &bytes);
@@ -1252,5 +1314,35 @@ mod tests {
         let (events, rest) = extract_mouse_events(b"bonjour\r");
         assert!(events.is_empty());
         assert_eq!(rest, b"bonjour\r");
+    }
+
+    #[test]
+    fn list_expose_layout_rev() {
+        let server = Server::new();
+        let s = server.create_session(Some("lr".into()), 80, 24).unwrap();
+        let before = server
+            .list()
+            .iter()
+            .find(|i| i.name == "lr")
+            .unwrap()
+            .layout_rev;
+        s.spawn_pane(
+            None,
+            crate::window::SplitDir::LeftRight,
+            None,
+            "cmd.exe",
+            &[],
+        );
+        let after = server
+            .list()
+            .iter()
+            .find(|i| i.name == "lr")
+            .unwrap()
+            .layout_rev;
+        assert!(
+            after > before,
+            "layout_rev remonté par list() après spawn_pane"
+        );
+        server.kill("lr");
     }
 }
