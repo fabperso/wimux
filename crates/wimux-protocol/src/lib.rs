@@ -116,6 +116,10 @@ pub struct SessionInfo {
     pub color: Option<String>,
     /// Workspace épinglé : trié en tête du rail (W5).
     pub pinned: bool,
+    /// Compteur de révision de la topologie de volets (A1) : bumpé à chaque
+    /// création/fermeture de volet. La GUI le compare pour se réattacher et
+    /// refléter en direct les volets créés via la CLI.
+    pub layout_rev: u64,
 }
 
 /// Sens d'une découpe de volet (miroir du `window::SplitDir` serveur).
@@ -175,6 +179,21 @@ pub struct NotificationInfo {
     pub title: Option<String>,
     /// Corps du message.
     pub body: String,
+}
+
+/// Résumé d'un volet, pour l'orchestration agent (A1). Renvoyé par `ListPanes`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneInfo {
+    /// Identifiant global du volet.
+    pub pane_id: u64,
+    /// cwd courant (dernier OSC 7 capté), `None` si inconnu.
+    pub cwd: Option<String>,
+    /// Le processus du volet est-il encore vivant ?
+    pub running: bool,
+    /// Code de sortie si terminé, `None` s'il tourne encore.
+    pub exit_code: Option<i32>,
+    /// Chemin du fichier journal si ce volet est journalisé (volet agent).
+    pub log_path: Option<String>,
 }
 
 /// Messages client -> serveur.
@@ -331,6 +350,36 @@ pub enum ClientMessage {
     MarkSessionUnread {
         name: String,
     },
+    /// A1 : découpe la fenêtre active de `session` (à partir de `from_pane`, défaut
+    /// volet actif) et lance `program`/`args` dans le nouveau volet (journalisé).
+    SpawnPane {
+        session: String,
+        from_pane: Option<u64>,
+        dir: SplitDir,
+        cwd: Option<String>,
+        program: String,
+        args: Vec<String>,
+    },
+    /// A1 : capture le contenu visible du volet `pane` de `session`.
+    CapturePane {
+        session: String,
+        pane: u64,
+    },
+    /// A1 : liste les volets de `session` (structuré).
+    ListPanes {
+        session: String,
+    },
+    /// A1 : envoie des octets au volet `pane` de `session`.
+    SendKeysPane {
+        session: String,
+        pane: u64,
+        keys: Vec<u8>,
+    },
+    /// A1 : ferme le volet `pane` de `session`.
+    KillPane {
+        session: String,
+        pane: u64,
+    },
 }
 
 /// Messages serveur -> client.
@@ -396,6 +445,14 @@ pub enum ServerMessage {
     },
     /// Notifications OSC 9/777 en attente (réponse à `TakeNotifications`) (W6).
     Notifications(Vec<NotificationInfo>),
+    /// A1 : réponse à `SpawnPane` — identifiant du volet créé.
+    PaneSpawned {
+        pane_id: u64,
+    },
+    /// A1 : réponse à `CapturePane` — contenu visible du volet.
+    PaneCapture(String),
+    /// A1 : réponse à `ListPanes`.
+    PaneList(Vec<PaneInfo>),
 }
 
 // --- Cadrage (framing) longueur + postcard --------------------------------
@@ -601,6 +658,7 @@ mod tests {
             branch: None,
             color: None,
             pinned: false,
+            layout_rev: 0,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -634,6 +692,7 @@ mod tests {
             branch: None,
             color: None,
             pinned: false,
+            layout_rev: 0,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -844,6 +903,7 @@ mod tests {
             branch: Some("main".into()),
             color: Some("#e8833a".into()),
             pinned: true,
+            layout_rev: 0,
         };
         let msg = ServerMessage::Sessions(vec![info]);
         let mut buf = Vec::new();
@@ -856,6 +916,46 @@ mod tests {
                 assert_eq!(v[0].branch.as_deref(), Some("main"));
             }
             _ => panic!("mauvais variant"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_spawn_pane_et_pane_list() {
+        let msg = ClientMessage::SpawnPane {
+            session: "s".into(),
+            from_pane: Some(3),
+            dir: SplitDir::LeftRight,
+            cwd: Some("C:\\repo".into()),
+            program: "claude".into(),
+            args: vec!["-p".into(), "tache".into()],
+        };
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        match postcard::from_bytes::<ClientMessage>(&bytes).unwrap() {
+            ClientMessage::SpawnPane {
+                program,
+                args,
+                from_pane,
+                ..
+            } => {
+                assert_eq!(program, "claude");
+                assert_eq!(args, vec!["-p".to_string(), "tache".to_string()]);
+                assert_eq!(from_pane, Some(3));
+            }
+            _ => panic!("variante inattendue"),
+        }
+
+        let info = PaneInfo {
+            pane_id: 7,
+            cwd: Some("C:\\repo".into()),
+            running: true,
+            exit_code: None,
+            log_path: Some("C:\\log\\7.log".into()),
+        };
+        let reply = ServerMessage::PaneList(vec![info.clone()]);
+        let bytes = postcard::to_allocvec(&reply).unwrap();
+        match postcard::from_bytes::<ServerMessage>(&bytes).unwrap() {
+            ServerMessage::PaneList(v) => assert_eq!(v[0], info),
+            _ => panic!("variante inattendue"),
         }
     }
 }
