@@ -293,6 +293,30 @@ fn take_notifications() -> Result<Vec<NotificationDto>, String> {
 }
 
 #[tauri::command]
+fn mark_session_read(name: String) -> Result<(), String> {
+    control(
+        || ClientMessage::MarkSessionRead { name },
+        |msg| match msg {
+            ServerMessage::Ok => Ok(()),
+            ServerMessage::Error(e) => Err(e),
+            _ => Err("réponse inattendue".into()),
+        },
+    )
+}
+
+#[tauri::command]
+fn mark_session_unread(name: String) -> Result<(), String> {
+    control(
+        || ClientMessage::MarkSessionUnread { name },
+        |msg| match msg {
+            ServerMessage::Ok => Ok(()),
+            ServerMessage::Error(e) => Err(e),
+            _ => Err("réponse inattendue".into()),
+        },
+    )
+}
+
+#[tauri::command]
 fn rename_session(from: String, to: String) -> Result<(), String> {
     control(
         || ClientMessage::RenameSession { from, to },
@@ -430,6 +454,8 @@ pub fn run() {
             set_session_color,
             set_session_pinned,
             take_notifications,
+            mark_session_read,
+            mark_session_unread,
             rename_session,
             list_agent_templates,
             create_agent,

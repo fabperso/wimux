@@ -323,6 +323,14 @@ pub enum ClientMessage {
     /// Récupère (et draine) les notifications OSC 9/777 en attente, toutes sessions
     /// confondues (W6, sondage). Le serveur répond par `Notifications`.
     TakeNotifications,
+    /// Marque un workspace comme lu (efface activité + cloche) sans l'attacher (W6).
+    MarkSessionRead {
+        name: String,
+    },
+    /// Marque un workspace comme non lu (repose le drapeau cloche) (W6).
+    MarkSessionUnread {
+        name: String,
+    },
 }
 
 /// Messages serveur -> client.

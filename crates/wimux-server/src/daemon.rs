@@ -167,6 +167,20 @@ impl Server {
         out
     }
 
+    /// Marque un workspace comme lu (efface activité + cloche) (W6).
+    fn mark_session_read(&self, name: &str) {
+        if let Some(s) = self.sessions.lock().unwrap().get(name) {
+            s.mark_seen();
+        }
+    }
+
+    /// Marque un workspace comme non lu (repose la cloche) (W6).
+    fn mark_session_unread(&self, name: &str) {
+        if let Some(s) = self.sessions.lock().unwrap().get(name) {
+            s.mark_unread();
+        }
+    }
+
     fn kill(&self, name: &str) -> bool {
         let session = self.sessions.lock().unwrap().remove(name);
         match session {
@@ -728,6 +742,16 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let notifs = server.take_notifications();
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &ServerMessage::Notifications(notifs))?;
+            }
+            ClientMessage::MarkSessionRead { name } => {
+                server.mark_session_read(&name);
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &ServerMessage::Ok)?;
+            }
+            ClientMessage::MarkSessionUnread { name } => {
+                server.mark_session_unread(&name);
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &ServerMessage::Ok)?;
             }
             ClientMessage::AttachGui { session } => {
                 // Arrêter proprement la diffusion précédente avant d'en démarrer une.

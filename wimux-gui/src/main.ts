@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PaneManager, type LayoutNode } from "./panes";
 
 // --- Icônes SVG (monochrome, héritent de la couleur du texte) --------------
@@ -103,6 +104,12 @@ railCollapseBtn.appendChild(icon(SVG.panel));
 railCollapseBtn.onclick = () => {
   document.getElementById("app")!.classList.toggle("rail-collapsed");
 };
+
+// Contrôles de fenêtre (barre de titre custom, fenêtre sans décoration).
+const appWindow = getCurrentWindow();
+document.getElementById("win-min")!.onclick = () => appWindow.minimize();
+document.getElementById("win-max")!.onclick = () => appWindow.toggleMaximize();
+document.getElementById("win-close")!.onclick = () => appWindow.close();
 
 function renderTabs(windows: WindowInfo[], active: number) {
   tabsEl.innerHTML = "";
@@ -345,6 +352,26 @@ function attachColorSubmenu(menu: HTMLElement, s: SessionDto) {
     def.textContent = "Défaut (aucune)";
     def.onclick = () => { closeContextMenu(); optimisticColor(s.name, null); invoke("set_session_color", { name: s.name, color: null }).catch(() => {}); };
     sub.appendChild(def);
+    const custom = document.createElement("div");
+    custom.className = "context-item";
+    custom.textContent = "Couleur personnalisée…";
+    custom.onclick = (ev) => {
+      ev.stopPropagation();
+      const input = document.createElement("input");
+      input.type = "color";
+      input.value = s.color ?? "#3d7ee0";
+      input.style.cssText = "position:fixed;left:-9999px;";
+      document.body.appendChild(input);
+      input.onchange = () => {
+        const hex = input.value;
+        input.remove();
+        closeContextMenu();
+        optimisticColor(s.name, hex);
+        invoke("set_session_color", { name: s.name, color: hex }).catch(() => {});
+      };
+      input.click();
+    };
+    sub.appendChild(custom);
     for (const [label, hex] of WORKSPACE_COLORS) {
       const r = document.createElement("div");
       r.className = "context-item color-item";
@@ -385,11 +412,25 @@ function showSessionMenu(ev: MouseEvent, s: SessionDto, el: HTMLElement) {
     const live = document.querySelector<HTMLElement>(`.session[data-name="${CSS.escape(s.name)}"]`) ?? el;
     startRename(live, s.name);
   });
+  menuRow(menu, "Réinitialiser le nom", () => {
+    // Renomme vers le premier nom numérique libre → réaffiche le répertoire (CMUX).
+    const used = new Set(lastSessions.map((x) => x.name));
+    let n = 0;
+    while (used.has(String(n))) n++;
+    const to = String(n);
+    invoke("rename_session", { from: s.name, to }).then(() => {
+      if (activeSession === s.name) activeSession = to;
+      refresh();
+    }).catch(() => {});
+  }, { disabled: /^\d+$/.test(s.name) });
   attachColorSubmenu(menu, s);
   menuSep(menu);
   menuRow(menu, "Monter", () => moveSession(s.name, "up"), { disabled: i <= 0 });
   menuRow(menu, "Descendre", () => moveSession(s.name, "down"), { disabled: i < 0 || i >= last });
   menuRow(menu, "Placer en haut", () => moveSession(s.name, "top"), { disabled: i <= 0 });
+  menuSep(menu);
+  menuRow(menu, "Marquer comme lu", () => { invoke("mark_session_read", { name: s.name }).then(() => refresh()).catch(() => {}); }, { disabled: !(s.activity || s.bell) });
+  menuRow(menu, "Marquer comme non lu", () => { invoke("mark_session_unread", { name: s.name }).then(() => refresh()).catch(() => {}); }, { disabled: s.activity || s.bell || s.name === activeSession });
   menuSep(menu);
   menuRow(menu, "Fermer le workspace", async () => { await invoke("kill_session", { name: s.name }).catch(() => {}); await refresh(); }, { danger: true });
   menuRow(menu, "Fermer les autres", () => closeSessions(lastSessions.filter((x) => x.name !== s.name).map((x) => x.name)), { danger: true, disabled: lastSessions.length <= 1 });
@@ -774,6 +815,15 @@ async function refresh() {
     const sessions = await invoke<SessionDto[]>("list_sessions");
     renderRail(sessions); // peuple le rail + lastSessions d'abord
     detectBellNotifications(sessions); // notifie sur cloche d'une session en arrière-plan
+    // La session active a disparu (fermée) : nettoyer la vue (volets + onglets + en-tête).
+    if (activeSession && !sessions.some((s) => s.name === activeSession)) {
+      activeSession = null;
+      paneManager.reset();
+      tabsEl.innerHTML = "";
+      lastActiveWindow = -1;
+      lastWindows = [];
+      updateWsHeader();
+    }
     // Auto-sélection : si aucune session active mais il en existe, prendre la première.
     if (!activeSession && sessions.length > 0) { await switchTo(sessions[0].name); }
     // Rafraîchit aussi les onglets (leurs cwd/libellés) : le serveur répond par un

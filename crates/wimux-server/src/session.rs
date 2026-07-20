@@ -620,6 +620,12 @@ impl Session {
         self.notifier.clear_bell();
     }
 
+    /// W6 : marque la session comme « non lue » (repose le drapeau cloche pour
+    /// afficher un indicateur dans le rail).
+    pub fn mark_unread(&self) {
+        self.notifier.signal_bell();
+    }
+
     /// G4 : la session a-t-elle produit de la sortie depuis la dernière vue ?
     pub fn has_activity(&self) -> bool {
         self.notifier.generation() > self.last_seen_gen.load(Ordering::Relaxed)

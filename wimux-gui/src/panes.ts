@@ -76,7 +76,13 @@ export class PaneManager {
 
   write(paneId: number, data: Uint8Array) {
     const v = this.views.get(paneId);
-    if (v) v.term.write(data);
+    if (!v) return;
+    v.term.write(data);
+    // Anneau de notification (W6) : BEL (0x07) reçu -> le volet clignote.
+    if (data.includes(0x07)) {
+      v.el.classList.add("pane-ring");
+      window.setTimeout(() => v.el.classList.remove("pane-ring"), 1500);
+    }
   }
 
   reset() {
@@ -185,10 +191,17 @@ export class PaneManager {
     const term = new Terminal({
       fontFamily: "Cascadia Mono, Consolas, monospace",
       fontSize: 14,
+      // Fond = couleur de la sidebar (façon CMUX), pas noir pur.
+      theme: { background: "#252526" },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(el);
+    // Anneau de notification (W6) : le volet qui reçoit une cloche (BEL) clignote.
+    term.onBell(() => {
+      el.classList.add("pane-ring");
+      window.setTimeout(() => el.classList.remove("pane-ring"), 1500);
+    });
     const bar = document.createElement("div");
     bar.className = "pane-bar";
     const bSplitV = document.createElement("button");
