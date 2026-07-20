@@ -177,6 +177,7 @@ fn main() -> std::process::ExitCode {
         }
         Some("kill-session") => cmd_kill(args.get(1).cloned()),
         Some("kill-server") => cmd_shutdown(),
+        Some("agent") => cmd_agent(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_help();
             Ok(())
@@ -437,6 +438,190 @@ fn cmd_control(command: &str, args: &[String]) -> io::Result<()> {
         ServerMessage::Error(e) => Err(io::Error::other(e)),
         _ => Err(io::Error::other("réponse inattendue du serveur")),
     }
+}
+
+/// Ouvre une connexion + handshake, ou erreur si aucun serveur.
+fn connected() -> io::Result<PipeConn> {
+    let conn =
+        connect(&user_pipe_name()).map_err(|_| io::Error::other("aucun serveur en cours"))?;
+    handshake(&conn)?;
+    Ok(conn)
+}
+
+/// Session par défaut : `-t` explicite, sinon `$WIMUX_SESSION`.
+fn default_session(explicit: Option<String>) -> io::Result<String> {
+    explicit
+        .or_else(|| std::env::var("WIMUX_SESSION").ok())
+        .ok_or_else(|| {
+            io::Error::other("aucune session : passez -t <session> ou lancez depuis un volet wimux")
+        })
+}
+
+/// Pane par défaut : `-p` explicite, sinon `$WIMUX_PANE`.
+fn default_pane(explicit: Option<u64>) -> io::Result<u64> {
+    explicit
+        .or_else(|| {
+            std::env::var("WIMUX_PANE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
+        .ok_or_else(|| {
+            io::Error::other("aucun volet : passez -p <pane> ou lancez depuis un volet wimux")
+        })
+}
+
+fn cmd_agent(args: &[String]) -> io::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("spawn") => agent_spawn(&args[1..]),
+        Some("list") => agent_list(&args[1..]),
+        Some("capture") => agent_capture(&args[1..]),
+        Some("logs") => agent_logs(&args[1..]),
+        Some("send") => agent_send(&args[1..]),
+        Some("kill") => agent_kill(&args[1..]),
+        Some("whoami") => agent_whoami(),
+        _ => Err(io::Error::other(
+            "usage : wimux agent <spawn|list|logs|capture|send|kill|whoami> ...",
+        )),
+    }
+}
+
+fn agent_spawn(args: &[String]) -> io::Result<()> {
+    let a = agent::parse_spawn(args)?;
+    let session = default_session(a.session)?;
+    let from_pane = a.from_pane.or_else(|| {
+        std::env::var("WIMUX_PANE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+    });
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(
+        &mut w,
+        &ClientMessage::SpawnPane {
+            session,
+            from_pane,
+            dir: a.dir,
+            cwd: a.cwd,
+            program: a.program,
+            args: a.program_args,
+        },
+    )?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::PaneSpawned { pane_id } => {
+            println!("{{\"pane_id\":{pane_id}}}");
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn agent_list(args: &[String]) -> io::Result<()> {
+    let (session, _pane, _rest) = agent::parse_target_pane(args);
+    let session = default_session(session)?;
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::ListPanes { session })?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::PaneList(panes) => {
+            // JSON array manuel (pas de dépendance serde_json).
+            let items: Vec<String> = panes
+                .iter()
+                .map(|p| {
+                    let cwd = p.cwd.as_deref().map(|c| format!("\"{}\"", agent::json_escape(c))).unwrap_or_else(|| "null".into());
+                    let log = p.log_path.as_deref().map(|c| format!("\"{}\"", agent::json_escape(c))).unwrap_or_else(|| "null".into());
+                    let ec = p.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".into());
+                    format!(
+                        "{{\"pane_id\":{},\"running\":{},\"exit_code\":{},\"cwd\":{},\"log_path\":{}}}",
+                        p.pane_id, p.running, ec, cwd, log
+                    )
+                })
+                .collect();
+            println!("[{}]", items.join(","));
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn agent_capture(args: &[String]) -> io::Result<()> {
+    let (session, pane, _rest) = agent::parse_target_pane(args);
+    let session = default_session(session)?;
+    let pane = default_pane(pane)?;
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::CapturePane { session, pane })?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::PaneCapture(text) => {
+            println!("{text}");
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn agent_send(args: &[String]) -> io::Result<()> {
+    let (session, pane, rest) = agent::parse_target_pane(args);
+    let session = default_session(session)?;
+    let pane = default_pane(pane)?;
+    if rest.is_empty() {
+        return Err(io::Error::other("aucune touche à envoyer"));
+    }
+    let keys = translate_keys(&rest);
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(
+        &mut w,
+        &ClientMessage::SendKeysPane {
+            session,
+            pane,
+            keys,
+        },
+    )?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::Ok => Ok(()),
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn agent_kill(args: &[String]) -> io::Result<()> {
+    let (session, pane, _rest) = agent::parse_target_pane(args);
+    let session = default_session(session)?;
+    let pane = default_pane(pane)?;
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::KillPane { session, pane })?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::Ok => Ok(()),
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn agent_whoami() -> io::Result<()> {
+    let session = std::env::var("WIMUX_SESSION").unwrap_or_default();
+    let pane = std::env::var("WIMUX_PANE").unwrap_or_default();
+    let pipe = std::env::var("WIMUX_PIPE").unwrap_or_else(|_| user_pipe_name());
+    println!(
+        "{{\"session\":\"{}\",\"pane\":\"{}\",\"pipe\":\"{}\"}}",
+        agent::json_escape(&session),
+        agent::json_escape(&pane),
+        agent::json_escape(&pipe)
+    );
+    Ok(())
+}
+
+/// TEMPORAIRE (Task 8 l'implémente réellement) : lecture du journal d'un volet.
+fn agent_logs(_args: &[String]) -> io::Result<()> {
+    Err(io::Error::other("wimux agent logs : implémenté en Task 8"))
 }
 
 /// Traduit des jetons de touches en octets.
