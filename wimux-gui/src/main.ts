@@ -248,6 +248,20 @@ async function switchTo(name: string) {
 
 let lastSessions: SessionDto[] = [];
 let renaming = false; // suspend le sondage tant qu'une edition de nom est en cours
+let draggedName: string | null = null; // session en cours de glisser-déposer (réordonnancement)
+
+// Réordonne les sessions du rail (glisser-déposer) : place `dragged` avant/après
+// `target`, met à jour l'affichage de façon optimiste, puis persiste côté serveur.
+function reorderSessions(dragged: string, target: string, before: boolean) {
+  const order = lastSessions.map((s) => s.name).filter((n) => n !== dragged);
+  const ti = order.indexOf(target);
+  if (ti < 0) return;
+  order.splice(before ? ti : ti + 1, 0, dragged);
+  const byName = new Map(lastSessions.map((s) => [s.name, s] as const));
+  const reordered = order.map((n) => byName.get(n)).filter((s): s is SessionDto => !!s);
+  renderRail(reordered); // optimiste
+  invoke("reorder_sessions", { names: order }).catch(() => {});
+}
 
 function agentStatusGlyph(status: string | null): string {
   switch (status) {
@@ -334,6 +348,36 @@ function renderSession(s: SessionDto): HTMLElement {
   el.onclick = () => {
     if (clickTimer !== null) return; // 2e clic d'un double-clic : ignore, laisse ondblclick gerer
     clickTimer = window.setTimeout(() => { clickTimer = null; switchTo(s.name); }, 200);
+  };
+  // Glisser-déposer : réordonner les workspaces dans le rail.
+  el.draggable = true;
+  el.ondragstart = (ev) => {
+    draggedName = s.name;
+    el.classList.add("dragging");
+    if (ev.dataTransfer) ev.dataTransfer.effectAllowed = "move";
+  };
+  el.ondragend = () => {
+    draggedName = null;
+    document
+      .querySelectorAll(".session.dragging, .session.drop-before, .session.drop-after")
+      .forEach((n) => n.classList.remove("dragging", "drop-before", "drop-after"));
+  };
+  el.ondragover = (ev) => {
+    if (draggedName === null || draggedName === s.name) return;
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+    const r = el.getBoundingClientRect();
+    const before = ev.clientY < r.top + r.height / 2;
+    el.classList.toggle("drop-before", before);
+    el.classList.toggle("drop-after", !before);
+  };
+  el.ondragleave = () => el.classList.remove("drop-before", "drop-after");
+  el.ondrop = (ev) => {
+    if (draggedName === null || draggedName === s.name) return;
+    ev.preventDefault();
+    const r = el.getBoundingClientRect();
+    const before = ev.clientY < r.top + r.height / 2;
+    reorderSessions(draggedName, s.name, before);
   };
   const isActive = s.name === activeSession;
   if (s.agent) {
@@ -438,7 +482,7 @@ function startRename(el: HTMLElement, oldName: string) {
 }
 
 async function refresh() {
-  if (renaming) return; // ne pas reconstruire le rail pendant un renommage
+  if (renaming || draggedName !== null) return; // pas de rebuild pendant renommage/glisser
   try {
     const sessions = await invoke<SessionDto[]>("list_sessions");
     renderRail(sessions); // peuple le rail + lastSessions d'abord

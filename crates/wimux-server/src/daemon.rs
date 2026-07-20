@@ -69,13 +69,20 @@ impl Server {
 
         // Collecter les Arc<Session> SOUS le verrou, puis dropper le guard
         // avant tout calcul lent (git_branch fait de l'I/O disque).
-        let sessions_vec = {
+        let mut sessions_vec = {
             let sessions = self.sessions.lock().unwrap();
             sessions.values().cloned().collect::<Vec<_>>()
         };
+        // Ordre d'affichage du rail : ordre custom (glisser-déposer, W4/W5) puis
+        // nom en tiebreak (déterministe).
+        sessions_vec.sort_by(|a, b| {
+            a.order()
+                .cmp(&b.order())
+                .then_with(|| a.name().cmp(&b.name()))
+        });
 
-        // Construire les SessionInfo HORS verrou global.
-        let mut infos: Vec<SessionInfo> = sessions_vec
+        // Construire les SessionInfo HORS verrou global, dans cet ordre.
+        let infos: Vec<SessionInfo> = sessions_vec
             .iter()
             .map(|s| {
                 let name = s.name();
@@ -107,8 +114,19 @@ impl Server {
                 }
             })
             .collect();
-        infos.sort_by(|a, b| a.name.cmp(&b.name));
         infos
+    }
+
+    /// Réaffecte l'ordre d'affichage des sessions du rail selon la liste `names`
+    /// (glisser-déposer, W4/W5) : chaque session nommée prend l'ordre de sa
+    /// position ; les sessions absentes de `names` gardent leur ordre (rare).
+    fn reorder_sessions(&self, names: &[String]) {
+        let sessions = self.sessions.lock().unwrap();
+        for (i, name) in names.iter().enumerate() {
+            if let Some(s) = sessions.get(name) {
+                s.set_order(i as u64);
+            }
+        }
     }
 
     fn kill(&self, name: &str) -> bool {
@@ -650,6 +668,11 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
             }
             ClientMessage::Kill { name } => {
                 server.kill(&name);
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &ServerMessage::Ok)?;
+            }
+            ClientMessage::ReorderSessions { names } => {
+                server.reorder_sessions(&names);
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &ServerMessage::Ok)?;
             }

@@ -289,6 +289,11 @@ pub enum ClientMessage {
     /// (W4, sondage périodique) : le serveur répond par `WindowList` sur la
     /// connexion persistante, ce qui rafraîchit les libellés d'onglet (cwd).
     ListWindows,
+    /// Réordonne les sessions du rail selon `names` (glisser-déposer, W4/W5) :
+    /// chaque session prend l'ordre de sa position dans la liste.
+    ReorderSessions {
+        names: Vec<String>,
+    },
 }
 
 /// Messages serveur -> client.

@@ -227,6 +227,18 @@ fn kill_session(name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn reorder_sessions(names: Vec<String>) -> Result<(), String> {
+    control(
+        || ClientMessage::ReorderSessions { names },
+        |msg| match msg {
+            ServerMessage::Ok => Ok(()),
+            ServerMessage::Error(e) => Err(e),
+            _ => Err("réponse inattendue".into()),
+        },
+    )
+}
+
+#[tauri::command]
 fn rename_session(from: String, to: String) -> Result<(), String> {
     control(
         || ClientMessage::RenameSession { from, to },
@@ -359,6 +371,7 @@ pub fn run() {
             list_sessions,
             create_session,
             kill_session,
+            reorder_sessions,
             rename_session,
             list_agent_templates,
             create_agent,

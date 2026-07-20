@@ -15,6 +15,11 @@ use wimux_vt::{Color, Grid, Pen};
 use crate::pane::{CopyAction, Notifier, Pane, PaneId};
 use crate::window::{Move, Rect, SplitDir, Window};
 
+/// Compteur d'ordre d'affichage des sessions dans le rail (W4/W5). À la création
+/// une session prend le prochain numéro (donc s'ajoute EN FIN) ; le glisser-déposer
+/// réaffecte les ordres via `set_order`.
+static NEXT_SESSION_ORDER: AtomicU64 = AtomicU64::new(0);
+
 struct Inner {
     windows: Vec<Window>,
     active_window: usize,
@@ -41,6 +46,9 @@ pub struct Session {
     /// Worktree git isolé de cette session de lot (M3), posé par `set_worktree`.
     /// Nettoyé (`worktree::remove`) au `kill`.
     worktree: Mutex<Option<crate::worktree::Worktree>>,
+    /// Ordre d'affichage dans le rail (W4/W5) : `list` trie dessus, le
+    /// glisser-déposer le réaffecte.
+    order: AtomicU64,
 }
 
 impl Session {
@@ -66,6 +74,7 @@ impl Session {
             agent: AtomicBool::new(false),
             group: Mutex::new(None),
             worktree: Mutex::new(None),
+            order: AtomicU64::new(NEXT_SESSION_ORDER.fetch_add(1, Ordering::Relaxed)),
         });
         session.reflow();
         Ok(session)
@@ -110,6 +119,7 @@ impl Session {
             agent: AtomicBool::new(false),
             group: Mutex::new(None),
             worktree: Mutex::new(None),
+            order: AtomicU64::new(NEXT_SESSION_ORDER.fetch_add(1, Ordering::Relaxed)),
         });
         session.reflow();
         session.mark_agent();
@@ -122,6 +132,16 @@ impl Session {
 
     pub fn set_name(&self, new: String) {
         *self.name.lock().unwrap() = new;
+    }
+
+    /// Ordre d'affichage de la session dans le rail (W4/W5).
+    pub fn order(&self) -> u64 {
+        self.order.load(Ordering::Relaxed)
+    }
+
+    /// Réaffecte l'ordre d'affichage (glisser-déposer).
+    pub fn set_order(&self, order: u64) {
+        self.order.store(order, Ordering::Relaxed);
     }
 
     fn active_pane(&self) -> Option<Arc<Pane>> {
