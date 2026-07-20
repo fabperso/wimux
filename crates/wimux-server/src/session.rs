@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use wimux_protocol::{AgentStatus, Frame, LayoutNode, WindowInfo};
+use wimux_protocol::{AgentStatus, Frame, LayoutNode, PaneInfo, WindowInfo};
 use wimux_vt::{Color, Grid, Pen};
 
 use crate::pane::{CopyAction, Notifier, Pane, PaneId};
@@ -53,6 +53,10 @@ pub struct Session {
     color: Mutex<Option<String>>,
     /// Workspace épinglé : trié en tête du rail (W5).
     pinned: AtomicBool,
+    /// Compteur de révision de topologie de volets (A1) : bumpé aux créations/
+    /// fermetures de volet ; lu par la GUI pour se réattacher et refléter les
+    /// volets créés en CLI.
+    layout_rev: AtomicU64,
 }
 
 impl Session {
@@ -81,6 +85,7 @@ impl Session {
             order: AtomicU64::new(NEXT_SESSION_ORDER.fetch_add(1, Ordering::Relaxed)),
             color: Mutex::new(None),
             pinned: AtomicBool::new(false),
+            layout_rev: AtomicU64::new(0),
         });
         session.reflow();
         Ok(session)
@@ -129,6 +134,7 @@ impl Session {
             order: AtomicU64::new(NEXT_SESSION_ORDER.fetch_add(1, Ordering::Relaxed)),
             color: Mutex::new(None),
             pinned: AtomicBool::new(false),
+            layout_rev: AtomicU64::new(0),
         });
         session.reflow();
         session.mark_agent();
@@ -171,6 +177,16 @@ impl Session {
     /// Épingle ou désépingle le workspace (W5).
     pub fn set_pinned(&self, pinned: bool) {
         self.pinned.store(pinned, Ordering::Relaxed);
+    }
+
+    /// Révision courante de la topologie de volets (A1).
+    pub fn layout_rev(&self) -> u64 {
+        self.layout_rev.load(Ordering::Relaxed)
+    }
+
+    /// Incrémente la révision de topologie (à chaque création/fermeture de volet).
+    fn bump_layout_rev(&self) {
+        self.layout_rev.fetch_add(1, Ordering::Relaxed);
     }
 
     fn active_pane(&self) -> Option<Arc<Pane>> {
@@ -538,6 +554,120 @@ impl Session {
             .unwrap_or_default()
     }
 
+    /// A1 : découpe la fenêtre active à partir de `from_pane` (défaut : volet
+    /// actif) et lance `program`/`args` (journalisé) dans le nouveau volet.
+    /// Renvoie l'id du volet créé, ou `None` si le spawn échoue / plus de fenêtre.
+    pub fn spawn_pane(
+        &self,
+        from_pane: Option<u64>,
+        dir: SplitDir,
+        cwd: Option<&str>,
+        program: &str,
+        args: &[String],
+    ) -> Option<u64> {
+        // Spawn HORS verrou (lance un processus).
+        let ctx = crate::pane::PaneSpawnCtx::agent(&self.name());
+        let new_pane =
+            Pane::spawn_command(1, 1, program, args, cwd, Arc::clone(&self.notifier), ctx).ok()?;
+        let new_id = new_pane.id;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let aw = inner.active_window;
+            let Some(win) = inner.windows.get_mut(aw) else {
+                drop(inner);
+                new_pane.kill();
+                return None;
+            };
+            let target = from_pane
+                .filter(|id| win.pane(*id).is_some())
+                .unwrap_or_else(|| win.active_pane_id());
+            win.split_pane(target, dir, Arc::clone(&new_pane));
+            let area = content_area(inner.cols, inner.rows);
+            inner.windows[aw].reflow(area);
+        }
+        self.bump_layout_rev();
+        self.notifier.bump();
+        Some(new_id)
+    }
+
+    /// A1 : contenu visible du volet `pane_id` (n'importe quelle fenêtre), texte.
+    pub fn capture_pane(&self, pane_id: u64) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .windows
+            .iter()
+            .find_map(|w| w.pane(pane_id))
+            .map(|p| p.capture_text())
+    }
+
+    /// A1 : inventaire structuré des volets de toutes les fenêtres.
+    pub fn pane_infos(&self) -> Vec<PaneInfo> {
+        let inner = self.inner.lock().unwrap();
+        let mut out = Vec::new();
+        for win in &inner.windows {
+            for id in win.pane_ids() {
+                if let Some(p) = win.pane(id) {
+                    out.push(PaneInfo {
+                        pane_id: id,
+                        cwd: p.cwd(),
+                        running: p.is_alive(),
+                        exit_code: p.exit_code().map(|c| c as i32),
+                        log_path: p.log_path(),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// A1 : envoie des octets au volet `pane_id`. `false` si l'id est introuvable.
+    pub fn send_keys_pane(&self, pane_id: u64, bytes: &[u8]) -> bool {
+        let pane = {
+            let inner = self.inner.lock().unwrap();
+            inner.windows.iter().find_map(|w| w.pane(pane_id))
+        };
+        match pane {
+            Some(p) => {
+                p.send_input(bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A1 : ferme le volet `pane_id` (dans quelque fenêtre que ce soit). Retire la
+    /// fenêtre si elle devient vide. `false` si l'id est introuvable.
+    pub fn kill_pane(&self, pane_id: u64) -> bool {
+        let found = {
+            let mut inner = self.inner.lock().unwrap();
+            let mut hit = None;
+            for (wi, win) in inner.windows.iter_mut().enumerate() {
+                if win.pane(pane_id).is_some() {
+                    let empty = win.close_pane(pane_id);
+                    hit = Some((wi, empty));
+                    break;
+                }
+            }
+            if let Some((wi, empty)) = hit {
+                if empty {
+                    inner.windows.remove(wi);
+                    if inner.active_window >= inner.windows.len() && !inner.windows.is_empty() {
+                        inner.active_window = inner.windows.len() - 1;
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if found {
+            self.reflow();
+            self.bump_layout_rev();
+            self.notifier.bump();
+        }
+        found
+    }
+
     // --- Zoom & redimensionnement (phase 6) ----------------------------------
 
     pub fn toggle_zoom(&self) {
@@ -775,6 +905,7 @@ impl Session {
                 inner.windows[aw].reflow(area);
             }
             drop(inner);
+            self.bump_layout_rev();
             self.notifier.bump();
         }
     }
@@ -813,6 +944,7 @@ impl Session {
             }
         }
         self.reflow();
+        self.bump_layout_rev();
         self.notifier.bump();
     }
 
@@ -831,6 +963,7 @@ impl Session {
             let aw = inner.active_window;
             inner.windows[aw].reflow(area);
             drop(inner);
+            self.bump_layout_rev();
             self.notifier.bump();
         }
     }
@@ -1390,5 +1523,108 @@ mod tests {
         assert!(osc7_prompt_injection("cmd.exe").is_none());
         assert!(osc7_prompt_injection("bash").is_none());
         assert!(osc7_prompt_injection("cmd").is_none());
+    }
+
+    /// Sonde `capture_pane` jusqu'à ce qu'il contienne `needle`, dans la limite du délai.
+    fn poll_capture_contains(s: &Session, pane_id: u64, needle: &str, secs: u64) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if let Some(txt) = s.capture_pane(pane_id) {
+                if txt.contains(needle) {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
+    #[test]
+    fn spawn_pane_injecte_wimux_session_dans_l_env() {
+        // Vérifie l'injection d'env de Task 2 (observable seulement via spawn_pane).
+        let s = Session::new("envtest".into(), 80, 24, "cmd.exe").unwrap();
+        let id = s
+            .spawn_pane(
+                None,
+                SplitDir::LeftRight,
+                None,
+                "cmd.exe",
+                &["/c".into(), "echo".into(), "%WIMUX_SESSION%".into()],
+            )
+            .expect("spawn_pane doit renvoyer un id");
+        assert!(
+            poll_capture_contains(&s, id, "envtest", 20),
+            "la sortie du volet doit contenir le nom de session injecté"
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn spawn_pane_journalise_la_sortie() {
+        // Vérifie le tee de journalisation de Task 3.
+        let s = Session::new("logtest".into(), 80, 24, "cmd.exe").unwrap();
+        let id = s
+            .spawn_pane(
+                None,
+                SplitDir::LeftRight,
+                None,
+                "cmd.exe",
+                &["/c".into(), "echo".into(), "HELLO_LOG".into()],
+            )
+            .expect("spawn_pane id");
+        let info = s
+            .pane_infos()
+            .into_iter()
+            .find(|p| p.pane_id == id)
+            .expect("le volet doit être listé");
+        let path = info.log_path.expect("un volet agent doit être journalisé");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if content.contains("HELLO_LOG") {
+                    found = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        s.kill();
+        let _ = std::fs::remove_file(&path);
+        assert!(found, "le journal doit contenir la sortie du volet");
+    }
+
+    #[test]
+    fn spawn_pane_ajoute_un_volet_et_bump_layout_rev() {
+        let s = Session::new("orch".into(), 80, 24, "cmd.exe").unwrap();
+        let rev0 = s.layout_rev();
+        let before = s.pane_infos().len();
+        let id = s
+            .spawn_pane(None, SplitDir::LeftRight, None, "cmd.exe", &[])
+            .expect("un id de volet");
+        assert_eq!(s.pane_infos().len(), before + 1, "un volet en plus");
+        assert!(s.pane_infos().iter().any(|p| p.pane_id == id));
+        assert!(s.layout_rev() > rev0, "layout_rev doit être bumpé");
+        // kill_pane retire le volet et bump encore.
+        let rev1 = s.layout_rev();
+        assert!(s.kill_pane(id), "kill_pane doit trouver le volet");
+        assert!(s.layout_rev() > rev1);
+        s.kill();
+    }
+
+    #[test]
+    fn send_keys_pane_cible_le_bon_volet() {
+        let s = Session::new("sk".into(), 80, 24, "cmd.exe").unwrap();
+        let id = s
+            .spawn_pane(None, SplitDir::LeftRight, None, "cmd.exe", &[])
+            .unwrap();
+        // Écrire "echo PONG\r" dans le volet agent, pas ailleurs.
+        assert!(s.send_keys_pane(id, b"echo PONG\r\n"));
+        assert!(
+            poll_capture_contains(&s, id, "PONG", 20),
+            "la frappe doit atteindre le volet ciblé"
+        );
+        assert!(!s.send_keys_pane(999_999, b"x"), "id inconnu -> false");
+        s.kill();
     }
 }
