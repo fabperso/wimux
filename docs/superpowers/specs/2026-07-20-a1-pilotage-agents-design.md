@@ -27,7 +27,7 @@ un journal par volet, l'injection du contexte, et un **skill** qui l'enseigne à
 | Lecture de sortie | **Journal par volet** (fichier append-only) **+ photo** `capture-pane` (grille VT visible) |
 | Granularité d'un agent | Un agent = **un volet (split)** de la session courante → ciblage **par pane-id** |
 | Stratégie API | **Messages protocole typés dédiés** + namespace CLI `wimux agent …` + sortie **JSON** |
-| GUI | Aucun travail : les volets agents s'affichent automatiquement (la GUI rend déjà l'arbre de volets de la session) |
+| GUI (live) | **À câbler** (A1.5) : un volet créé via CLI passe par une **connexion séparée** du daemon → aucun `WindowLayout` n'est poussé vers la GUI attachée. Solution : un **compteur de révision de layout** par session (champ additif sur `SessionInfo`), bumpé aux créations/fermetures de volet ; le `refresh()` frontend le compare pour la session active et re-déclenche `attach_gui` (réutilise le réattachement existant) → le volet-agent apparaît en direct |
 
 ## Composants
 
@@ -50,15 +50,17 @@ Nouveaux `ClientMessage` :
   → découpe la fenêtre active de `session` à partir de `from_pane` (défaut : volet
   actif) et lance `program`/`args` dans le nouveau volet (journalisé).
   Réponse : `ServerMessage::PaneSpawned { pane_id: u64 }` ou `Error`.
-- `CapturePane { session: String, pane: u64, lines: Option<u32> }`
-  → photo de la grille VT du volet `pane` (+ `lines` de scrollback si fourni).
+- `CapturePane { session: String, pane: u64 }`
+  → photo de la grille VT visible du volet `pane` (l'historique passe par le
+  journal ; le paramètre `lines`/scrollback est abandonné — YAGNI).
   Réponse : `ServerMessage::PaneCapture(String)` ou `Error`.
 - `ListPanes { session: String }`
   → Réponse : `ServerMessage::PaneList(Vec<PaneInfo>)` ou `Error`.
 - `SendKeysPane { session: String, pane: u64, keys: Vec<u8> }`
   → frappes vers un volet précis. Réponse : `Ok`/`Error`.
-- `ClosePane { session: String, pane: u64 }`
-  → ferme un volet agent. Réponse : `Ok`/`Error`.
+- `KillPane { session: String, pane: u64 }`
+  → ferme un volet agent (nommé `KillPane` pour ne pas entrer en collision avec la
+  variante GUI existante `ClosePane { pane_id }`). Réponse : `Ok`/`Error`.
 
 Nouveaux `ServerMessage` : `PaneSpawned { pane_id: u64 }`, `PaneCapture(String)`,
 `PaneList(Vec<PaneInfo>)` (les autres réutilisent `Ok`/`Error`).
@@ -226,6 +228,9 @@ distribuable (`npx skills add …`, `agents/openai.yaml`) = évolution future.
 - **A1.3** — CLI : namespace `wimux agent` + JSON + lecture/`tail` du journal
   (+ tests d'args).
 - **A1.4** — Skill : `SKILL.md` + `references/` + section README d'installation.
+- **A1.5** — GUI live : compteur de révision de layout sur `SessionInfo` (bumpé
+  aux créations/fermetures de volet) + re-attach frontend dans `refresh()` quand
+  il change pour la session active (les volets-agents apparaissent en direct).
 
 ## Hors-périmètre A1 (rappel)
 
@@ -246,5 +251,6 @@ distribuable (`npx skills add …`, `agents/openai.yaml`) = évolution future.
 | Fuite/gonflement des journaux | Journaliser **uniquement** les volets `SpawnPane` ; purge best-effort au kill ; hors-périmètre = rotation |
 | Séquence VT coupée entre deux chunks à la dé-ANSI | Dé-ANSI sur le **contenu entier** lu (one-shot) ; `--follow` best-effort, `--raw` disponible |
 | Nom de session à threader jusqu'au spawn de volet | `PaneSpawnCtx { session, log }` passé depuis `Session`/`Window` |
+| Volet créé en CLI **non reflété** dans la GUI attachée (connexion séparée, pas de push `WindowLayout`) | Compteur de révision de layout sur `SessionInfo` + re-attach frontend au changement (A1.5) |
 | Changement de protocole vs daemon persistant | Ajouts **en fin d'enum** ; rebuild release + redémarrage du daemon (piège consigné) |
 | Chemin journal non-UTF-8 / `%LOCALAPPDATA%` introuvable | Ouverture tolérante (non-fatal) → `log_path = None` ; création best-effort de `%LOCALAPPDATA%\wimux\logs` |
