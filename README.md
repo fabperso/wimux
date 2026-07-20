@@ -92,3 +92,11 @@ Navigation façon vi dans le scrollback :
 - **Architecture** : un serveur détaché par utilisateur (source de vérité, survit à la fermeture du terminal) + des clients légers qui s'attachent depuis n'importe quel terminal VT.
 - **Jalon clé (J2)** : `wimux new -s dev` → fermer la fenêtre → `wimux attach -t dev` retrouve la session vivante.
 - **MVP (v0.1)** : ~9-12 semaines · **v1.0** installable via winget : ~5-6 mois.
+
+## Skill Claude (orchestration d'agents)
+
+wimux fournit un skill dans `skills/wimux/` qui apprend à Claude à créer des
+volets-agents et lire leur sortie via `wimux agent`. Pour l'activer, lie ou copie
+`skills/wimux` dans le dossier des skills de ton client Claude (par ex.
+`~/.claude/skills/wimux`), puis lance Claude **depuis un volet wimux**. Vérifie
+avec `wimux agent whoami`.
