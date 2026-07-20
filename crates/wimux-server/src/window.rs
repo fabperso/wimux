@@ -231,11 +231,16 @@ impl Window {
     }
 
     /// Retire les volets dont le shell est mort. Renvoie `true` si vide.
+    ///
+    /// A1 : les volets JOURNALISÉS (agents, `log_path().is_some()`) sont exemptés
+    /// même morts — ils doivent rester lisibles (`list`/`capture`/`exit_code`)
+    /// jusqu'à un `kill_pane` explicite, comme le fait déjà `Session::reap` pour
+    /// une session agent entière (M1).
     pub fn reap_dead(&mut self) -> bool {
         let dead: Vec<PaneId> = self
             .panes
             .iter()
-            .filter(|(_, p)| !p.is_alive())
+            .filter(|(_, p)| !p.is_alive() && p.log_path().is_none())
             .map(|(id, _)| *id)
             .collect();
         for id in dead {

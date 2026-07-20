@@ -637,12 +637,19 @@ impl Session {
 
     /// A1 : ferme le volet `pane_id` (dans quelque fenêtre que ce soit). Retire la
     /// fenêtre si elle devient vide. `false` si l'id est introuvable.
+    ///
+    /// Purge best-effort du journal (spec : « purge best-effort au kill ») : le
+    /// chemin est capturé AVANT la fermeture (pendant qu'on peut encore atteindre
+    /// le volet), puis le fichier est supprimé APRÈS — sans jamais faire échouer
+    /// l'appel si la suppression échoue (fichier déjà absent, verrou, etc.).
     pub fn kill_pane(&self, pane_id: u64) -> bool {
-        let found = {
+        let (found, log_path) = {
             let mut inner = self.inner.lock().unwrap();
             let mut hit = None;
+            let mut log_path = None;
             for (wi, win) in inner.windows.iter_mut().enumerate() {
-                if win.pane(pane_id).is_some() {
+                if let Some(pane) = win.pane(pane_id) {
+                    log_path = pane.log_path();
                     let empty = win.close_pane(pane_id);
                     hit = Some((wi, empty));
                     break;
@@ -655,12 +662,15 @@ impl Session {
                         inner.active_window = inner.windows.len() - 1;
                     }
                 }
-                true
+                (true, log_path)
             } else {
-                false
+                (false, None)
             }
         };
         if found {
+            if let Some(path) = log_path {
+                let _ = std::fs::remove_file(path);
+            }
             self.reflow();
             self.bump_layout_rev();
             self.notifier.bump();
@@ -1609,6 +1619,39 @@ mod tests {
         let rev1 = s.layout_rev();
         assert!(s.kill_pane(id), "kill_pane doit trouver le volet");
         assert!(s.layout_rev() > rev1);
+        s.kill();
+    }
+
+    #[test]
+    fn volet_agent_termine_survit_au_reap() {
+        let s = Session::new("keep".into(), 80, 24, "cmd.exe").unwrap();
+        let id = s
+            .spawn_pane(
+                None,
+                SplitDir::LeftRight,
+                None,
+                "cmd.exe",
+                &["/c".into(), "exit".into(), "0".into()],
+            )
+            .expect("spawn id");
+        // Attendre la sortie du process, puis déclencher un reap via composite().
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut done = false;
+        while std::time::Instant::now() < deadline {
+            let _ = s.composite(); // composite() appelle reap()
+            if let Some(info) = s.pane_infos().into_iter().find(|p| p.pane_id == id) {
+                if !info.running {
+                    assert_eq!(info.exit_code, Some(0), "exit_code conservé après reap");
+                    done = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            done,
+            "le volet agent terminé doit survivre au reap avec son exit_code"
+        );
         s.kill();
     }
 
