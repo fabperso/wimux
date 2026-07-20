@@ -114,6 +114,8 @@ impl Server {
                     branch,
                     color: s.color(),
                     pinned: s.pinned(),
+                    // A1 (intérim) : placeholder ; Task 5 remplacera par s.layout_rev().
+                    layout_rev: 0,
                 }
             })
             .collect();
@@ -871,6 +873,14 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
+            // A1 (intérim) : ces messages ne sont émis par aucun client tant que la
+            // CLI `wimux agent` n'existe pas ; Task 5 REMPLACE ce bras par de vrais
+            // handlers (SpawnPane/CapturePane/ListPanes/SendKeysPane/KillPane).
+            ClientMessage::SpawnPane { .. }
+            | ClientMessage::CapturePane { .. }
+            | ClientMessage::ListPanes { .. }
+            | ClientMessage::SendKeysPane { .. }
+            | ClientMessage::KillPane { .. } => {}
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
                     let outcome = route_input(&a.session, &server.config, &mut prefix, &bytes);
