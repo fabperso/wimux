@@ -12,6 +12,149 @@ use wimux_protocol::{
     ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, recv, send,
 };
 
+#[allow(dead_code)] // Utilisé par les tests et la tâche 7 (cmd_agent)
+mod agent {
+    use std::io;
+    use wimux_protocol::SplitDir;
+
+    /// Arguments analysés de `wimux agent spawn`.
+    pub struct SpawnArgs {
+        pub session: Option<String>,
+        pub from_pane: Option<u64>,
+        pub dir: SplitDir,
+        pub cwd: Option<String>,
+        pub program: String,
+        pub program_args: Vec<String>,
+    }
+
+    /// Analyse `wimux agent spawn [--dir h|v] [--cwd DIR] [-t SESSION] [--from-pane ID] -- <prog...>`.
+    pub fn parse_spawn(args: &[String]) -> io::Result<SpawnArgs> {
+        let mut session = None;
+        let mut from_pane = None;
+        let mut dir = SplitDir::LeftRight; // défaut : côte à côte
+        let mut cwd = None;
+        let mut i = 0;
+        let mut rest: Vec<String> = Vec::new();
+        while i < args.len() {
+            match args[i].as_str() {
+                "--" => {
+                    rest = args[i + 1..].to_vec();
+                    break;
+                }
+                "-t" | "--target" => {
+                    session = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                "--from-pane" | "-p" => {
+                    from_pane = args.get(i + 1).and_then(|s| s.parse().ok());
+                    i += 2;
+                }
+                "--cwd" => {
+                    cwd = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                "--dir" => {
+                    dir = match args.get(i + 1).map(String::as_str) {
+                        Some("v") | Some("vertical") => SplitDir::TopBottom,
+                        _ => SplitDir::LeftRight,
+                    };
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+        }
+        let program = rest.first().cloned().ok_or_else(|| {
+            io::Error::other("usage : wimux agent spawn [flags] -- <commande...>")
+        })?;
+        Ok(SpawnArgs {
+            session,
+            from_pane,
+            dir,
+            cwd,
+            program,
+            program_args: rest[1..].to_vec(),
+        })
+    }
+
+    /// Extrait `(session, pane)` de flags `-t SESSION -p PANE` (capture/logs/send/kill).
+    pub fn parse_target_pane(args: &[String]) -> (Option<String>, Option<u64>, Vec<String>) {
+        let mut session = None;
+        let mut pane = None;
+        let mut rest = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "-t" | "--target" => {
+                    session = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                "-p" | "--pane" => {
+                    pane = args.get(i + 1).and_then(|s| s.parse().ok());
+                    i += 2;
+                }
+                other => {
+                    rest.push(other.to_string());
+                    i += 1;
+                }
+            }
+        }
+        (session, pane, rest)
+    }
+
+    /// Échappe une chaîne pour l'insérer dans du JSON (backslash + guillemets + contrôles simples).
+    pub fn json_escape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        for c in s.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// Retire les séquences CSI (`ESC[..lettre`) et OSC (`ESC]..BEL|ST`) pour rendre
+    /// un journal lisible. Suffisant pour un flux ligne à ligne.
+    pub fn strip_ansi(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(s.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() {
+                match bytes[i + 1] {
+                    b'[' => {
+                        i += 2;
+                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    b']' => {
+                        i += 2;
+                        while i < bytes.len() && bytes[i] != 0x07 {
+                            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                                i += 1;
+                                break;
+                            }
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    _ => i += 2,
+                }
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str);
@@ -378,4 +521,50 @@ fn print_help() {
              -V, --version       Affiche la version\n    \
              -h, --help          Affiche cette aide"
     );
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::agent::*;
+    use wimux_protocol::SplitDir;
+
+    #[test]
+    fn parse_spawn_separe_le_programme_apres_double_tiret() {
+        let a = parse_spawn(&[
+            "--dir".into(),
+            "v".into(),
+            "-t".into(),
+            "sess".into(),
+            "--from-pane".into(),
+            "4".into(),
+            "--".into(),
+            "claude".into(),
+            "-p".into(),
+            "fais X".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.session.as_deref(), Some("sess"));
+        assert_eq!(a.from_pane, Some(4));
+        assert!(matches!(a.dir, SplitDir::TopBottom));
+        assert_eq!(a.program, "claude");
+        assert_eq!(a.program_args, vec!["-p".to_string(), "fais X".to_string()]);
+    }
+
+    #[test]
+    fn parse_spawn_defaut_dir_horizontal_sans_programme_est_erreur() {
+        let a = parse_spawn(&["--".into(), "cmd.exe".into()]).unwrap();
+        assert!(matches!(a.dir, SplitDir::LeftRight)); // défaut
+        assert!(parse_spawn(&["--dir".into(), "h".into()]).is_err()); // pas de programme
+    }
+
+    #[test]
+    fn json_escape_echappe_backslash_et_guillemets() {
+        assert_eq!(json_escape("C:\\a\"b"), "C:\\\\a\\\"b");
+    }
+
+    #[test]
+    fn strip_ansi_retire_csi_et_osc() {
+        assert_eq!(strip_ansi("\x1b[31mrouge\x1b[0m"), "rouge");
+        assert_eq!(strip_ansi("\x1b]9;notif\x07texte"), "texte");
+    }
 }
