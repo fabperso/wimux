@@ -9,5 +9,6 @@ pub mod git;
 pub mod pane;
 pub mod pty;
 pub mod session;
+pub mod webpane;
 pub mod window;
 pub mod worktree;
