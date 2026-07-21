@@ -46,6 +46,22 @@ const paneManager = new PaneManager(mount, {
   onRatio: (nodeId, ratio) => {
     invoke("set_split_ratio", { nodeId, ratio }).catch(() => {});
   },
+  onOpenWeb: () => {
+    const url = prompt("URL à ouvrir :", "http://localhost:5173/");
+    if (!url) return;
+    invoke("open_web_pane", { url, dir: "LeftRight" }).catch((e) =>
+      console.error("open_web_pane:", e),
+    );
+  },
+  onWebNavigate: (paneId, url) => {
+    invoke("web_navigate", { paneId, url }).catch((e) => console.error("web_navigate:", e));
+  },
+  onWebBack: (paneId) => {
+    invoke("web_back", { paneId }).catch((e) => console.error("web_back:", e));
+  },
+  onWebForward: (paneId) => {
+    invoke("web_forward", { paneId }).catch((e) => console.error("web_forward:", e));
+  },
 });
 
 let activeSession: string | null = null;

@@ -403,6 +403,78 @@ fn pane_resize(pane_id: u64, cols: u16, rows: u16, bridge: State<Bridge>) -> Res
 }
 
 #[tauri::command]
+fn open_web_pane(url: String, dir: String, bridge: State<Bridge>) -> Result<(), String> {
+    let dir = match dir.as_str() {
+        "LeftRight" => SplitDir::LeftRight,
+        "TopBottom" => SplitDir::TopBottom,
+        other => return Err(format!("direction inconnue : {other}")),
+    };
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(
+            &mut w,
+            &ClientMessage::OpenWebPane {
+                session: String::new(),
+                from_pane: None,
+                dir,
+                url,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn web_navigate(pane_id: u64, url: String, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(
+            &mut w,
+            &ClientMessage::WebNavigate {
+                session: String::new(),
+                pane: pane_id,
+                url,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn web_back(pane_id: u64, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(
+            &mut w,
+            &ClientMessage::WebBack {
+                session: String::new(),
+                pane: pane_id,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn web_forward(pane_id: u64, bridge: State<Bridge>) -> Result<(), String> {
+    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
+        let mut w: &PipeConn = conn;
+        send(
+            &mut w,
+            &ClientMessage::WebForward {
+                session: String::new(),
+                pane: pane_id,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn new_window(bridge: State<Bridge>) -> Result<(), String> {
     if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
         let mut w: &PipeConn = conn;
@@ -477,7 +549,11 @@ pub fn run() {
             list_windows,
             select_window,
             close_window,
-            rename_window
+            rename_window,
+            open_web_pane,
+            web_navigate,
+            web_back,
+            web_forward
         ])
         .run(tauri::generate_context!())
         .expect("erreur au lancement de wimux-gui");

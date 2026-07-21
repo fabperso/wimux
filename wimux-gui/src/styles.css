@@ -132,6 +132,21 @@ body { margin: 0; }
 .sep-v { width: 4px; cursor: col-resize; }
 .sep-h { height: 4px; cursor: row-resize; }
 
+/* Volet navigateur (B1) : barre de chrome + iframe pleine hauteur. */
+.pane-web { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.web-bar { display: flex; gap: 4px; align-items: center; padding: 3px 4px; background: #2d2d2d; }
+.web-bar button {
+  background: transparent; border: 0; color: #ccc; cursor: pointer;
+  font-size: 12px; padding: 2px 5px; border-radius: 3px;
+}
+.web-bar button:hover { background: #3a3a3a; }
+.web-url {
+  flex: 1; min-width: 0; background: #1e1e1e; border: 1px solid #3a3a3a;
+  color: #ddd; border-radius: 3px; padding: 2px 6px; font-size: 12px;
+}
+.web-frame { flex: 1; min-height: 0; border: 0; background: #fff; }
+.web-hint { font-size: 10px; color: #777; padding: 2px 6px; background: #2d2d2d; }
+
 /* M2 : actions du rail + glyphe d'agent + dialogue modal */
 #rail-actions { display: flex; }
 #rail-actions button { flex: 1; }

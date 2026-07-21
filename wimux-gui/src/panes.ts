@@ -2,9 +2,12 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
+/// Nature d'une feuille (miroir de `PaneKind` serveur, serde externally-tagged).
+export type PaneKind = "Terminal" | { Web: { url: string } };
+
 /// Arbre de disposition, miroir du `LayoutNode` serveur (serde externally-tagged).
 export type LayoutNode =
-  | { Leaf: { pane_id: number } }
+  | { Leaf: { pane_id: number; kind: PaneKind } }
   | {
       Split: {
         node_id: number;
@@ -22,6 +25,10 @@ export interface PaneCallbacks {
   onSplit: (paneId: number, dir: "LeftRight" | "TopBottom") => void;
   onClose: (paneId: number) => void;
   onRatio: (nodeId: number, ratio: number) => void;
+  onOpenWeb: (paneId: number) => void;
+  onWebNavigate: (paneId: number, url: string) => void;
+  onWebBack: (paneId: number) => void;
+  onWebForward: (paneId: number) => void;
 }
 
 interface PaneView {
@@ -33,6 +40,8 @@ interface PaneView {
 
 export class PaneManager {
   private views = new Map<number, PaneView>();
+  // Volets NAVIGATEUR (B1) : conteneur + iframe + champ URL, indexés par pane_id.
+  private webViews = new Map<number, { el: HTMLElement; frame: HTMLIFrameElement; input: HTMLInputElement }>();
   private mount: HTMLElement;
   private cb: PaneCallbacks;
   private ratioTimer: number | null = null;
@@ -91,6 +100,7 @@ export class PaneManager {
       v.term.dispose();
     }
     this.views.clear();
+    this.webViews.clear();
     this.mount.replaceChildren();
     this.lastSizes.clear();
     this.lastSignature = null;
@@ -109,6 +119,13 @@ export class PaneManager {
         v.term.dispose();
         this.views.delete(id);
         this.lastSizes.delete(id);
+      }
+    }
+    // Idem pour les volets navigateur disparus (B1).
+    for (const [id, v] of this.webViews) {
+      if (!wanted.has(id)) {
+        v.el.remove();
+        this.webViews.delete(id);
       }
     }
 
@@ -165,7 +182,14 @@ export class PaneManager {
   }
 
   private computeSignature(tree: LayoutNode): string {
-    if ("Leaf" in tree) return `L${tree.Leaf.pane_id}`;
+    if ("Leaf" in tree) {
+      // La nature (et l'URL pour un navigateur) fait partie de la signature :
+      // sans ça une navigation (même arbre, URL différente) ne redéclencherait
+      // aucune mise à jour, l'optimisation anti-rebuild l'ignorant.
+      const k = tree.Leaf.kind;
+      const kindSig = k === "Terminal" ? "T" : `W:${k.Web.url}`;
+      return `L${tree.Leaf.pane_id}:${kindSig}`;
+    }
     const s = tree.Split;
     return `S${s.node_id}:${s.dir}:(${this.computeSignature(s.a)},${this.computeSignature(s.b)})`;
   }
@@ -225,7 +249,14 @@ export class PaneManager {
       ev.stopPropagation();
       this.cb.onClose(paneId);
     };
-    bar.append(bSplitV, bSplitH, bClose);
+    const bWeb = document.createElement("button");
+    bWeb.textContent = "🌐";
+    bWeb.title = "Ouvrir un navigateur à côté";
+    bWeb.onclick = (ev) => {
+      ev.stopPropagation();
+      this.cb.onOpenWeb(paneId);
+    };
+    bar.append(bSplitV, bSplitH, bWeb, bClose);
     el.appendChild(bar);
     el.addEventListener("mousedown", () => {
       this.cb.onFocus(paneId);
@@ -249,9 +280,72 @@ export class PaneManager {
     return view;
   }
 
+  /// Construit (ou réutilise) le conteneur d'un volet NAVIGATEUR : barre de
+  /// chrome (URL, précédent, suivant, recharger) + iframe.
+  private ensureWebView(paneId: number, url: string) {
+    const existing = this.webViews.get(paneId);
+    if (existing) {
+      // Le serveur est la source de vérité : on suit l'URL reçue.
+      if (existing.frame.getAttribute("src") !== url) {
+        existing.frame.setAttribute("src", url);
+      }
+      if (document.activeElement !== existing.input) existing.input.value = url;
+      return existing;
+    }
+    const el = document.createElement("div");
+    el.className = "pane pane-web";
+    el.dataset.paneId = String(paneId);
+
+    const bar = document.createElement("div");
+    bar.className = "web-bar";
+    const back = document.createElement("button");
+    back.textContent = "◀";
+    back.title = "Précédent";
+    back.onclick = () => this.cb.onWebBack(paneId);
+    const fwd = document.createElement("button");
+    fwd.textContent = "▶";
+    fwd.title = "Suivant";
+    fwd.onclick = () => this.cb.onWebForward(paneId);
+    const reload = document.createElement("button");
+    reload.textContent = "⟳";
+    reload.title = "Recharger";
+    const input = document.createElement("input");
+    input.className = "web-url";
+    input.value = url;
+    input.onkeydown = (ev) => {
+      if (ev.key === "Enter") this.cb.onWebNavigate(paneId, input.value.trim());
+    };
+    bar.append(back, fwd, reload, input);
+
+    const frame = document.createElement("iframe");
+    frame.className = "web-frame";
+    frame.setAttribute("src", url);
+    // Recharger est purement client : pas d'aller-retour serveur.
+    reload.onclick = () => {
+      frame.setAttribute("src", frame.getAttribute("src") ?? url);
+    };
+
+    // Avertissement permanent : un refus d'affichage en cadre n'est PAS
+    // détectable de façon fiable depuis la page hôte, donc on informe au lieu
+    // de prétendre diagnostiquer.
+    const hint = document.createElement("div");
+    hint.className = "web-hint";
+    hint.textContent = "Certains sites refusent l'affichage en cadre.";
+
+    el.append(bar, frame, hint);
+    el.addEventListener("mousedown", () => this.cb.onFocus(paneId));
+    const view = { el, frame, input };
+    this.webViews.set(paneId, view);
+    return view;
+  }
+
   private buildNode(tree: LayoutNode): HTMLElement {
     if ("Leaf" in tree) {
-      return this.ensureView(tree.Leaf.pane_id).el;
+      const { pane_id, kind } = tree.Leaf;
+      if (kind !== "Terminal" && "Web" in kind) {
+        return this.ensureWebView(pane_id, kind.Web.url).el;
+      }
+      return this.ensureView(pane_id).el;
     }
     const s = tree.Split;
     const container = document.createElement("div");
