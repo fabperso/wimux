@@ -101,8 +101,6 @@ pub fn full_diff(wt: &Path, base_sha: &str) -> Result<String, String> {
 
 /// Gardes préalables à l'intégration (M4) : un remote `origin` doit exister,
 /// `gh` doit être installé ET authentifié. Aucun effet de bord.
-// Consommée par `Server::open_pr` en Task 6.
-#[allow(dead_code)]
 pub fn gh_ready(wt: &Path) -> Result<(), String> {
     git(wt, &["remote", "get-url", "origin"])
         .map_err(|_| "aucun remote « origin » : impossible d'ouvrir une PR".to_string())?;
@@ -128,8 +126,6 @@ pub fn gh_ready(wt: &Path) -> Result<(), String> {
 /// Commite le travail en cours du worktree (`git add -A` puis commit) sous
 /// l'identité machine `wimux <wimux@localhost>`. Renvoie `Ok(false)` s'il n'y
 /// avait rien à commiter. C'est le SEUL endroit de M4 qui mute le worktree.
-// Consommée par `Server::open_pr` en Task 6.
-#[allow(dead_code)]
 pub fn commit_wip(wt: &Path, message: &str) -> Result<bool, String> {
     git(wt, &["add", "-A"])?;
     // `diff --cached --quiet` sort avec 1 s'il y a quelque chose d'indexé.
@@ -158,8 +154,6 @@ pub fn commit_wip(wt: &Path, message: &str) -> Result<bool, String> {
 }
 
 /// Pousse la branche de l'agent sur `origin`.
-// Consommée par `Server::open_pr` en Task 6.
-#[allow(dead_code)]
 pub fn push_branch(wt: &Path, branch: &str) -> Result<(), String> {
     git(wt, &["push", "-u", "origin", branch])
         .map(|_| ())
@@ -167,8 +161,6 @@ pub fn push_branch(wt: &Path, branch: &str) -> Result<(), String> {
 }
 
 /// Ouvre la Pull Request via `gh` depuis le worktree. Renvoie l'URL de la PR.
-// Consommée par `Server::open_pr` en Task 6.
-#[allow(dead_code)]
 pub fn create_pr(
     wt: &Path,
     base_branch: &str,

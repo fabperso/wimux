@@ -521,6 +521,76 @@ impl Server {
         crate::batch::full_diff(&wt.path, &wt.base_sha)
     }
 
+    /// M4 : intègre le travail d'un agent par Pull Request, puis nettoie les
+    /// PERDANTS du lot (le gagnant reste vivant pour itérer sur la revue).
+    ///
+    /// Ordre volontaire : toutes les gardes AVANT le moindre effet de bord.
+    fn open_pr(
+        &self,
+        session: &str,
+        title: Option<String>,
+        body: Option<String>,
+    ) -> Result<String, String> {
+        // (1) Résolution + gardes, sans effet de bord.
+        let s = self
+            .get(session)
+            .ok_or_else(|| format!("session introuvable : {session}"))?;
+        let wt = s
+            .worktree()
+            .ok_or_else(|| format!("la session « {session} » n'a pas de worktree"))?;
+        let group = s
+            .group()
+            .ok_or_else(|| format!("la session « {session} » n'appartient à aucun lot"))?;
+
+        let stats = crate::batch::diff_stats(&wt.path, &wt.base_sha)?;
+        let untracked_n = crate::batch::untracked(&wt.path).len();
+        if stats.files_changed == 0 && untracked_n == 0 {
+            return Err(format!(
+                "l'agent « {session} » n'a rien produit : pas de PR"
+            ));
+        }
+        crate::batch::gh_ready(&wt.path)?;
+
+        // (2) Effets de bord : commit du WIP, push, PR.
+        crate::batch::commit_wip(
+            &wt.path,
+            &format!("wimux: travail de l'agent {session} (lot {group})"),
+        )?;
+        crate::batch::push_branch(&wt.path, &wt.branch)?;
+
+        let title = title.unwrap_or_else(|| format!("wimux: résultat de l'agent {session}"));
+        let footer = format!(
+            "\n\n---\nOuvert par wimux — lot `{group}`, agent `{session}`, branche `{}`.\n\
+             {} fichier(s) suivi(s) modifié(s), +{} / -{}, {} non suivi(s).",
+            wt.branch, stats.files_changed, stats.insertions, stats.deletions, untracked_n
+        );
+        let body = format!("{}{footer}", body.unwrap_or_default());
+
+        // Le push a réussi : si la PR échoue, on le dit SANS nettoyer quoi que ce soit.
+        let url = crate::batch::create_pr(&wt.path, &wt.base_branch, &wt.branch, &title, &body)
+            .map_err(|e| {
+                format!(
+                    "{e}\n(la branche « {} » EST poussée sur origin ; la PR reste à ouvrir, \
+                     rien n'a été nettoyé)",
+                    wt.branch
+                )
+            })?;
+
+        // (3) Nettoyage des PERDANTS uniquement.
+        let losers: Vec<String> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .values()
+                .filter(|o| o.group().as_deref() == Some(group.as_str()) && o.name() != session)
+                .map(|o| o.name())
+                .collect()
+        };
+        for name in losers {
+            self.kill(&name);
+        }
+        Ok(url)
+    }
+
     fn rename_session(&self, from: &str, to: &str) -> Result<(), String> {
         let mut sessions = self.sessions.lock().unwrap();
         if !sessions.contains_key(from) {
@@ -1066,13 +1136,17 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
-            // M4 : handler réel en Task 6.
-            ClientMessage::OpenPr { .. } => {
+            ClientMessage::OpenPr {
+                session,
+                title,
+                body,
+            } => {
+                let reply = match server.open_pr(&session, title, body) {
+                    Ok(url) => ServerMessage::PrOpened { url },
+                    Err(e) => ServerMessage::Error(e),
+                };
                 let mut wr: &PipeConn = &conn;
-                send(
-                    &mut wr,
-                    &ServerMessage::Error("OpenPr : non implémenté (Task 6)".into()),
-                )?;
+                send(&mut wr, &reply)?;
             }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
@@ -1463,6 +1537,15 @@ mod tests {
     fn diff_agent_session_inconnue_est_erreur() {
         let server = Server::new();
         assert!(server.diff_agent("session-inexistante").is_err());
+    }
+
+    #[test]
+    fn open_pr_session_inconnue_est_erreur() {
+        let server = Server::new();
+        let err = server
+            .open_pr("session-inexistante", None, None)
+            .expect_err("session inconnue doit échouer");
+        assert!(err.contains("introuvable"), "message : {err}");
     }
 
     #[test]
