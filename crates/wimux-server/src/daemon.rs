@@ -805,6 +805,39 @@ fn reattach_active_window(
     Ok(())
 }
 
+/// Ces messages arrivent de la GUI sur sa connexion persistante, où la session
+/// attachée est déjà connue : la GUI envoie donc une chaîne vide. On retombe
+/// alors sur la session de l'attachement (et on laisse la valeur telle quelle
+/// quand elle est fournie, ce que fait la CLI).
+fn resolve_gui_session(session: String, gui_attach: &Option<GuiAttachment>) -> String {
+    if session.is_empty() {
+        gui_attach
+            .as_ref()
+            .map(|ga| ga.session.name())
+            .unwrap_or(session)
+    } else {
+        session
+    }
+}
+
+/// Repousse la disposition de la fenêtre active à la connexion GUI courante, si
+/// cette connexion EST une GUI attachée. Utilisé après une navigation web : le
+/// `WindowLayout` transporte l'URL, la GUI n'a plus qu'à refléter le `src`.
+fn push_layout_if_gui(
+    gui_attach: &Option<GuiAttachment>,
+    conn: &Arc<PipeConn>,
+    gui_write: &Arc<Mutex<()>>,
+) -> std::io::Result<()> {
+    if let Some(ga) = gui_attach
+        && let Some((tree, active)) = ga.session.window_layout()
+    {
+        let _g = gui_write.lock().unwrap();
+        let mut wr: &PipeConn = conn;
+        send(&mut wr, &ServerMessage::WindowLayout { tree, active })?;
+    }
+    Ok(())
+}
+
 /// État du décodage du préfixe pour un client.
 #[derive(Default)]
 struct PrefixState {
@@ -1161,17 +1194,56 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
-            // B1 (protocole seulement, task 1) : le comportement serveur (état du
-            // volet navigateur, historique) sera implémenté en task 2.
-            ClientMessage::OpenWebPane { .. }
-            | ClientMessage::WebNavigate { .. }
-            | ClientMessage::WebBack { .. }
-            | ClientMessage::WebForward { .. } => {
+            ClientMessage::OpenWebPane {
+                session,
+                from_pane,
+                dir,
+                url,
+            } => {
+                let session = resolve_gui_session(session, &gui_attach);
+                let reply = match server.get(&session) {
+                    Some(s) => match s.open_web_pane(from_pane, dir.into(), url) {
+                        Some(pane_id) => ServerMessage::PaneSpawned { pane_id },
+                        None => ServerMessage::Error("échec d'ouverture du volet web".into()),
+                    },
+                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                };
                 let mut wr: &PipeConn = &conn;
-                send(
-                    &mut wr,
-                    &ServerMessage::Error("volet navigateur : pas encore implémenté".into()),
-                )?;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::WebNavigate { session, pane, url } => {
+                let session = resolve_gui_session(session, &gui_attach);
+                let reply = match server.get(&session) {
+                    Some(s) => {
+                        if s.web_navigate(pane, url) {
+                            ServerMessage::Ok
+                        } else {
+                            ServerMessage::Error(format!("volet navigateur introuvable : {pane}"))
+                        }
+                    }
+                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+                push_layout_if_gui(&gui_attach, &conn, &gui_write)?;
+            }
+            ClientMessage::WebBack { session, pane } => {
+                let session = resolve_gui_session(session, &gui_attach);
+                if let Some(s) = server.get(&session) {
+                    s.web_back(pane);
+                }
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &ServerMessage::Ok)?;
+                push_layout_if_gui(&gui_attach, &conn, &gui_write)?;
+            }
+            ClientMessage::WebForward { session, pane } => {
+                let session = resolve_gui_session(session, &gui_attach);
+                if let Some(s) = server.get(&session) {
+                    s.web_forward(pane);
+                }
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &ServerMessage::Ok)?;
+                push_layout_if_gui(&gui_attach, &conn, &gui_write)?;
             }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
@@ -1601,5 +1673,19 @@ mod tests {
             "layout_rev remonté par list() après spawn_pane"
         );
         server.kill("lr");
+    }
+
+    #[test]
+    fn server_ouvre_un_volet_navigateur() {
+        let server = Server::new();
+        let s = server.create_session(Some("wb".into()), 80, 24).unwrap();
+        let id = s
+            .open_web_pane(None, crate::window::SplitDir::LeftRight, "http://a/".into())
+            .expect("un id");
+        assert!(
+            s.capture_pane(id).unwrap().contains("[navigateur]"),
+            "le volet créé est bien un navigateur"
+        );
+        server.kill("wb");
     }
 }
