@@ -81,12 +81,25 @@ Claude : le résumé d'abord, le diff complet seulement pour les agents retenus.
   lot (`git -C <base> rev-parse HEAD` et `rev-parse --abbrev-ref HEAD`).
   `base_sha` est la référence de comparaison **stable** même si la base avance ;
   `base_branch` est la cible de la future PR.
-- Avant tout calcul : `git -C <wt> add -A -N` (*intent-to-add*) — idempotent et
-  non destructif, il rend les **fichiers non suivis** visibles à `git diff` sans
-  rien commiter.
-- Résumé : `git -C <wt> diff --stat <base_sha>` (+ comptage des non-suivis).
-- Diff complet : `git -C <wt> diff <base_sha>`.
+La collecte est **strictement non mutante** : elle ne touche ni l'index ni l'arbre
+de travail de l'agent (qui peut encore tourner), et donne donc les mêmes chiffres
+à chaque appel.
+
+- Suivis (commité + en cours) : `git -C <wt> diff --numstat <base_sha>` —
+  format machine (`<ajouts>\t<suppressions>\t<chemin>`, `-\t-\t` pour un binaire),
+  bien plus robuste à parser que `--stat`. Donne `files_changed`, `insertions`,
+  `deletions`.
+- Non suivis : `git -C <wt> ls-files --others --exclude-standard` → `untracked`
+  (champ **séparé** dans `AgentResult`, donc aucun double comptage).
+- Diff complet : `git -C <wt> diff <base_sha>`, **puis** le contenu de chaque
+  fichier non suivi ajouté via `git -C <wt> diff --no-index -- /dev/null <fichier>`
+  (`/dev/null` est accepté par git y compris sous Windows ; code de sortie 1 =
+  « diffère », normal).
 - Présence de commits : `git -C <wt> rev-list --count <base_sha>..HEAD`.
+
+*(Une variante `git add -A -N` — intent-to-add — avait été envisagée pour rendre
+les non-suivis visibles à `git diff` ; écartée car elle mute l'index et fausse le
+comptage des non-suivis au second appel.)*
 
 ## Serveur : l'intégration par PR
 
@@ -220,7 +233,7 @@ Nouvelle section « revue de lot » dans `skills/wimux/SKILL.md` : la boucle
 |---|---|
 | `gh` absent / non authentifié / pas de remote | Gardes explicites en amont, `Error` clair, aucun effet de bord |
 | Effet de bord partiel (push OK, PR KO) | État réel annoncé dans l'erreur ; pas de nettoyage dans ce cas — rien n'est perdu |
-| `git add -A -N` mute l'index de l'agent | *intent-to-add* est non destructif et idempotent ; aucun fichier n'est commité par la collecte |
+| La collecte perturbe un agent encore en cours | Collecte **strictement non mutante** (aucun `add`, aucun écrit) : `diff --numstat`, `ls-files --others`, `diff --no-index` — chiffres identiques à chaque appel |
 | Commit auto sous une mauvaise identité | Identité `wimux <wimux@localhost>` passée en `-c` : n'écrase pas la config du repo et distingue les commits machine |
 | Nettoyage des perdants trop agressif | Leurs branches ne sont **jamais poussées** ; seul du travail explicitement non retenu est supprimé, et le gagnant est préservé |
 | Diff énorme saturant le contexte de Claude | Surface à deux niveaux (`review` puis `diff`) + consigne du skill |
