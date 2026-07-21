@@ -82,6 +82,13 @@ pub struct Window {
     root: Node,
     panes: HashMap<PaneId, PaneSlot>,
     active: PaneId,
+    /// Dernier volet TERMINAL rendu actif (Fix 4) : repli de `label_cwd`,
+    /// consulté AVANT de balayer les autres volets par id croissant. Il ne
+    /// change PAS quand le volet actif devient un navigateur (qui n'a pas de
+    /// cwd) — c'est précisément ce qui permet de retrouver le bon cwd. Mis à
+    /// `None` si ce volet est fermé (`close_pane`/`reap_dead`), pour ne jamais
+    /// pointer sur un volet disparu.
+    last_active_term: Option<PaneId>,
     rects: HashMap<PaneId, Rect>,
     borders: Vec<Border>,
     /// Volet actif affiché en plein écran (`Ctrl-b z`).
@@ -98,9 +105,19 @@ impl Window {
             root: Node::Leaf(id),
             panes,
             active: id,
+            last_active_term: Some(id),
             rects: HashMap::new(),
             borders: Vec::new(),
             zoomed: false,
+        }
+    }
+
+    /// Marque `id` comme dernier volet TERMINAL actif (Fix 4), si c'en est
+    /// bien un — no-op pour un volet navigateur (le repli ne doit alors PAS
+    /// bouger).
+    fn note_last_active_term(&mut self, id: PaneId) {
+        if matches!(self.panes.get(&id), Some(PaneSlot::Term(_))) {
+            self.last_active_term = Some(id);
         }
     }
 
@@ -143,20 +160,30 @@ impl Window {
     }
 
     /// cwd à afficher pour cette fenêtre (rail et libellé d'onglet) : celui du
-    /// volet terminal actif s'il en a un, sinon celui d'un autre volet
-    /// terminal de la fenêtre. Un volet NAVIGATEUR actif ne doit pas faire
-    /// disparaître le libellé (régression B1 : `split_web` rend le nouveau
-    /// volet actif, alors qu'un navigateur n'a pas de cwd).
+    /// volet terminal actif s'il en a un ; sinon celui du DERNIER volet
+    /// TERMINAL rendu actif (Fix 4) ; sinon celui d'un autre volet terminal de
+    /// la fenêtre. Un volet NAVIGATEUR actif ne doit pas faire disparaître le
+    /// libellé (régression B1 : `split_web` rend le nouveau volet actif, alors
+    /// qu'un navigateur n'a pas de cwd) — mais le repli doit préférer le volet
+    /// où l'utilisateur était RÉELLEMENT, pas un volet arbitraire de plus
+    /// petit id (Fix 4 : ouvrir un navigateur depuis le terminal #7 affichait
+    /// le cwd du terminal #3).
     pub fn label_cwd(&self) -> Option<String> {
         let actif = self.active_term_pane().and_then(|p| p.cwd());
+        let dernier_actif = self
+            .last_active_term
+            .filter(|&id| id != self.active)
+            .and_then(|id| self.panes.get(&id))
+            .and_then(|s| s.term())
+            .and_then(|p| p.cwd());
         let mut autres_ids = self.pane_ids();
-        autres_ids.retain(|&id| id != self.active);
+        autres_ids.retain(|&id| id != self.active && Some(id) != self.last_active_term);
         let autres = autres_ids
             .into_iter()
             .filter_map(|id| self.panes.get(&id))
             .filter_map(|s| s.term())
             .map(|p| p.cwd());
-        choisir_cwd(actif, autres)
+        choisir_cwd(actif, dernier_actif, autres)
     }
 
     /// Volet situé à la position `(col, row)` (coordonnées de contenu, 0-based).
@@ -189,6 +216,7 @@ impl Window {
     pub fn set_active(&mut self, id: PaneId) {
         if self.panes.contains_key(&id) {
             self.active = id;
+            self.note_last_active_term(id);
         }
     }
 
@@ -295,6 +323,7 @@ impl Window {
         });
         self.panes.insert(new_id, PaneSlot::Term(new_pane));
         self.active = new_id;
+        self.last_active_term = Some(new_id); // toujours un terminal ici
     }
 
     /// Découpe le volet `target` en y insérant un volet NAVIGATEUR, qui devient
@@ -312,6 +341,10 @@ impl Window {
         });
         self.panes.insert(new_id, PaneSlot::Web(web));
         self.active = new_id;
+        // Fix 4 : ne PAS toucher `last_active_term` — le nouveau volet actif
+        // est un navigateur (jamais de cwd), le repli doit continuer de
+        // pointer sur le dernier terminal réellement actif (ex. celui depuis
+        // lequel ce navigateur a été ouvert).
     }
 
     /// Ferme le volet actif. Renvoie `true` si la fenêtre est désormais vide.
@@ -326,12 +359,18 @@ impl Window {
         if let Some(PaneSlot::Term(p)) = self.panes.remove(&target) {
             p.kill();
         }
+        // Fix 4 : `target` vient de disparaître — si le repli pointait dessus,
+        // il ne doit plus jamais y renvoyer (volet fantôme).
+        if self.last_active_term == Some(target) {
+            self.last_active_term = None;
+        }
         if self.panes.is_empty() {
             return true;
         }
         Self::remove_leaf(&mut self.root, target);
         if !self.panes.contains_key(&self.active) {
             self.active = *self.panes.keys().next().unwrap();
+            self.note_last_active_term(self.active);
         }
         false
     }
@@ -356,8 +395,13 @@ impl Window {
         for id in dead {
             self.panes.remove(&id);
             Self::remove_leaf(&mut self.root, id);
+            // Fix 4 : ce volet a disparu — invalider le repli s'il pointait dessus.
+            if self.last_active_term == Some(id) {
+                self.last_active_term = None;
+            }
             if self.active == id {
                 self.active = self.panes.keys().next().copied().unwrap_or(0);
+                self.note_last_active_term(self.active);
             }
         }
         self.panes.is_empty()
@@ -521,14 +565,23 @@ fn contains_leaf(node: &Node, target: PaneId) -> bool {
     }
 }
 
-/// Choisit le cwd à afficher : celui du volet actif s'il en a un, sinon le
-/// premier disponible parmi les autres (ordre déterministe, à l'appelant de
-/// fournir `autres` dans un ordre stable — `pane_ids()` trie déjà les ids).
+/// Choisit le cwd à afficher (Fix 4) : celui du volet actif s'il en a un ;
+/// sinon celui du DERNIER volet TERMINAL rendu actif (`dernier_actif` —
+/// typiquement le terminal depuis lequel un navigateur sans cwd a été ouvert,
+/// ou le terminal quitté par un volet mort) ; sinon le premier disponible
+/// parmi les `autres` volets (ordre déterministe, à l'appelant de fournir
+/// `autres` dans un ordre stable — `pane_ids()` trie déjà les ids).
+///
+/// AVANT ce correctif, l'absence de cwd sur le volet actif retombait
+/// directement sur `autres`, c.-à-d. sur le volet de plus petit id — un volet
+/// où l'utilisateur n'était parfois jamais allé. `dernier_actif` est un repli
+/// bien plus fidèle : c'est un volet que l'utilisateur a RÉELLEMENT eu actif.
 fn choisir_cwd(
     actif: Option<String>,
+    dernier_actif: Option<String>,
     mut autres: impl Iterator<Item = Option<String>>,
 ) -> Option<String> {
-    actif.or_else(|| autres.find_map(|c| c))
+    actif.or(dernier_actif).or_else(|| autres.find_map(|c| c))
 }
 
 /// Ajuste le ratio de la découpe pertinente pour redimensionner le volet actif.
@@ -926,23 +979,97 @@ mod tests {
     }
 
     #[test]
+    fn split_web_ne_deplace_pas_le_repli_dernier_terminal_actif() {
+        // Fix 4 : reproduit le scénario du rapport — un terminal #7 (ici id2,
+        // rendu actif explicitement AVANT d'ouvrir un navigateur) doit rester
+        // le repli, PAS un terminal de plus petit id (id1) qui n'a jamais été
+        // actif depuis l'ouverture du navigateur.
+        let p1 = dummy_pane();
+        let id1 = p1.id;
+        let mut win = Window::new(p1); // active = id1, last_active_term = Some(id1)
+        let p2 = dummy_pane();
+        let id2 = p2.id;
+        win.split_pane(id1, SplitDir::LeftRight, p2); // active = id2 (terminal)
+        win.set_active(id2); // no-op réel, mais exerce le chemin `set_active`
+        assert_eq!(
+            win.last_active_term,
+            Some(id2),
+            "le dernier terminal RÉELLEMENT actif doit être id2, pas id1"
+        );
+
+        let web = dummy_web();
+        let idw = web.id;
+        win.split_web(id2, SplitDir::TopBottom, Arc::clone(&web)); // active = idw (navigateur)
+        assert_eq!(win.active_pane_id(), idw);
+        assert_eq!(
+            win.last_active_term,
+            Some(id2),
+            "ouvrir un navigateur ne doit PAS déplacer le repli sur un autre terminal"
+        );
+        win.kill_all();
+    }
+
+    #[test]
+    fn fermer_le_dernier_terminal_actif_invalide_le_repli() {
+        // Fix 4 : si le volet que pointait `last_active_term` est fermé, le
+        // repli ne doit jamais continuer à désigner un volet fantôme.
+        let p1 = dummy_pane();
+        let id1 = p1.id;
+        let mut win = Window::new(p1);
+        let p2 = dummy_pane();
+        let id2 = p2.id;
+        win.split_pane(id1, SplitDir::LeftRight, p2); // active = id2
+        assert_eq!(win.last_active_term, Some(id2));
+
+        // Fermer id2 (le dernier terminal actif) : le repli doit être invalidé,
+        // pas laissé pointer sur un id qui n'existe plus.
+        assert!(!win.close_pane(id2));
+        assert_ne!(
+            win.last_active_term,
+            Some(id2),
+            "le repli ne doit jamais pointer sur un volet fermé"
+        );
+        win.kill_all();
+    }
+
+    #[test]
     fn choisir_cwd_prefere_le_volet_actif() {
         let actif = Some("C:/actif".to_string());
+        let dernier_actif = Some("C:/dernier".to_string());
         let autres = vec![Some("C:/autre1".to_string()), Some("C:/autre2".to_string())];
         assert_eq!(
-            choisir_cwd(actif, autres.into_iter()),
+            choisir_cwd(actif, dernier_actif, autres.into_iter()),
             Some("C:/actif".to_string())
         );
     }
 
     #[test]
-    fn choisir_cwd_retombe_sur_un_autre_volet_si_lactif_nen_a_pas() {
-        // C'est le cœur du correctif : le volet actif est un navigateur (pas
-        // de cwd), mais un autre volet TERMINAL de la fenêtre en a un.
+    fn choisir_cwd_retombe_sur_le_dernier_volet_actif_si_lactif_nen_a_pas() {
+        // Fix 4 : le volet actif est un navigateur (pas de cwd), mais le
+        // DERNIER volet TERMINAL actif en a un — il doit gagner, même si
+        // « autres » contient un cwd de plus petit id.
         let actif = None;
+        let dernier_actif = Some("C:/dernier".to_string());
+        let autres = vec![
+            Some("C:/plus-petit-id".to_string()),
+            Some("C:/autre".to_string()),
+        ];
+        assert_eq!(
+            choisir_cwd(actif, dernier_actif, autres.into_iter()),
+            Some("C:/dernier".to_string()),
+            "le dernier volet réellement actif doit primer sur un balayage par id"
+        );
+    }
+
+    #[test]
+    fn choisir_cwd_retombe_sur_un_autre_volet_si_rien_dautre_ne_repond() {
+        // Ni l'actif ni le dernier actif n'ont de cwd (ex. fenêtre purement
+        // terminal, volet actif jamais rattaché à un cwd) : balayage classique.
+        let actif = None;
+        let dernier_actif = None;
         let autres = vec![None, Some("C:/repli".to_string())];
         assert_eq!(
-            choisir_cwd(actif, autres.into_iter()),
+            choisir_cwd(actif, dernier_actif, autres.into_iter()),
             Some("C:/repli".to_string())
         );
     }
@@ -950,8 +1077,9 @@ mod tests {
     #[test]
     fn choisir_cwd_none_si_personne_nen_a() {
         let actif = None;
+        let dernier_actif = None;
         let autres: Vec<Option<String>> = vec![None, None];
-        assert_eq!(choisir_cwd(actif, autres.into_iter()), None);
+        assert_eq!(choisir_cwd(actif, dernier_actif, autres.into_iter()), None);
     }
 
     #[test]
@@ -959,12 +1087,13 @@ mod tests {
         // Avec plusieurs « autres » ayant un cwd, c'est le premier de l'ordre
         // (trié en amont par l'appelant, cf. `pane_ids()`) qui gagne.
         let actif = None;
+        let dernier_actif = None;
         let autres = vec![
             Some("C:/premier".to_string()),
             Some("C:/second".to_string()),
         ];
         assert_eq!(
-            choisir_cwd(actif, autres.into_iter()),
+            choisir_cwd(actif, dernier_actif, autres.into_iter()),
             Some("C:/premier".to_string())
         );
     }
