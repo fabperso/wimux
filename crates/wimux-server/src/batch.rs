@@ -371,11 +371,17 @@ mod tests {
         ));
 
         // Arbre propre : commit_wip renvoie false (rien à commiter) sans erreur.
-        assert_eq!(commit_wip(&repo, "wimux: test").unwrap(), false);
+        assert!(
+            !commit_wip(&repo, "wimux: test").unwrap(),
+            "arbre propre : rien à commiter"
+        );
 
         // Avec du WIP : commit_wip renvoie true et l'arbre redevient propre.
         std::fs::write(repo.join("a.txt"), "x\ny\n").unwrap();
-        assert_eq!(commit_wip(&repo, "wimux: test").unwrap(), true);
+        assert!(
+            commit_wip(&repo, "wimux: test").unwrap(),
+            "du WIP existe : commit_wip doit commiter"
+        );
         assert_eq!(untracked(&repo).len(), 0);
         let stats = diff_stats(&repo, "HEAD").unwrap();
         assert_eq!(
