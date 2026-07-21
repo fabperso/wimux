@@ -26,7 +26,7 @@ chacun lançant une tâche dans son propre terminal, puis lire leur sortie.
 ## Revue d'un lot d'agents (fan-out)
 
 Quand une tâche mérite plusieurs tentatives indépendantes, lance un **lot** :
-chacun agent travaille dans son propre worktree git isolé.
+chaque agent travaille dans son propre worktree git isolé.
 
 1. **Lancer** : `wimux batch create --repo <chemin> --template claude --prompt "<tâche>" --count 3`
    → `{"group":"batch0","sessions":[…]}`
@@ -41,12 +41,16 @@ chacun agent travaille dans son propre worktree git isolé.
    → commite son travail en cours, pousse sa branche, ouvre la PR, renvoie son URL,
    et **supprime les perdants**. Le gagnant reste vivant pour traiter la revue.
 
-**Deux règles :**
+**Trois règles :**
 - Passe **toujours par `review` avant `diff`** : le résumé coûte quelques lignes,
   un diff complet peut être énorme. Ne lis en détail que les agents plausibles.
 - Fournis **toujours `--title` et `--body`** : tu viens de lire les diffs, tu es
   le seul à pouvoir écrire un titre utile et expliquer pourquoi cette tentative
   l'emporte. wimux ajoute de lui-même un pied de page de provenance.
+- **Confirme toujours avec l'utilisateur avant de lancer `batch pr`** : c'est la
+  SEULE commande de wimux qui à la fois **publie** (ouvre une vraie PR) et
+  **détruit** (supprime les worktrees et branches des perdants) en une seule
+  opération, sans retour en arrière possible.
 
 ## Bonnes pratiques
 - Préfère les sous-agents **non-interactifs / print** (`claude -p ...`) : leur
