@@ -196,6 +196,38 @@ pub struct PaneInfo {
     pub log_path: Option<String>,
 }
 
+/// Résumé d'un lot d'agents (M4). Renvoyé par `ListBatches`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchInfo {
+    /// Identifiant de lot (`batch<N>`), partagé par les sessions membres.
+    pub group: String,
+    /// Noms de session des membres, dans l'ordre des index.
+    pub sessions: Vec<String>,
+    /// Dépôt de base du lot (chemin natif).
+    pub base_repo: String,
+    /// Branche du dépôt de base au lancement — cible des futures PR.
+    pub base_branch: String,
+}
+
+/// Résultat produit par un agent d'un lot (M4). Renvoyé par `ReviewBatch`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentResult {
+    pub session: String,
+    /// Rang de l'agent dans son lot (dérivé du suffixe du nom de session).
+    pub index: u32,
+    pub branch: String,
+    /// Statut d'agent (M1), `None` si indisponible.
+    pub status: Option<AgentStatus>,
+    /// Fichiers suivis modifiés vs la base (commité + en cours).
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+    /// Nombre de fichiers NON suivis (comptés à part : aucun double comptage).
+    pub untracked: u32,
+    /// L'agent a-t-il au moins un commit au-delà de la base ?
+    pub has_commits: bool,
+}
+
 /// Messages client -> serveur.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -380,6 +412,23 @@ pub enum ClientMessage {
         session: String,
         pane: u64,
     },
+    /// M4 : lister les lots d'agents en cours.
+    ListBatches,
+    /// M4 : résumé par agent des résultats d'un lot.
+    ReviewBatch {
+        group: String,
+    },
+    /// M4 : diff complet du travail d'un agent.
+    DiffAgent {
+        session: String,
+    },
+    /// M4 : intégrer le travail d'un agent par Pull Request (commit du WIP,
+    /// push, `gh pr create`), puis nettoyer les perdants du lot.
+    OpenPr {
+        session: String,
+        title: Option<String>,
+        body: Option<String>,
+    },
 }
 
 /// Messages serveur -> client.
@@ -453,6 +502,16 @@ pub enum ServerMessage {
     PaneCapture(String),
     /// A1 : réponse à `ListPanes`.
     PaneList(Vec<PaneInfo>),
+    /// M4 : réponse à `ListBatches`.
+    Batches(Vec<BatchInfo>),
+    /// M4 : réponse à `ReviewBatch`.
+    BatchReview(Vec<AgentResult>),
+    /// M4 : réponse à `DiffAgent`.
+    AgentDiff(String),
+    /// M4 : réponse à `OpenPr` — URL de la Pull Request créée.
+    PrOpened {
+        url: String,
+    },
 }
 
 // --- Cadrage (framing) longueur + postcard --------------------------------
@@ -955,6 +1014,58 @@ mod tests {
         let bytes = postcard::to_allocvec(&reply).unwrap();
         match postcard::from_bytes::<ServerMessage>(&bytes).unwrap() {
             ServerMessage::PaneList(v) => assert_eq!(v[0], info),
+            _ => panic!("variante inattendue"),
+        }
+    }
+
+    #[test]
+    fn aller_retour_review_batch_et_open_pr() {
+        let msg = ClientMessage::OpenPr {
+            session: "claude-batch0-1".into(),
+            title: Some("fix: gérer le payload vide".into()),
+            body: None,
+        };
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        match postcard::from_bytes::<ClientMessage>(&bytes).unwrap() {
+            ClientMessage::OpenPr {
+                session,
+                title,
+                body,
+            } => {
+                assert_eq!(session, "claude-batch0-1");
+                assert_eq!(title.as_deref(), Some("fix: gérer le payload vide"));
+                assert_eq!(body, None);
+            }
+            _ => panic!("variante inattendue"),
+        }
+
+        let res = AgentResult {
+            session: "claude-batch0-1".into(),
+            index: 1,
+            branch: "wimux/batch0/1".into(),
+            status: Some(AgentStatus::Done),
+            files_changed: 3,
+            insertions: 42,
+            deletions: 7,
+            untracked: 2,
+            has_commits: true,
+        };
+        let reply = ServerMessage::BatchReview(vec![res.clone()]);
+        let bytes = postcard::to_allocvec(&reply).unwrap();
+        match postcard::from_bytes::<ServerMessage>(&bytes).unwrap() {
+            ServerMessage::BatchReview(v) => assert_eq!(v[0], res),
+            _ => panic!("variante inattendue"),
+        }
+
+        let info = BatchInfo {
+            group: "batch0".into(),
+            sessions: vec!["claude-batch0-0".into(), "claude-batch0-1".into()],
+            base_repo: "C:\\repo".into(),
+            base_branch: "main".into(),
+        };
+        let bytes = postcard::to_allocvec(&ServerMessage::Batches(vec![info.clone()])).unwrap();
+        match postcard::from_bytes::<ServerMessage>(&bytes).unwrap() {
+            ServerMessage::Batches(v) => assert_eq!(v[0], info),
             _ => panic!("variante inattendue"),
         }
     }
