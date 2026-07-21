@@ -86,6 +86,24 @@ Navigation façon vi dans le scrollback :
 | `y` ou `Entrée` | Copier (→ presse-papiers Windows) et quitter |
 | `q` ou `Échap` | Quitter sans copier |
 
+## Volet navigateur
+
+Un volet de la disposition peut être un navigateur : bouton 🌐 sur la barre d'un
+volet terminal, ou `wimux browser open --url http://localhost:5173/`. Le volet est
+possédé par le serveur : il **survit au redémarrage de la GUI**, avec son URL.
+
+Deux limites, assumées :
+
+- **Certains sites refusent l'affichage en cadre** (en-tête `X-Frame-Options` ou
+  `CSP frame-ancestors`) et resteront blancs. Ce refus n'est pas détectable de
+  façon fiable depuis l'application : on ne peut donc pas afficher un diagnostic
+  précis, seulement un avertissement général. Le cas d'usage visé est la
+  prévisualisation d'un **serveur de développement local**, qui fonctionne.
+- **Précédent/suivant parcourent l'historique de wimux**, c'est-à-dire les URL
+  posées via la barre d'adresse ou l'ouverture du volet — pas celui du site. Les
+  navigations faites *à l'intérieur* de la page (clic sur un lien) ne nous sont pas
+  visibles quand elle est d'une autre origine.
+
 ## Résumé du plan
 
 - **Stack** : Rust · ConPTY (`portable-pty`) · émulation VT côté serveur (`wezterm-term`) · IPC par Named Pipes · client TUI (`crossterm`).

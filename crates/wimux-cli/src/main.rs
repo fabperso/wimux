@@ -251,6 +251,63 @@ mod batch {
     }
 }
 
+mod browser {
+    use std::io;
+    use wimux_protocol::SplitDir;
+
+    /// Arguments analysés de `wimux browser open`.
+    pub struct OpenArgs {
+        pub url: String,
+        pub dir: SplitDir,
+        pub session: Option<String>,
+        pub from_pane: Option<u64>,
+    }
+
+    /// Analyse `wimux browser open --url <url> [--dir h|v] [-t <session>] [--from-pane <id>]`.
+    pub fn parse_open(args: &[String]) -> io::Result<OpenArgs> {
+        let mut url = None;
+        let mut dir = SplitDir::LeftRight; // défaut : côte à côte
+        let mut session = None;
+        let mut from_pane = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--url" => {
+                    url = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                "--dir" => {
+                    dir = match args.get(i + 1).map(String::as_str) {
+                        Some("v") | Some("vertical") => SplitDir::TopBottom,
+                        _ => SplitDir::LeftRight,
+                    };
+                    i += 2;
+                }
+                "-t" | "--target" => {
+                    session = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                "--from-pane" | "-p" => {
+                    from_pane = args.get(i + 1).and_then(|s| s.parse().ok());
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+        }
+        match url {
+            Some(url) => Ok(OpenArgs {
+                url,
+                dir,
+                session,
+                from_pane,
+            }),
+            None => Err(io::Error::other(
+                "usage : wimux browser open --url <url> [--dir h|v] [-t <session>] [--from-pane <id>]",
+            )),
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str);
@@ -275,6 +332,7 @@ fn main() -> std::process::ExitCode {
         Some("kill-server") => cmd_shutdown(),
         Some("agent") => cmd_agent(&args[1..]),
         Some("batch") => cmd_batch(&args[1..]),
+        Some("browser") => cmd_browser(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_help();
             Ok(())
@@ -1091,6 +1149,43 @@ fn batch_pr(args: &[String]) -> io::Result<()> {
     }
 }
 
+fn cmd_browser(args: &[String]) -> io::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("open") => browser_open(&args[1..]),
+        _ => Err(io::Error::other("usage : wimux browser open --url <url> …")),
+    }
+}
+
+fn browser_open(args: &[String]) -> io::Result<()> {
+    let a = browser::parse_open(args)?;
+    let session = default_session(a.session)?;
+    let from_pane = a.from_pane.or_else(|| {
+        std::env::var("WIMUX_PANE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+    });
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(
+        &mut w,
+        &ClientMessage::OpenWebPane {
+            session,
+            from_pane,
+            dir: a.dir,
+            url: a.url,
+        },
+    )?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::PaneSpawned { pane_id } => {
+            println!("{{\"pane_id\":{pane_id}}}");
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
 /// Traduit des jetons de touches en octets.
 fn translate_keys(args: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -1165,6 +1260,7 @@ fn print_help() {
              send-keys -t <nom> <touches...>  Injecte des frappes (scriptable)\n    \
              agent <sous-cmd>    Orchestration d'agents (spawn/list/logs/capture/send/kill/whoami)\n    \
              batch <sous-cmd>    Lots d'agents (create/list/review/diff/pr)\n    \
+             browser open --url <url>    Ouvre un volet navigateur\n    \
              kill-session <nom>  Termine une session\n    \
              kill-server         Arrête le serveur et toutes les sessions\n\
          \n\
@@ -1310,5 +1406,37 @@ mod batch_tests {
                 "--session".to_string(),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::browser::*;
+    use wimux_protocol::SplitDir;
+
+    #[test]
+    fn parse_open_lit_url_dir_et_cible() {
+        let a = parse_open(&[
+            "--url".into(),
+            "http://localhost:5173/".into(),
+            "--dir".into(),
+            "v".into(),
+            "-t".into(),
+            "sess".into(),
+            "--from-pane".into(),
+            "3".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.url, "http://localhost:5173/");
+        assert!(matches!(a.dir, SplitDir::TopBottom));
+        assert_eq!(a.session.as_deref(), Some("sess"));
+        assert_eq!(a.from_pane, Some(3));
+    }
+
+    #[test]
+    fn parse_open_exige_une_url_et_defaut_cote_a_cote() {
+        assert!(parse_open(&[]).is_err(), "sans --url c'est une erreur");
+        let a = parse_open(&["--url".into(), "http://a/".into()]).unwrap();
+        assert!(matches!(a.dir, SplitDir::LeftRight), "défaut : côte à côte");
     }
 }
