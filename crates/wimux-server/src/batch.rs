@@ -99,6 +99,114 @@ pub fn full_diff(wt: &Path, base_sha: &str) -> Result<String, String> {
     Ok(text)
 }
 
+/// Gardes préalables à l'intégration (M4) : un remote `origin` doit exister,
+/// `gh` doit être installé ET authentifié. Aucun effet de bord.
+// Consommée par `Server::open_pr` en Task 6.
+#[allow(dead_code)]
+pub fn gh_ready(wt: &Path) -> Result<(), String> {
+    git(wt, &["remote", "get-url", "origin"])
+        .map_err(|_| "aucun remote « origin » : impossible d'ouvrir une PR".to_string())?;
+    let version = Command::new("gh").arg("--version").output();
+    match version {
+        Ok(o) if o.status.success() => {}
+        _ => {
+            return Err(
+                "`gh` (GitHub CLI) est introuvable : installez-le pour ouvrir une PR".into(),
+            );
+        }
+    }
+    let auth = Command::new("gh")
+        .args(["auth", "status"])
+        .output()
+        .map_err(|e| format!("`gh auth status` indisponible : {e}"))?;
+    if !auth.status.success() {
+        return Err("`gh` n'est pas authentifié : lancez `gh auth login`".into());
+    }
+    Ok(())
+}
+
+/// Commite le travail en cours du worktree (`git add -A` puis commit) sous
+/// l'identité machine `wimux <wimux@localhost>`. Renvoie `Ok(false)` s'il n'y
+/// avait rien à commiter. C'est le SEUL endroit de M4 qui mute le worktree.
+// Consommée par `Server::open_pr` en Task 6.
+#[allow(dead_code)]
+pub fn commit_wip(wt: &Path, message: &str) -> Result<bool, String> {
+    git(wt, &["add", "-A"])?;
+    // `diff --cached --quiet` sort avec 1 s'il y a quelque chose d'indexé.
+    let staged = Command::new("git")
+        .arg("-C")
+        .arg(wt)
+        .args(["diff", "--cached", "--quiet"])
+        .status()
+        .map_err(|e| format!("git indisponible : {e}"))?;
+    if staged.success() {
+        return Ok(false); // rien à commiter
+    }
+    git(
+        wt,
+        &[
+            "-c",
+            "user.name=wimux",
+            "-c",
+            "user.email=wimux@localhost",
+            "commit",
+            "-m",
+            message,
+        ],
+    )?;
+    Ok(true)
+}
+
+/// Pousse la branche de l'agent sur `origin`.
+// Consommée par `Server::open_pr` en Task 6.
+#[allow(dead_code)]
+pub fn push_branch(wt: &Path, branch: &str) -> Result<(), String> {
+    git(wt, &["push", "-u", "origin", branch])
+        .map(|_| ())
+        .map_err(|e| format!("échec du push de « {branch} » : {e}"))
+}
+
+/// Ouvre la Pull Request via `gh` depuis le worktree. Renvoie l'URL de la PR.
+// Consommée par `Server::open_pr` en Task 6.
+#[allow(dead_code)]
+pub fn create_pr(
+    wt: &Path,
+    base_branch: &str,
+    branch: &str,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    let out = Command::new("gh")
+        .current_dir(wt)
+        .args([
+            "pr",
+            "create",
+            "--base",
+            base_branch,
+            "--head",
+            branch,
+            "--title",
+            title,
+            "--body",
+            body,
+        ])
+        .output()
+        .map_err(|e| format!("`gh pr create` indisponible : {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "échec de `gh pr create` : {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // gh imprime l'URL de la PR sur stdout.
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if url.is_empty() {
+        Err("`gh pr create` n'a renvoyé aucune URL".into())
+    } else {
+        Ok(url)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +328,67 @@ mod tests {
             untracked(&repo),
             vec!["nouveau.txt".to_string()],
             "la collecte ne doit rien stager"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn gh_ready_echoue_sans_remote() {
+        if !git_available() {
+            eprintln!("git absent : test gh_ready ignoré");
+            return;
+        }
+        // Repo git SANS remote : la garde doit refuser, quel que soit l'état de gh.
+        let repo =
+            std::env::temp_dir().join(format!("wimux-batch-noremote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(git_in(&repo, &["init"]));
+        let err = gh_ready(&repo).expect_err("sans remote origin, gh_ready doit échouer");
+        assert!(
+            err.contains("origin") || err.contains("gh"),
+            "message explicite attendu, obtenu : {err}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn commit_wip_sans_changement_ne_commite_pas() {
+        if !git_available() {
+            eprintln!("git absent : test commit_wip ignoré");
+            return;
+        }
+        let repo = std::env::temp_dir().join(format!("wimux-batch-nowip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(git_in(&repo, &["init"]));
+        std::fs::write(repo.join("a.txt"), "x\n").unwrap();
+        assert!(git_in(&repo, &["add", "."]));
+        assert!(git_in(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "init"
+            ]
+        ));
+
+        // Arbre propre : commit_wip renvoie false (rien à commiter) sans erreur.
+        assert_eq!(commit_wip(&repo, "wimux: test").unwrap(), false);
+
+        // Avec du WIP : commit_wip renvoie true et l'arbre redevient propre.
+        std::fs::write(repo.join("a.txt"), "x\ny\n").unwrap();
+        assert_eq!(commit_wip(&repo, "wimux: test").unwrap(), true);
+        assert_eq!(untracked(&repo).len(), 0);
+        let stats = diff_stats(&repo, "HEAD").unwrap();
+        assert_eq!(
+            stats.files_changed, 0,
+            "après commit_wip l'arbre est propre"
         );
 
         let _ = std::fs::remove_dir_all(&repo);
