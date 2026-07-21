@@ -110,6 +110,10 @@ mod agent {
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
                 '\t' => out.push_str("\\t"),
+                // Les autres caractères de contrôle sont interdits bruts dans une
+                // chaîne JSON : on les échappe en \u00XX (un chemin ou une sortie
+                // de terminal peut en contenir).
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
                 c => out.push(c),
             }
         }
@@ -750,11 +754,22 @@ fn agent_logs(args: &[String]) -> io::Result<()> {
     )?;
     let mut r: &PipeConn = &conn;
     let path = match recv::<_, ServerMessage>(&mut r)? {
-        ServerMessage::PaneList(panes) => panes
-            .into_iter()
-            .find(|p| p.pane_id == pane)
-            .and_then(|p| p.log_path)
-            .ok_or_else(|| io::Error::other(format!("volet {pane} sans journal")))?,
+        // Deux causes distinctes : le volet n'existe pas, ou il existe sans
+        // journal (volet shell ordinaire, non créé par `agent spawn`). Les
+        // confondre envoyait l'appelant chercher au mauvais endroit.
+        ServerMessage::PaneList(panes) => match panes.into_iter().find(|p| p.pane_id == pane) {
+            Some(p) => p.log_path.ok_or_else(|| {
+                io::Error::other(format!(
+                    "volet {pane} sans journal (seuls les volets créés par `wimux agent spawn` \
+                     sont journalisés)"
+                ))
+            })?,
+            None => {
+                return Err(io::Error::other(format!(
+                    "volet {pane} introuvable dans la session « {session} »"
+                )));
+            }
+        },
         ServerMessage::Error(e) => return Err(io::Error::other(e)),
         _ => return Err(io::Error::other("réponse inattendue du serveur")),
     };
@@ -783,23 +798,34 @@ fn agent_logs(args: &[String]) -> io::Result<()> {
     if !follow {
         return Ok(());
     }
-    // Imprime les octets ajoutés depuis `last_len` (dé-ANSI par bloc si `!raw`)
-    // et avance `last_len`. Factorisé car appelé à chaque tour ET une dernière
-    // fois après détection de la fin de l'agent.
-    let print_new = |last_len: &mut u64| {
+    // Imprime ce qui a été ajouté depuis `last_len` et avance `last_len`.
+    //
+    // On n'émet que jusqu'au DERNIER saut de ligne complet, en laissant le
+    // reliquat pour le tour suivant : une lecture s'arrête à un octet arbitraire,
+    // et couper au milieu d'un caractère UTF-8 (→ caractère de remplacement) ou
+    // d'une séquence ANSI (→ échappement à moitié dé-ANSI) corromprait la sortie.
+    // Un caractère UTF-8 ne franchit jamais un `\n`, et une séquence ANSI
+    // pratiquement jamais. `final_flush` vide le reliquat quand l'agent est fini.
+    let print_new = |last_len: &mut u64, final_flush: bool| {
         let content = std::fs::read(&path).unwrap_or_default();
-        if (content.len() as u64) > *last_len {
-            let slice = &content[*last_len as usize..];
-            let chunk = String::from_utf8_lossy(slice);
-            let text = if raw {
-                chunk.to_string()
-            } else {
-                agent::strip_ansi(&chunk)
-            };
-            print!("{text}");
-            let _ = io::stdout().flush();
-            *last_len = content.len() as u64;
+        if (content.len() as u64) <= *last_len {
+            return;
         }
+        let slice = &content[*last_len as usize..];
+        let end = match slice.iter().rposition(|&b| b == b'\n') {
+            Some(i) => i + 1,
+            None if final_flush => slice.len(),
+            None => return, // pas encore de ligne complète : on attend
+        };
+        let chunk = String::from_utf8_lossy(&slice[..end]);
+        let text = if raw {
+            chunk.to_string()
+        } else {
+            agent::strip_ansi(&chunk)
+        };
+        print!("{text}");
+        let _ = io::stdout().flush();
+        *last_len += end as u64;
     };
 
     // Suivi : relire les octets ajoutés au fichier (best-effort, dé-ANSI par
@@ -808,7 +834,7 @@ fn agent_logs(args: &[String]) -> io::Result<()> {
     // toujours faute de Ctrl-C possible.
     loop {
         std::thread::sleep(Duration::from_millis(300));
-        print_new(&mut last_len);
+        print_new(&mut last_len, false);
 
         // Re-interroger l'état du volet via une connexion courte (comme le
         // reste du CLI) : absent ou non-running -> volet terminé, dernière
@@ -836,8 +862,9 @@ fn agent_logs(args: &[String]) -> io::Result<()> {
 
         if !still_running {
             // Dernière lecture pour ne rien perdre entre la dernière boucle et
-            // la fin effective de l'écriture dans le journal.
-            print_new(&mut last_len);
+            // la fin effective de l'écriture : ici on vide AUSSI le reliquat
+            // sans saut de ligne final (l'agent n'écrira plus rien).
+            print_new(&mut last_len, true);
             return Ok(());
         }
     }
@@ -1187,6 +1214,29 @@ mod agent_tests {
     #[test]
     fn json_escape_echappe_backslash_et_guillemets() {
         assert_eq!(json_escape("C:\\a\"b"), "C:\\\\a\\\"b");
+    }
+
+    #[test]
+    fn json_escape_echappe_les_caracteres_de_controle() {
+        // BEL (0x07) et NUL (0x00) sont interdits bruts dans une chaîne JSON.
+        assert_eq!(json_escape("a\u{7}b"), "a\\u0007b");
+        assert_eq!(json_escape("\u{0}"), "\\u0000");
+        // Les échappements nommés restent prioritaires.
+        assert_eq!(json_escape("a\nb"), "a\\nb");
+    }
+
+    #[test]
+    fn parse_spawn_dir_h_donne_cote_a_cote() {
+        let a = parse_spawn(&["--dir".into(), "h".into(), "--".into(), "cmd.exe".into()]).unwrap();
+        assert!(
+            matches!(a.dir, SplitDir::LeftRight),
+            "--dir h doit donner LeftRight"
+        );
+        let v = parse_spawn(&["--dir".into(), "v".into(), "--".into(), "cmd.exe".into()]).unwrap();
+        assert!(
+            matches!(v.dir, SplitDir::TopBottom),
+            "--dir v doit donner TopBottom"
+        );
     }
 
     #[test]
