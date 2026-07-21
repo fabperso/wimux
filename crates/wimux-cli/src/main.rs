@@ -154,6 +154,92 @@ mod agent {
     }
 }
 
+mod batch {
+    use std::io;
+
+    /// Arguments analysés de `wimux batch create`.
+    pub struct CreateArgs {
+        pub repo: String,
+        pub template: String,
+        pub prompt: String,
+        pub count: u32,
+    }
+
+    /// Analyse `wimux batch create --repo <p> --template <t> --prompt "…" [--count N]`.
+    pub fn parse_create(args: &[String]) -> io::Result<CreateArgs> {
+        let (mut repo, mut template, mut prompt) = (None, None, None);
+        let mut count = 2u32;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--repo" => {
+                    repo = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                "--template" => {
+                    template = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                "--prompt" => {
+                    prompt = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                "--count" => {
+                    count = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(2);
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+        }
+        match (repo, template, prompt) {
+            (Some(repo), Some(template), Some(prompt)) => Ok(CreateArgs {
+                repo,
+                template,
+                prompt,
+                count,
+            }),
+            _ => Err(io::Error::other(
+                "usage : wimux batch create --repo <chemin> --template <nom> --prompt \"…\" [--count N]",
+            )),
+        }
+    }
+
+    /// Extrait `-g <group>` et `-i <index>` (ou `-s <session>`).
+    ///
+    /// Non utilisée avant la Task 8 (verbes `review`/`diff`/`pr`) : autorisée à
+    /// rester non appelée dans cette task pour que le module compile déjà avec
+    /// sa forme finale.
+    #[allow(dead_code)]
+    pub fn parse_target(
+        args: &[String],
+    ) -> (Option<String>, Option<u32>, Option<String>, Vec<String>) {
+        let (mut group, mut index, mut session) = (None, None, None);
+        let mut rest = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "-g" | "--group" => {
+                    group = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                "-i" | "--index" => {
+                    index = args.get(i + 1).and_then(|s| s.parse().ok());
+                    i += 2;
+                }
+                "-s" | "--session" => {
+                    session = args.get(i + 1).cloned();
+                    i += 2;
+                }
+                other => {
+                    rest.push(other.to_string());
+                    i += 1;
+                }
+            }
+        }
+        (group, index, session, rest)
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str);
@@ -177,6 +263,7 @@ fn main() -> std::process::ExitCode {
         Some("kill-session") => cmd_kill(args.get(1).cloned()),
         Some("kill-server") => cmd_shutdown(),
         Some("agent") => cmd_agent(&args[1..]),
+        Some("batch") => cmd_batch(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_help();
             Ok(())
@@ -749,6 +836,97 @@ fn agent_logs(args: &[String]) -> io::Result<()> {
     }
 }
 
+fn cmd_batch(args: &[String]) -> io::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("create") => batch_create(&args[1..]),
+        Some("list") => batch_list(),
+        Some("review") => batch_review(&args[1..]),
+        Some("diff") => batch_diff(&args[1..]),
+        Some("pr") => batch_pr(&args[1..]),
+        _ => Err(io::Error::other(
+            "usage : wimux batch <create|list|review|diff|pr> …",
+        )),
+    }
+}
+
+fn batch_create(args: &[String]) -> io::Result<()> {
+    let a = batch::parse_create(args)?;
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(
+        &mut w,
+        &ClientMessage::CreateAgentBatch {
+            template: a.template,
+            prompt: a.prompt,
+            base_repo: a.repo,
+            count: a.count,
+        },
+    )?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::BatchCreated { group, sessions } => {
+            let names: Vec<String> = sessions
+                .iter()
+                .map(|s| format!("\"{}\"", agent::json_escape(s)))
+                .collect();
+            println!(
+                "{{\"group\":\"{}\",\"sessions\":[{}]}}",
+                agent::json_escape(&group),
+                names.join(",")
+            );
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn batch_list() -> io::Result<()> {
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::ListBatches)?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::Batches(batches) => {
+            let items: Vec<String> = batches
+                .iter()
+                .map(|b| {
+                    let sessions: Vec<String> = b
+                        .sessions
+                        .iter()
+                        .map(|s| format!("\"{}\"", agent::json_escape(s)))
+                        .collect();
+                    format!(
+                        "{{\"group\":\"{}\",\"base_repo\":\"{}\",\"base_branch\":\"{}\",\"sessions\":[{}]}}",
+                        agent::json_escape(&b.group),
+                        agent::json_escape(&b.base_repo),
+                        agent::json_escape(&b.base_branch),
+                        sessions.join(",")
+                    )
+                })
+                .collect();
+            println!("[{}]", items.join(","));
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+// TODO(Task 8) : stubs temporaires, remplacés par l'implémentation réelle de
+// `review`/`diff`/`pr` (revue agrégée d'un lot d'agents).
+fn batch_review(_args: &[String]) -> io::Result<()> {
+    Err(io::Error::other(
+        "wimux batch review : implémenté en Task 8",
+    ))
+}
+fn batch_diff(_args: &[String]) -> io::Result<()> {
+    Err(io::Error::other("wimux batch diff : implémenté en Task 8"))
+}
+fn batch_pr(_args: &[String]) -> io::Result<()> {
+    Err(io::Error::other("wimux batch pr : implémenté en Task 8"))
+}
+
 /// Traduit des jetons de touches en octets.
 fn translate_keys(args: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -877,5 +1055,48 @@ mod agent_tests {
     fn strip_ansi_retire_csi_et_osc() {
         assert_eq!(strip_ansi("\x1b[31mrouge\x1b[0m"), "rouge");
         assert_eq!(strip_ansi("\x1b]9;notif\x07texte"), "texte");
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::batch::*;
+
+    #[test]
+    fn parse_create_lit_tous_les_champs() {
+        let a = parse_create(&[
+            "--repo".into(),
+            "C:\\repo".into(),
+            "--template".into(),
+            "claude".into(),
+            "--prompt".into(),
+            "corrige le parser".into(),
+            "--count".into(),
+            "3".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.repo, "C:\\repo");
+        assert_eq!(a.template, "claude");
+        assert_eq!(a.prompt, "corrige le parser");
+        assert_eq!(a.count, 3);
+    }
+
+    #[test]
+    fn parse_create_exige_repo_template_prompt() {
+        assert!(parse_create(&["--repo".into(), "C:\\repo".into()]).is_err());
+    }
+
+    #[test]
+    fn parse_create_count_defaut_est_deux() {
+        let a = parse_create(&[
+            "--repo".into(),
+            "r".into(),
+            "--template".into(),
+            "t".into(),
+            "--prompt".into(),
+            "p".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.count, 2, "count par défaut = 2");
     }
 }
