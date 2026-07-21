@@ -31,6 +31,18 @@ export interface PaneCallbacks {
   onWebForward: (paneId: number) => void;
 }
 
+/// Miroir client de `url_autorisee` (`crates/wimux-server/src/session.rs`) :
+/// seule une URL http(s) doit être posée en `src` d'iframe. Une iframe hérite
+/// de l'origine du parent pour un schéma `javascript:`, ce qui donnerait accès
+/// à `window.__TAURI__` (`tauri.conf.json` a `withGlobalTauri: true` et
+/// `csp: null`). Le serveur refuse déjà ces URL en amont ; ce garde côté
+/// frontend est une seconde ligne de défense (défense en profondeur), pas la
+/// seule.
+function urlAutorisee(url: string): boolean {
+  const lower = url.toLowerCase();
+  return lower.startsWith("http://") || lower.startsWith("https://");
+}
+
 interface PaneView {
   term: Terminal;
   fit: FitAddon;
@@ -160,8 +172,12 @@ export class PaneManager {
     this.lastSignature = signature;
     this.lastPaneIds = wanted;
 
-    // Marquer le volet actif.
+    // Marquer le volet actif (terminaux ET navigateurs : le serveur ne fait
+    // pas de différence de nature pour désigner le volet actif d'une fenêtre).
     for (const [id, v] of this.views) {
+      v.el.classList.toggle("active", id === active);
+    }
+    for (const [id, v] of this.webViews) {
       v.el.classList.toggle("active", id === active);
     }
     // Focus clavier uniquement si le volet actif a changé depuis le dernier
@@ -285,8 +301,10 @@ export class PaneManager {
   private ensureWebView(paneId: number, url: string) {
     const existing = this.webViews.get(paneId);
     if (existing) {
-      // Le serveur est la source de vérité : on suit l'URL reçue.
-      if (existing.frame.getAttribute("src") !== url) {
+      // Le serveur est la source de vérité : on suit l'URL reçue. Ne poser
+      // `src` que si l'URL passe le même test que côté serveur ; sinon on
+      // laisse l'iframe telle quelle plutôt que de planter.
+      if (existing.frame.getAttribute("src") !== url && urlAutorisee(url)) {
         existing.frame.setAttribute("src", url);
       }
       if (document.activeElement !== existing.input) existing.input.value = url;
@@ -308,21 +326,38 @@ export class PaneManager {
     fwd.onclick = () => this.cb.onWebForward(paneId);
     const reload = document.createElement("button");
     reload.textContent = "⟳";
-    reload.title = "Recharger";
+    // Ce bouton réassigne `src` à l'URL du volet : après une navigation
+    // interne à la page (clic sur un lien, même origine), ça n'est PAS un
+    // rechargement de la page courante mais un retour à l'URL connue du
+    // serveur — d'où l'infobulle honnête plutôt que « Recharger ».
+    reload.title = "Revenir à l'URL du volet";
     const input = document.createElement("input");
     input.className = "web-url";
     input.value = url;
     input.onkeydown = (ev) => {
       if (ev.key === "Enter") this.cb.onWebNavigate(paneId, input.value.trim());
     };
-    bar.append(back, fwd, reload, input);
+    const close = document.createElement("button");
+    close.textContent = "✕";
+    close.title = "Fermer le volet";
+    close.onclick = () => this.cb.onClose(paneId);
+    bar.append(back, fwd, reload, input, close);
 
     const frame = document.createElement("iframe");
     frame.className = "web-frame";
-    frame.setAttribute("src", url);
-    // Recharger est purement client : pas d'aller-retour serveur.
+    // Ne poser `src` que si l'URL passe le garde (cf. urlAutorisee) ; sinon
+    // l'iframe reste vide plutôt que de planter.
+    if (urlAutorisee(url)) {
+      frame.setAttribute("src", url);
+    }
+    // Purement client : pas d'aller-retour serveur. Revalide quand même l'URL
+    // cible (le garde serveur a déjà dû l'accepter en amont, mais on ne fait
+    // jamais confiance à un attribut DOM comme unique ligne de défense).
     reload.onclick = () => {
-      frame.setAttribute("src", frame.getAttribute("src") ?? url);
+      const target = frame.getAttribute("src") ?? url;
+      if (urlAutorisee(target)) {
+        frame.setAttribute("src", target);
+      }
     };
 
     // Avertissement permanent : un refus d'affichage en cadre n'est PAS
