@@ -636,29 +636,26 @@ impl Session {
         true
     }
 
-    /// B1 : recule d'un cran. `false` si l'id n'est pas navigable OU si on est
-    /// déjà en tête de pile.
-    pub fn web_back(&self, pane_id: u64) -> bool {
-        let Some(web) = self.find_web(pane_id) else {
-            return false;
-        };
+    /// B1 : recule d'un cran. `None` si l'id n'est pas un volet navigateur de
+    /// cette session ; `Some(false)` si on est déjà en tête de pile (no-op
+    /// légitime, PAS une erreur) ; `Some(true)` si le déplacement a eu lieu.
+    pub fn web_back(&self, pane_id: u64) -> Option<bool> {
+        let web = self.find_web(pane_id)?;
         let moved = web.back();
         if moved {
             self.notifier.bump();
         }
-        moved
+        Some(moved)
     }
 
     /// B1 : avance d'un cran. Mêmes conventions que `web_back`.
-    pub fn web_forward(&self, pane_id: u64) -> bool {
-        let Some(web) = self.find_web(pane_id) else {
-            return false;
-        };
+    pub fn web_forward(&self, pane_id: u64) -> Option<bool> {
+        let web = self.find_web(pane_id)?;
         let moved = web.forward();
         if moved {
             self.notifier.bump();
         }
-        moved
+        Some(moved)
     }
 
     /// Cherche un volet navigateur par id dans toutes les fenêtres.
@@ -1813,16 +1810,23 @@ mod tests {
         let (tree, _) = s.window_layout().unwrap();
         assert!(layout_contient_web(&tree, id, "http://b/"));
 
-        assert!(s.web_back(id));
+        assert_eq!(s.web_back(id), Some(true));
         let (tree, _) = s.window_layout().unwrap();
         assert!(layout_contient_web(&tree, id, "http://a/"));
 
-        assert!(s.web_forward(id));
+        assert_eq!(s.web_forward(id), Some(true));
         let (tree, _) = s.window_layout().unwrap();
         assert!(layout_contient_web(&tree, id, "http://b/"));
 
-        // Un id inconnu ou un volet terminal ne sont pas navigables.
+        // En bout de pile (avant), reculer davantage est un no-op légitime :
+        // Some(false), pas une erreur.
+        assert_eq!(s.web_back(id), Some(true)); // -> http://a/ (début de pile)
+        assert_eq!(s.web_back(id), Some(false), "déjà en tête de pile");
+
+        // Un id inconnu ou un volet terminal ne sont pas navigables : None.
         assert!(!s.web_navigate(999_999, "http://x/".into()));
+        assert_eq!(s.web_back(999_999), None, "id inconnu -> None");
+        assert_eq!(s.web_forward(999_999), None, "id inconnu -> None");
         s.kill();
     }
 

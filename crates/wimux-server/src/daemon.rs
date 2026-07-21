@@ -809,15 +809,28 @@ fn reattach_active_window(
 /// attachée est déjà connue : la GUI envoie donc une chaîne vide. On retombe
 /// alors sur la session de l'attachement (et on laisse la valeur telle quelle
 /// quand elle est fournie, ce que fait la CLI).
-fn resolve_gui_session(session: String, gui_attach: &Option<GuiAttachment>) -> String {
+///
+/// `None` si `session` est vide ET qu'aucune GUI n'est attachée : il n'y a
+/// alors aucune session à résoudre (pas même une chaîne vide à chercher).
+fn resolve_gui_session(session: String, gui_attach: &Option<GuiAttachment>) -> Option<String> {
     if session.is_empty() {
-        gui_attach
-            .as_ref()
-            .map(|ga| ga.session.name())
-            .unwrap_or(session)
+        gui_attach.as_ref().map(|ga| ga.session.name())
     } else {
-        session
+        Some(session)
     }
+}
+
+/// Résout la session ciblée par un message B1 (`OpenWebPane`/`WebNavigate`/
+/// `WebBack`/`WebForward`), ou renvoie directement le message d'erreur à
+/// répondre si la connexion n'a ni nom de session fourni ni GUI attachée.
+/// Centralise ce message pour ne pas le dupliquer dans les quatre handlers.
+fn require_gui_session(
+    session: String,
+    gui_attach: &Option<GuiAttachment>,
+) -> Result<String, ServerMessage> {
+    resolve_gui_session(session, gui_attach).ok_or_else(|| {
+        ServerMessage::Error("aucune session : cette connexion n'est pas attachée".into())
+    })
 }
 
 /// Repousse la disposition de la fenêtre active à la connexion GUI courante, si
@@ -1200,49 +1213,90 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 dir,
                 url,
             } => {
-                let session = resolve_gui_session(session, &gui_attach);
-                let reply = match server.get(&session) {
-                    Some(s) => match s.open_web_pane(from_pane, dir.into(), url) {
-                        Some(pane_id) => ServerMessage::PaneSpawned { pane_id },
-                        None => ServerMessage::Error("échec d'ouverture du volet web".into()),
+                let reply = match require_gui_session(session, &gui_attach) {
+                    Ok(session) => match server.get(&session) {
+                        Some(s) => match s.open_web_pane(from_pane, dir.into(), url) {
+                            Some(pane_id) => ServerMessage::PaneSpawned { pane_id },
+                            None => ServerMessage::Error("échec d'ouverture du volet web".into()),
+                        },
+                        None => ServerMessage::Error(format!("session introuvable : {session}")),
                     },
-                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                    Err(e) => e,
                 };
+                // Réponse sous `gui_write` : cette connexion peut être la GUI
+                // persistante, où le thread de pompe écrit des `PaneOutput` en
+                // continu (voir le commentaire sur `gui_write` plus haut).
+                let _g = gui_write.lock().unwrap();
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
             ClientMessage::WebNavigate { session, pane, url } => {
-                let session = resolve_gui_session(session, &gui_attach);
-                let reply = match server.get(&session) {
-                    Some(s) => {
-                        if s.web_navigate(pane, url) {
-                            ServerMessage::Ok
-                        } else {
-                            ServerMessage::Error(format!("volet navigateur introuvable : {pane}"))
+                let reply = match require_gui_session(session, &gui_attach) {
+                    Ok(session) => match server.get(&session) {
+                        Some(s) => {
+                            if s.web_navigate(pane, url) {
+                                ServerMessage::Ok
+                            } else {
+                                ServerMessage::Error(format!(
+                                    "volet navigateur introuvable : {pane}"
+                                ))
+                            }
                         }
-                    }
-                    None => ServerMessage::Error(format!("session introuvable : {session}")),
+                        None => ServerMessage::Error(format!("session introuvable : {session}")),
+                    },
+                    Err(e) => e,
                 };
-                let mut wr: &PipeConn = &conn;
-                send(&mut wr, &reply)?;
+                {
+                    let _g = gui_write.lock().unwrap();
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &reply)?;
+                }
+                // Verrou relâché avant cet appel : `push_layout_if_gui` reprend
+                // `gui_write` lui-même, et un `Mutex` std n'est pas réentrant.
                 push_layout_if_gui(&gui_attach, &conn, &gui_write)?;
             }
             ClientMessage::WebBack { session, pane } => {
-                let session = resolve_gui_session(session, &gui_attach);
-                if let Some(s) = server.get(&session) {
-                    s.web_back(pane);
+                let reply = match require_gui_session(session, &gui_attach) {
+                    Ok(session) => match server.get(&session) {
+                        Some(s) => match s.web_back(pane) {
+                            Some(_) => ServerMessage::Ok,
+                            None => ServerMessage::Error(format!(
+                                "volet navigateur introuvable : {pane}"
+                            )),
+                        },
+                        None => ServerMessage::Error(format!("session introuvable : {session}")),
+                    },
+                    Err(e) => e,
+                };
+                {
+                    let _g = gui_write.lock().unwrap();
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &reply)?;
                 }
-                let mut wr: &PipeConn = &conn;
-                send(&mut wr, &ServerMessage::Ok)?;
+                // Verrou relâché avant cet appel : `push_layout_if_gui` reprend
+                // `gui_write` lui-même, et un `Mutex` std n'est pas réentrant.
                 push_layout_if_gui(&gui_attach, &conn, &gui_write)?;
             }
             ClientMessage::WebForward { session, pane } => {
-                let session = resolve_gui_session(session, &gui_attach);
-                if let Some(s) = server.get(&session) {
-                    s.web_forward(pane);
+                let reply = match require_gui_session(session, &gui_attach) {
+                    Ok(session) => match server.get(&session) {
+                        Some(s) => match s.web_forward(pane) {
+                            Some(_) => ServerMessage::Ok,
+                            None => ServerMessage::Error(format!(
+                                "volet navigateur introuvable : {pane}"
+                            )),
+                        },
+                        None => ServerMessage::Error(format!("session introuvable : {session}")),
+                    },
+                    Err(e) => e,
+                };
+                {
+                    let _g = gui_write.lock().unwrap();
+                    let mut wr: &PipeConn = &conn;
+                    send(&mut wr, &reply)?;
                 }
-                let mut wr: &PipeConn = &conn;
-                send(&mut wr, &ServerMessage::Ok)?;
+                // Verrou relâché avant cet appel : `push_layout_if_gui` reprend
+                // `gui_write` lui-même, et un `Mutex` std n'est pas réentrant.
                 push_layout_if_gui(&gui_attach, &conn, &gui_write)?;
             }
             ClientMessage::Input(bytes) => {
