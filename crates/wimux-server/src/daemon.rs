@@ -542,6 +542,19 @@ impl Server {
             .group()
             .ok_or_else(|| format!("la session « {session} » n'appartient à aucun lot"))?;
 
+        // Un agent qui produit ENCORE de la sortie peut être au milieu d'une
+        // écriture : `commit_wip` (`git add -A`) capturerait un fichier à moitié
+        // écrit. On refuse ce seul cas. Idle/Attention/Done/Error passent — un
+        // agent interactif reste vivant indéfiniment, exiger sa mort rendrait
+        // l'intégration impossible pour lui.
+        let idle = std::time::Duration::from_secs(self.config.agent_idle_seconds);
+        if s.agent_status(idle) == Some(wimux_protocol::AgentStatus::Working) {
+            return Err(format!(
+                "l'agent « {session} » produit encore de la sortie : attends qu'il se stabilise \
+                 (ou tue-le) avant d'intégrer son travail"
+            ));
+        }
+
         let stats = crate::batch::diff_stats(&wt.path, &wt.base_sha)?;
         let untracked_n = crate::batch::untracked(&wt.path).len();
         if stats.files_changed == 0 && untracked_n == 0 {

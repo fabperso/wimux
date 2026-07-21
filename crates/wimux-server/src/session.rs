@@ -572,8 +572,14 @@ impl Session {
         let new_id = new_pane.id;
         {
             let mut inner = self.inner.lock().unwrap();
-            let aw = inner.active_window;
-            let Some(win) = inner.windows.get_mut(aw) else {
+            // Le volet d'origine peut vivre dans une fenêtre NON active (un Claude
+            // orchestrateur dans un onglet d'arrière-plan) : on découpe là où il
+            // se trouve, pour que l'agent apparaisse à côté de lui. À défaut
+            // (`from_pane` absent ou introuvable), on retombe sur la fenêtre active.
+            let target_window = from_pane
+                .and_then(|id| inner.windows.iter().position(|w| w.pane(id).is_some()))
+                .unwrap_or(inner.active_window);
+            let Some(win) = inner.windows.get_mut(target_window) else {
                 drop(inner);
                 new_pane.kill();
                 return None;
@@ -583,7 +589,7 @@ impl Session {
                 .unwrap_or_else(|| win.active_pane_id());
             win.split_pane(target, dir, Arc::clone(&new_pane));
             let area = content_area(inner.cols, inner.rows);
-            inner.windows[aw].reflow(area);
+            inner.windows[target_window].reflow(area);
         }
         self.bump_layout_rev();
         self.notifier.bump();
@@ -1651,6 +1657,36 @@ mod tests {
         assert!(
             done,
             "le volet agent terminé doit survivre au reap avec son exit_code"
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn spawn_pane_decoupe_la_fenetre_du_volet_dorigine() {
+        let s = Session::new("xw".into(), 80, 24, "cmd.exe").unwrap();
+        // Volet de la fenêtre de départ.
+        let origin = match s.window_layout().unwrap().0 {
+            LayoutNode::Leaf { pane_id } => pane_id,
+            _ => panic!("une session neuve n'a qu'un volet"),
+        };
+        // Une seconde fenêtre, qui devient active.
+        let _ = s.gui_new_window();
+        assert!(
+            matches!(s.window_layout().unwrap().0, LayoutNode::Leaf { .. }),
+            "la nouvelle fenêtre active n'a qu'un volet"
+        );
+
+        // On vise le volet de la PREMIÈRE fenêtre : la découpe doit s'y faire.
+        let id = s
+            .spawn_pane(Some(origin), SplitDir::LeftRight, None, "cmd.exe", &[])
+            .expect("un id de volet");
+        assert!(
+            matches!(s.window_layout().unwrap().0, LayoutNode::Leaf { .. }),
+            "la fenêtre ACTIVE ne doit pas avoir été découpée"
+        );
+        assert!(
+            s.pane_infos().iter().any(|p| p.pane_id == id),
+            "le volet agent doit exister (dans la fenêtre d'origine)"
         );
         s.kill();
     }

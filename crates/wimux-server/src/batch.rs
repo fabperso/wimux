@@ -128,20 +128,25 @@ pub fn full_diff(wt: &Path, base_sha: &str) -> Result<String, String> {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 if stdout.is_empty() && !stderr.is_empty() {
-                    text.push_str(&format!(
-                        "# wimux: contenu de {file} illisible ({})\n",
-                        stderr.trim()
-                    ));
+                    text.push_str(&unreadable_marker(&file, stderr.trim()));
                 } else {
                     text.push_str(&stdout);
                 }
             }
             Err(e) => {
-                text.push_str(&format!("# wimux: contenu de {file} illisible ({e})\n"));
+                text.push_str(&unreadable_marker(&file, &e.to_string()));
             }
         }
     }
     Ok(text)
+}
+
+/// Ligne signalant, dans un diff de revue, qu'un contenu n'a pas pu être lu.
+/// Extraite pour être testable sans avoir à provoquer un vrai échec git : dans
+/// un artefact de revue, un contenu manquant DOIT être discernable d'un contenu
+/// vide, sinon Claude arbitre sur un diff amputé sans le savoir.
+fn unreadable_marker(file: &str, reason: &str) -> String {
+    format!("# wimux: contenu de {file} illisible ({reason})\n")
 }
 
 /// Gardes préalables à l'intégration (M4) : un remote `origin` doit exister,
@@ -173,15 +178,24 @@ pub fn gh_ready(wt: &Path) -> Result<(), String> {
 /// avait rien à commiter. C'est le SEUL endroit de M4 qui mute le worktree.
 pub fn commit_wip(wt: &Path, message: &str) -> Result<bool, String> {
     git(wt, &["add", "-A"])?;
-    // `diff --cached --quiet` sort avec 1 s'il y a quelque chose d'indexé.
+    // `diff --cached --quiet` : 0 = rien d'indexé, 1 = il y a des différences.
+    // Tout AUTRE code est une vraie erreur git (index corrompu, etc.) : on la
+    // remonte explicitement au lieu de la confondre avec « il y a à commiter ».
     let staged = Command::new("git")
         .arg("-C")
         .arg(wt)
         .args(["diff", "--cached", "--quiet"])
         .status()
         .map_err(|e| format!("git indisponible : {e}"))?;
-    if staged.success() {
-        return Ok(false); // rien à commiter
+    match staged.code() {
+        Some(0) => return Ok(false), // rien à commiter
+        Some(1) => {}                // des différences indexées : on commite
+        other => {
+            return Err(format!(
+                "`git diff --cached --quiet` a échoué (code {}) : index illisible ?",
+                other.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            ));
+        }
     }
     git(
         wt,
@@ -266,6 +280,18 @@ mod tests {
         assert_eq!(s.files_changed, 2);
         assert_eq!(s.insertions, 4);
         assert_eq!(s.deletions, 1);
+    }
+
+    #[test]
+    fn marqueur_illisible_nomme_le_fichier_et_la_raison() {
+        let m = unreadable_marker("café.txt", "Could not access");
+        assert!(m.starts_with("# wimux:"), "doit être un commentaire : {m}");
+        assert!(m.contains("café.txt"), "doit nommer le fichier : {m}");
+        assert!(
+            m.contains("Could not access"),
+            "doit donner la raison : {m}"
+        );
+        assert!(m.ends_with('\n'), "doit terminer la ligne : {m:?}");
     }
 
     #[test]
