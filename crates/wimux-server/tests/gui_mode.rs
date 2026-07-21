@@ -625,7 +625,7 @@ fn attach_gui_envoie_layout_et_snapshots() {
     while (layout_pane.is_none() || snap_pane.is_none()) && Instant::now() < deadline {
         match grx.recv_timeout(Duration::from_millis(200)) {
             Ok(ServerMessage::WindowLayout { tree, active }) => match tree {
-                LayoutNode::Leaf { pane_id } => {
+                LayoutNode::Leaf { pane_id, .. } => {
                     assert_eq!(pane_id, active);
                     layout_pane = Some(pane_id);
                 }
@@ -655,7 +655,7 @@ fn split_pane_ajoute_une_feuille() {
 
     let (tree, active) = wait_layout(&grx, 6);
     let leaf = match tree {
-        LayoutNode::Leaf { pane_id } => pane_id,
+        LayoutNode::Leaf { pane_id, .. } => pane_id,
         _ => panic!("attendu une feuille"),
     };
     assert_eq!(leaf, active);
@@ -687,10 +687,10 @@ fn split_pane_ajoute_une_feuille() {
             Ok(ServerMessage::WindowLayout { tree, .. }) => {
                 if let LayoutNode::Split { a, b, .. } = tree {
                     let mut ids = Vec::new();
-                    if let LayoutNode::Leaf { pane_id } = *a {
+                    if let LayoutNode::Leaf { pane_id, .. } = *a {
                         ids.push(pane_id);
                     }
-                    if let LayoutNode::Leaf { pane_id } = *b {
+                    if let LayoutNode::Leaf { pane_id, .. } = *b {
                         ids.push(pane_id);
                     }
                     split_ids = Some(ids);
@@ -731,7 +731,7 @@ fn set_split_ratio_change_le_ratio() {
 
     let (tree, _) = wait_layout(&grx, 6);
     let leaf = match tree {
-        LayoutNode::Leaf { pane_id } => pane_id,
+        LayoutNode::Leaf { pane_id, .. } => pane_id,
         _ => panic!("attendu une feuille"),
     };
     {
@@ -808,7 +808,7 @@ fn close_pane_retire_la_feuille() {
 
     let (tree, _) = wait_layout(&grx, 6);
     let leaf = match tree {
-        LayoutNode::Leaf { pane_id } => pane_id,
+        LayoutNode::Leaf { pane_id, .. } => pane_id,
         _ => panic!("attendu une feuille"),
     };
     {
@@ -847,7 +847,7 @@ fn close_pane_retire_la_feuille() {
         loop {
             match grx.recv_timeout(Duration::from_millis(200)) {
                 Ok(ServerMessage::WindowLayout { tree, .. }) => {
-                    if let LayoutNode::Leaf { pane_id } = tree {
+                    if let LayoutNode::Leaf { pane_id, .. } = tree {
                         break pane_id == leaf;
                     }
                 }
@@ -1410,7 +1410,7 @@ fn onglets_cycle_de_vie() {
     // Capturer le pane_id de la 1re fenêtre (via WindowLayout).
     let (tree0, _) = wait_layout(&grx, 8);
     let pane0 = match tree0 {
-        LayoutNode::Leaf { pane_id } => pane_id,
+        LayoutNode::Leaf { pane_id, .. } => pane_id,
         _ => panic!("session neuve : arbre attendu = feuille"),
     };
 
@@ -1424,7 +1424,7 @@ fn onglets_cycle_de_vie() {
     assert_eq!(active, 1);
     let (tree1, _) = wait_layout(&grx, 8);
     let pane1 = match tree1 {
-        LayoutNode::Leaf { pane_id } => pane_id,
+        LayoutNode::Leaf { pane_id, .. } => pane_id,
         _ => panic!("nouvelle fenêtre : arbre attendu = feuille"),
     };
     assert_ne!(pane0, pane1, "les deux fenêtres partagent un pane_id");

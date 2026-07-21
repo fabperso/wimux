@@ -129,6 +129,14 @@ pub enum SplitDir {
     TopBottom,
 }
 
+/// Nature d'une feuille de disposition (B1) : terminal, ou navigateur portant son
+/// URL courante. C'est ce qui dit au frontend quoi rendre pour cette feuille.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PaneKind {
+    Terminal,
+    Web { url: String },
+}
+
 /// Arbre de disposition d'une fenêtre, sérialisable pour la GUI. Chaque `Split`
 /// porte un `node_id` stable (attribué à la création) pour cibler `SetSplitRatio`
 /// sans ambiguïté même si l'arbre a changé ailleurs.
@@ -136,6 +144,9 @@ pub enum SplitDir {
 pub enum LayoutNode {
     Leaf {
         pane_id: u64,
+        /// B1 : terminal ou navigateur (+ URL). **Ajout de champ assumé** : il
+        /// change tous les encodages de `Leaf`, d'où rebuild + redémarrage daemon.
+        kind: PaneKind,
     },
     Split {
         node_id: u32,
@@ -429,6 +440,30 @@ pub enum ClientMessage {
         title: Option<String>,
         body: Option<String>,
     },
+    /// B1 : ouvre un volet NAVIGATEUR en découpant depuis `from_pane` (défaut :
+    /// volet actif). Réponse : `PaneSpawned { pane_id }`.
+    OpenWebPane {
+        session: String,
+        from_pane: Option<u64>,
+        dir: SplitDir,
+        url: String,
+    },
+    /// B1 : fait naviguer un volet navigateur vers `url` (empile l'historique).
+    WebNavigate {
+        session: String,
+        pane: u64,
+        url: String,
+    },
+    /// B1 : recule d'un cran dans la pile d'URL du volet.
+    WebBack {
+        session: String,
+        pane: u64,
+    },
+    /// B1 : avance d'un cran dans la pile d'URL du volet.
+    WebForward {
+        session: String,
+        pane: u64,
+    },
 }
 
 /// Messages serveur -> client.
@@ -683,8 +718,14 @@ mod tests {
             node_id: 1,
             dir: SplitDir::LeftRight,
             ratio: 0.5,
-            a: Box::new(LayoutNode::Leaf { pane_id: 10 }),
-            b: Box::new(LayoutNode::Leaf { pane_id: 11 }),
+            a: Box::new(LayoutNode::Leaf {
+                pane_id: 10,
+                kind: PaneKind::Terminal,
+            }),
+            b: Box::new(LayoutNode::Leaf {
+                pane_id: 11,
+                kind: PaneKind::Terminal,
+            }),
         };
         let msg = ServerMessage::WindowLayout {
             tree: tree.clone(),
@@ -1068,5 +1109,65 @@ mod tests {
             ServerMessage::Batches(v) => assert_eq!(v[0], info),
             _ => panic!("variante inattendue"),
         }
+    }
+
+    #[test]
+    fn aller_retour_leaf_web_et_messages_navigateur() {
+        // Une feuille NAVIGATEUR transporte son URL.
+        let tree = LayoutNode::Leaf {
+            pane_id: 4,
+            kind: PaneKind::Web {
+                url: "http://localhost:5173/".into(),
+            },
+        };
+        let bytes = postcard::to_allocvec(&tree).unwrap();
+        match postcard::from_bytes::<LayoutNode>(&bytes).unwrap() {
+            LayoutNode::Leaf { pane_id, kind } => {
+                assert_eq!(pane_id, 4);
+                assert_eq!(
+                    kind,
+                    PaneKind::Web {
+                        url: "http://localhost:5173/".into()
+                    }
+                );
+            }
+            _ => panic!("attendu une feuille"),
+        }
+
+        // Une feuille TERMINAL reste distinguable.
+        let tree = LayoutNode::Leaf {
+            pane_id: 1,
+            kind: PaneKind::Terminal,
+        };
+        let bytes = postcard::to_allocvec(&tree).unwrap();
+        match postcard::from_bytes::<LayoutNode>(&bytes).unwrap() {
+            LayoutNode::Leaf { kind, .. } => assert_eq!(kind, PaneKind::Terminal),
+            _ => panic!("attendu une feuille"),
+        }
+
+        let msg = ClientMessage::OpenWebPane {
+            session: "s".into(),
+            from_pane: Some(2),
+            dir: SplitDir::LeftRight,
+            url: "http://localhost:3000/".into(),
+        };
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        match postcard::from_bytes::<ClientMessage>(&bytes).unwrap() {
+            ClientMessage::OpenWebPane { from_pane, url, .. } => {
+                assert_eq!(from_pane, Some(2));
+                assert_eq!(url, "http://localhost:3000/");
+            }
+            _ => panic!("variante inattendue"),
+        }
+
+        let msg = ClientMessage::WebBack {
+            session: "s".into(),
+            pane: 4,
+        };
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        assert!(matches!(
+            postcard::from_bytes::<ClientMessage>(&bytes).unwrap(),
+            ClientMessage::WebBack { pane: 4, .. }
+        ));
     }
 }

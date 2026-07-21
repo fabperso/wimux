@@ -523,7 +523,11 @@ fn layout(node: &Node, area: Rect, rects: &mut HashMap<PaneId, Rect>, borders: &
 /// Traduit un `Node` interne en `LayoutNode` de protocole.
 fn node_to_layout(node: &Node) -> wimux_protocol::LayoutNode {
     match node {
-        Node::Leaf(id) => wimux_protocol::LayoutNode::Leaf { pane_id: *id },
+        Node::Leaf(id) => wimux_protocol::LayoutNode::Leaf {
+            pane_id: *id,
+            // B1 (intérim) : Task 3 émettra la vraie nature depuis la table des volets.
+            kind: wimux_protocol::PaneKind::Terminal,
+        },
         Node::Split {
             node_id,
             dir,
@@ -612,11 +616,11 @@ mod tests {
                 assert_eq!(node_id, 7);
                 assert!(matches!(
                     *a,
-                    wimux_protocol::LayoutNode::Leaf { pane_id: 1 }
+                    wimux_protocol::LayoutNode::Leaf { pane_id: 1, .. }
                 ));
                 assert!(matches!(
                     *b,
-                    wimux_protocol::LayoutNode::Leaf { pane_id: 2 }
+                    wimux_protocol::LayoutNode::Leaf { pane_id: 2, .. }
                 ));
             }
             _ => panic!("attendu un Split"),
@@ -657,7 +661,7 @@ mod tests {
         assert_eq!(win.pane_ids(), vec![id1]);
         assert!(matches!(
             win.layout_tree(),
-            wimux_protocol::LayoutNode::Leaf { pane_id } if pane_id == id1
+            wimux_protocol::LayoutNode::Leaf { pane_id, .. } if pane_id == id1
         ));
         win.kill_all();
     }

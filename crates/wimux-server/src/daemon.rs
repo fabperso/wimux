@@ -1161,6 +1161,18 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
+            // B1 (protocole seulement, task 1) : le comportement serveur (état du
+            // volet navigateur, historique) sera implémenté en task 2.
+            ClientMessage::OpenWebPane { .. }
+            | ClientMessage::WebNavigate { .. }
+            | ClientMessage::WebBack { .. }
+            | ClientMessage::WebForward { .. } => {
+                let mut wr: &PipeConn = &conn;
+                send(
+                    &mut wr,
+                    &ServerMessage::Error("volet navigateur : pas encore implémenté".into()),
+                )?;
+            }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
                     let outcome = route_input(&a.session, &server.config, &mut prefix, &bytes);

@@ -1230,7 +1230,7 @@ mod tests {
         let s = Session::new("t".into(), 40, 12, "cmd.exe").unwrap();
         let (tree, active) = s.window_layout().unwrap();
         match tree {
-            wimux_protocol::LayoutNode::Leaf { pane_id } => assert_eq!(pane_id, active),
+            wimux_protocol::LayoutNode::Leaf { pane_id, .. } => assert_eq!(pane_id, active),
             _ => panic!("attendu une feuille pour une session neuve"),
         }
         s.kill();
@@ -1666,7 +1666,7 @@ mod tests {
         let s = Session::new("xw".into(), 80, 24, "cmd.exe").unwrap();
         // Volet de la fenêtre de départ.
         let origin = match s.window_layout().unwrap().0 {
-            LayoutNode::Leaf { pane_id } => pane_id,
+            LayoutNode::Leaf { pane_id, .. } => pane_id,
             _ => panic!("une session neuve n'a qu'un volet"),
         };
         // Une seconde fenêtre, qui devient active.
