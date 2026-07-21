@@ -225,6 +225,18 @@ mod batch {
                     session = args.get(i + 1).cloned();
                     i += 2;
                 }
+                "--title" | "--body" => {
+                    // Ces drapeaux prennent une valeur : on pousse le drapeau
+                    // ET sa valeur tels quels dans `rest`, en consommant les
+                    // deux jetons d'un coup. Sinon une valeur valant `-g`/`-i`/
+                    // `-s` (ou leur forme longue) serait avalée par les
+                    // branches ci-dessus comme drapeau de cible.
+                    rest.push(args[i].clone());
+                    if let Some(v) = args.get(i + 1) {
+                        rest.push(v.clone());
+                    }
+                    i += 2;
+                }
                 other => {
                     rest.push(other.to_string());
                     i += 1;
@@ -1018,6 +1030,16 @@ fn batch_pr(args: &[String]) -> io::Result<()> {
                 body = rest.get(i + 1).cloned();
                 i += 2;
             }
+            other if other.starts_with("--") => {
+                // Un jeton `--xxx` non reconnu (faute de frappe type `--titel`)
+                // ne doit JAMAIS être ignoré en silence : `batch pr` publie une
+                // PR réelle et détruit les perdants, on refuse de partir sur un
+                // titre/corps de repli mécanique au lieu de la justification
+                // explicite de l'appelant.
+                return Err(io::Error::other(format!(
+                    "wimux batch pr : option inconnue « {other} » (attendu : --title <t> --body <b>)"
+                )));
+            }
             _ => i += 1,
         }
     }
@@ -1214,5 +1236,29 @@ mod batch_tests {
         ])
         .unwrap();
         assert_eq!(a.count, 2, "count par défaut = 2");
+    }
+
+    #[test]
+    fn parse_target_ne_confond_pas_valeur_de_title_avec_un_drapeau_de_cible() {
+        // Une valeur de --title valant exactement "-g" ne doit PAS être avalée
+        // comme drapeau de cible par la boucle de parse_target (Fix 5a).
+        let (group, _, _, rest) = parse_target(&[
+            "-g".into(),
+            "batch0".into(),
+            "--title".into(),
+            "-g".into(),
+            "--body".into(),
+            "--session".into(),
+        ]);
+        assert_eq!(group.as_deref(), Some("batch0"));
+        assert_eq!(
+            rest,
+            vec![
+                "--title".to_string(),
+                "-g".to_string(),
+                "--body".to_string(),
+                "--session".to_string(),
+            ]
+        );
     }
 }
