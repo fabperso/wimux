@@ -943,6 +943,13 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
+            // M4 (intérim) : ces messages ne sont émis par aucun client tant que la
+            // CLI `wimux batch` n'existe pas ; Task 4 REMPLACE ce bras par les vrais
+            // handlers (ListBatches/ReviewBatch/DiffAgent) + un bras OpenPr temporaire.
+            ClientMessage::ListBatches
+            | ClientMessage::ReviewBatch { .. }
+            | ClientMessage::DiffAgent { .. }
+            | ClientMessage::OpenPr { .. } => {}
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
                     let outcome = route_input(&a.session, &server.config, &mut prefix, &bytes);
