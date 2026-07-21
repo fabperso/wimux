@@ -11,6 +11,30 @@ use wimux_protocol::{
 #[derive(Default)]
 struct Bridge {
     conn: Mutex<Option<Arc<PipeConn>>>,
+    /// Sérialise TOUTES les écritures sur `conn` (connexion GUI persistante).
+    /// Chaque commande Tauri (pane_input, pane_resize, web_back, list_windows,
+    /// attach_session...) peut s'exécuter sur son propre thread, indépendamment
+    /// des autres : sans ce verrou, deux `send` concurrents entrelaceraient
+    /// leurs trames sur le même handle de pipe et désynchroniseraient le
+    /// protocole côté serveur (celui-ci `break`rait alors sa boucle de lecture
+    /// sur la trame illisible, coupant silencieusement tout flux futur — c'est
+    /// exactement le défaut que `gui_write` évite côté serveur pour ses propres
+    /// écritures ; il manquait le pendant côté client).
+    write_lock: Mutex<()>,
+}
+
+/// Envoie un message sur la connexion GUI persistante, sous `write_lock`.
+/// No-op silencieux si aucune connexion n'est encore établie (avant le premier
+/// `attach_session`) : les commandes de volet appelées trop tôt ne doivent pas
+/// échouer bruyamment, elles n'ont simplement aucun effet.
+fn send_persistent(bridge: &Bridge, msg: &ClientMessage) -> Result<(), String> {
+    let conn = bridge.conn.lock().unwrap().clone();
+    if let Some(conn) = conn {
+        let _g = bridge.write_lock.lock().unwrap();
+        let mut w: &PipeConn = &conn;
+        send(&mut w, msg).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn do_handshake(conn: &PipeConn) -> Result<(), String> {
@@ -48,7 +72,10 @@ where
 #[tauri::command]
 fn attach_session(session: String, app: AppHandle, bridge: State<Bridge>) -> Result<(), String> {
     let existing = bridge.conn.lock().unwrap().clone();
-    let conn = match existing {
+    // Le thread lecteur est démarré une seule fois, à la première connexion ;
+    // sa valeur de retour ne sert qu'à ce `match` (elle est déjà stockée dans
+    // `bridge.conn`), d'où le `_` : `send_persistent` relit `bridge.conn`.
+    let _conn = match existing {
         Some(c) => c, // réutiliser : le thread lecteur tourne déjà
         None => {
             let c = Arc::new(
@@ -85,9 +112,7 @@ fn attach_session(session: String, app: AppHandle, bridge: State<Bridge>) -> Res
             c
         }
     };
-    let mut w: &PipeConn = &conn;
-    send(&mut w, &ClientMessage::AttachGui { session }).map_err(|e| e.to_string())?;
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::AttachGui { session })
 }
 
 #[derive(serde::Serialize)]
@@ -336,11 +361,7 @@ fn rename_session(from: String, to: String) -> Result<(), String> {
 
 #[tauri::command]
 fn pane_input(pane_id: u64, bytes: Vec<u8>, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::PaneInput { pane_id, bytes }).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::PaneInput { pane_id, bytes })
 }
 
 #[tauri::command]
@@ -350,56 +371,34 @@ fn split_pane(pane_id: u64, dir: String, bridge: State<Bridge>) -> Result<(), St
         "TopBottom" => SplitDir::TopBottom,
         other => return Err(format!("direction inconnue : {other}")),
     };
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::SplitPane { pane_id, dir }).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::SplitPane { pane_id, dir })
 }
 
 #[tauri::command]
 fn close_pane(pane_id: u64, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::ClosePane { pane_id }).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::ClosePane { pane_id })
 }
 
 #[tauri::command]
 fn focus_pane(pane_id: u64, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::FocusPane { pane_id }).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::FocusPane { pane_id })
 }
 
 #[tauri::command]
 fn set_split_ratio(node_id: u32, ratio: f32, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::SetSplitRatio { node_id, ratio })
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::SetSplitRatio { node_id, ratio })
 }
 
 #[tauri::command]
 fn pane_resize(pane_id: u64, cols: u16, rows: u16, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(
-            &mut w,
-            &ClientMessage::PaneResize {
-                pane_id,
-                cols,
-                rows,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(
+        &bridge,
+        &ClientMessage::PaneResize {
+            pane_id,
+            cols,
+            rows,
+        },
+    )
 }
 
 #[tauri::command]
@@ -409,114 +408,74 @@ fn open_web_pane(url: String, dir: String, bridge: State<Bridge>) -> Result<(), 
         "TopBottom" => SplitDir::TopBottom,
         other => return Err(format!("direction inconnue : {other}")),
     };
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(
-            &mut w,
-            &ClientMessage::OpenWebPane {
-                session: String::new(),
-                from_pane: None,
-                dir,
-                url,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(
+        &bridge,
+        &ClientMessage::OpenWebPane {
+            session: String::new(),
+            from_pane: None,
+            dir,
+            url,
+        },
+    )
 }
 
 #[tauri::command]
 fn web_navigate(pane_id: u64, url: String, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(
-            &mut w,
-            &ClientMessage::WebNavigate {
-                session: String::new(),
-                pane: pane_id,
-                url,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(
+        &bridge,
+        &ClientMessage::WebNavigate {
+            session: String::new(),
+            pane: pane_id,
+            url,
+        },
+    )
 }
 
 #[tauri::command]
 fn web_back(pane_id: u64, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(
-            &mut w,
-            &ClientMessage::WebBack {
-                session: String::new(),
-                pane: pane_id,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(
+        &bridge,
+        &ClientMessage::WebBack {
+            session: String::new(),
+            pane: pane_id,
+        },
+    )
 }
 
 #[tauri::command]
 fn web_forward(pane_id: u64, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(
-            &mut w,
-            &ClientMessage::WebForward {
-                session: String::new(),
-                pane: pane_id,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(
+        &bridge,
+        &ClientMessage::WebForward {
+            session: String::new(),
+            pane: pane_id,
+        },
+    )
 }
 
 #[tauri::command]
 fn new_window(bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::NewWindow).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::NewWindow)
 }
 
 #[tauri::command]
 fn list_windows(bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::ListWindows).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::ListWindows)
 }
 
 #[tauri::command]
 fn select_window(index: u32, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::SelectWindow { index }).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::SelectWindow { index })
 }
 
 #[tauri::command]
 fn close_window(index: u32, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::CloseWindow { index }).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::CloseWindow { index })
 }
 
 #[tauri::command]
 fn rename_window(index: u32, name: String, bridge: State<Bridge>) -> Result<(), String> {
-    if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
-        let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::RenameWindow { index, name }).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_persistent(&bridge, &ClientMessage::RenameWindow { index, name })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
