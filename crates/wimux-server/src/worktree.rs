@@ -13,6 +13,11 @@ pub struct Worktree {
     pub base_repo: PathBuf,
     pub path: PathBuf,
     pub branch: String,
+    /// Commit du dépôt de base au lancement du lot (M4) : référence de
+    /// comparaison STABLE même si la base avance ensuite.
+    pub base_sha: String,
+    /// Branche du dépôt de base au lancement du lot (M4) : cible des PR.
+    pub base_branch: String,
 }
 
 /// `base` est-il un dépôt git ? (`git -C base rev-parse --is-inside-work-tree`
@@ -28,6 +33,38 @@ pub fn is_git_repo(base: &Path) -> bool {
         Ok(out) => out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true",
         Err(_) => false,
     }
+}
+
+/// Sha complet du `HEAD` du dépôt `base` (M4). `None` si git échoue ou si le
+/// dépôt n'a encore aucun commit.
+pub fn head_sha(base: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(base)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+/// Branche courante du dépôt `base` (M4). `None` si git échoue ; renvoie `HEAD`
+/// tel quel si le dépôt est en HEAD détaché (l'appelant décidera).
+pub fn current_branch(base: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(base)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if b.is_empty() { None } else { Some(b) }
 }
 
 /// Crée un worktree : `git -C base worktree add path -b branch HEAD`. Crée le
@@ -161,6 +198,40 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    #[test]
+    fn head_sha_et_current_branch_sur_repo_temporaire() {
+        if !git_available() {
+            eprintln!("git absent : test head_sha_et_current_branch ignoré");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("wimux-wt-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(git_in(&base, &["init"]));
+        assert!(git_in(
+            &base,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+
+        let sha = head_sha(&base).expect("HEAD doit exister après un commit");
+        assert_eq!(sha.len(), 40, "un sha complet fait 40 caractères : {sha}");
+        assert!(sha.bytes().all(|b| b.is_ascii_hexdigit()));
+
+        let branch = current_branch(&base).expect("une branche courante doit exister");
+        assert!(!branch.is_empty() && branch != "HEAD", "branche : {branch}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

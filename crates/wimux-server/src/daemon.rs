@@ -323,6 +323,15 @@ impl Server {
             ));
         }
 
+        // (1 bis) Référence de comparaison du lot (M4) : sha + branche de la base
+        // au lancement. Sans HEAD (dépôt sans commit), le lot n'a pas de base.
+        let base_sha = worktree::head_sha(&base).ok_or_else(|| {
+            format!("le dépôt de base n'a pas de HEAD (aucun commit ?) : {base_repo}")
+        })?;
+        let base_branch = worktree::current_branch(&base).ok_or_else(|| {
+            format!("branche courante du dépôt de base introuvable : {base_repo}")
+        })?;
+
         // (2) Résoudre le modèle par son nom.
         let tpl = self
             .config
@@ -384,6 +393,8 @@ impl Server {
                         base_repo: base.clone(),
                         path: path.clone(),
                         branch: branch.clone(),
+                        base_sha: base_sha.clone(),
+                        base_branch: base_branch.clone(),
                     });
                     created.push((name, session));
                 }
