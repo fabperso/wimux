@@ -32,15 +32,57 @@ export interface PaneCallbacks {
 }
 
 /// Miroir client de `url_autorisee` (`crates/wimux-server/src/session.rs`) :
-/// seule une URL http(s) doit être posée en `src` d'iframe. Une iframe hérite
-/// de l'origine du parent pour un schéma `javascript:`, ce qui donnerait accès
-/// à `window.__TAURI__` (`tauri.conf.json` a `withGlobalTauri: true` et
-/// `csp: null`). Le serveur refuse déjà ces URL en amont ; ce garde côté
-/// frontend est une seconde ligne de défense (défense en profondeur), pas la
-/// seule.
+/// seule une URL http(s) qui ne cible PAS l'origine de l'application doit être
+/// posée en `src` d'iframe. Une iframe hérite de l'origine du parent pour un
+/// schéma `javascript:` — ou, tout aussi bien, pour une URL SAME-ORIGIN avec
+/// la GUI elle-même — ce qui donnerait accès à `window.parent.__TAURI__`
+/// (`tauri.conf.json` a `withGlobalTauri: true` et `csp: null`). Le serveur
+/// refuse déjà ces URL en amont ; ce garde côté frontend est une seconde ligne
+/// de défense (défense en profondeur), pas la seule — voir aussi l'attribut
+/// `sandbox` posé sur chaque iframe dans `ensureWebView` (troisième ligne).
 function urlAutorisee(url: string): boolean {
   const lower = url.toLowerCase();
-  return lower.startsWith("http://") || lower.startsWith("https://");
+  if (!(lower.startsWith("http://") || lower.startsWith("https://"))) return false;
+  return !cibleOrigineApplication(lower);
+}
+
+/// `urlLower` (déjà en minuscules, schéma http(s) déjà vérifié) désigne-t-elle
+/// l'origine de l'application Tauri elle-même ? Voir `urlAutorisee` : la GUI
+/// est servie sur `http://localhost:1420` en dev (`devUrl`) et sur
+/// `http(s)://tauri.localhost` en prod (WebView2/Tauri v2 Windows) — une
+/// iframe pointée dessus serait same-origin avec son parent. On bloque donc
+/// l'hôte `tauri.localhost` (toute casse), et `localhost`/`127.0.0.1`/`[::1]`
+/// SUR LE PORT 1420 précisément — pas un simple préfixe de port
+/// (`localhost:1420x` doit rester autorisé), et surtout pas un autre port
+/// (`localhost:5173`, le cas d'usage visé, doit rester autorisé).
+function cibleOrigineApplication(urlLower: string): boolean {
+  const idx = urlLower.indexOf("://");
+  if (idx < 0) return false;
+  const afterScheme = urlLower.slice(idx + 3);
+  const end = afterScheme.search(/[/?#]/);
+  let authority = end < 0 ? afterScheme : afterScheme.slice(0, end);
+  const at = authority.lastIndexOf("@");
+  if (at >= 0) authority = authority.slice(at + 1);
+  const { host, port } = splitHostPort(authority);
+  if (host === "tauri.localhost") return true;
+  return (host === "localhost" || host === "127.0.0.1" || host === "[::1]") && port === "1420";
+}
+
+/// Sépare une autorité `hôte[:port]` en `{ host, port }`. Gère l'hôte IPv6
+/// entre crochets (`[::1]:1420`), qui contient lui-même des `:`.
+function splitHostPort(authority: string): { host: string; port: string | undefined } {
+  if (authority.startsWith("[")) {
+    const close = authority.indexOf("]");
+    if (close >= 0) {
+      const host = authority.slice(0, close + 1);
+      const rest = authority.slice(close + 1);
+      const port = rest.startsWith(":") ? rest.slice(1) : undefined;
+      return { host, port };
+    }
+  }
+  const i = authority.lastIndexOf(":");
+  if (i < 0) return { host: authority, port: undefined };
+  return { host: authority.slice(0, i), port: authority.slice(i + 1) };
 }
 
 interface PaneView {
@@ -396,6 +438,15 @@ export class PaneManager {
 
     const frame = document.createElement("iframe");
     frame.className = "web-frame";
+    // Défense en profondeur (Fix 1, 3e ligne) : PAS de `allow-same-origin`.
+    // Ça neutralise toute la classe d'attaques visée ici — même si une URL
+    // d'origine app passait malgré tout les deux gardes précédentes (schéma +
+    // origine), le contenu chargé dans ce cadre serait forcé dans une origine
+    // opaque distincte et n'atteindrait donc jamais `window.parent.__TAURI__`.
+    // La page de test locale utilisée pour vérifier l'affichage n'a besoin ni
+    // de cookies ni de `localStorage` : ces attributs suffisent (scripts,
+    // formulaires, popups) sans réintroduire l'accès same-origin.
+    frame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups");
     // Ne poser `src` que si l'URL passe le garde (cf. urlAutorisee) ; sinon
     // l'iframe reste vide plutôt que de planter.
     if (urlAutorisee(url)) {

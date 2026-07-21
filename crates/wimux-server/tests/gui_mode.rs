@@ -1785,3 +1785,130 @@ fn webback_via_pipe_ramene_l_url_precedente() {
     let _ = send(&mut w, &ClientMessage::Kill { name: "WB".into() });
     std::thread::sleep(Duration::from_millis(200));
 }
+
+// --- Fix 5 : messages d'erreur explicites sur un refus de sécurité, pour ne
+//     pas envoyer un utilisateur qui a oublié le schéma sur une fausse piste
+//     (« volet introuvable ») alors que le vrai problème est l'URL elle-même.
+
+/// Attend le premier `ServerMessage::Error` (ou panique après le délai).
+fn wait_error(rx: &Receiver<ServerMessage>, secs: u64) -> String {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        if let Ok(msg) = rx.recv_timeout(Duration::from_millis(200)) {
+            match msg {
+                ServerMessage::Error(e) => return e,
+                other => eprintln!("[wait_error] message ignoré : {other:?}"),
+            }
+        }
+    }
+    panic!("aucun ServerMessage::Error reçu dans le délai imparti");
+}
+
+#[test]
+fn open_web_pane_url_refusee_donne_un_message_explicite() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-refus1", std::process::id());
+    start_daemon(&pipe);
+    let (gui, grx) = setup_attached(&pipe, "REFUS1");
+    let _ = wait_layout(&grx, 6);
+
+    // Ni schéma http(s) ni origine app : simple faute de frappe utilisateur.
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::OpenWebPane {
+                session: String::new(),
+                from_pane: None,
+                dir: SplitDir::LeftRight,
+                url: "example.com".into(),
+            },
+        )
+        .unwrap();
+    }
+    let err = wait_error(&grx, 6);
+    assert!(
+        !err.contains("introuvable") && !err.contains("échec d'ouverture"),
+        "le message ne doit pas laisser croire à un problème de volet/fenêtre : {err:?}"
+    );
+    assert!(
+        err.contains("URL refusée"),
+        "le message doit nommer explicitement la cause (URL refusée) : {err:?}"
+    );
+
+    let mut w: &PipeConn = &gui;
+    let _ = send(
+        &mut w,
+        &ClientMessage::Kill {
+            name: "REFUS1".into(),
+        },
+    );
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
+fn web_navigate_url_refusee_donne_un_message_explicite_et_pas_introuvable() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-refus2", std::process::id());
+    start_daemon(&pipe);
+    let (gui, grx) = setup_attached(&pipe, "REFUS2");
+    let _ = wait_layout(&grx, 6);
+
+    // Ouvrir un volet navigateur valide d'abord.
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::OpenWebPane {
+                session: String::new(),
+                from_pane: None,
+                dir: SplitDir::LeftRight,
+                url: "http://a/".into(),
+            },
+        )
+        .unwrap();
+    }
+    let pane_id = {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
+            if let Ok(ServerMessage::PaneSpawned { pane_id }) =
+                grx.recv_timeout(Duration::from_millis(200))
+            {
+                found = Some(pane_id);
+            }
+        }
+        found.expect("pas de PaneSpawned après OpenWebPane")
+    };
+
+    // Naviguer vers l'origine de l'app (Fix 1) : le pane EXISTE bel et bien,
+    // donc le message ne doit surtout pas dire « volet navigateur introuvable ».
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::WebNavigate {
+                session: String::new(),
+                pane: pane_id,
+                url: "http://localhost:1420/".into(),
+            },
+        )
+        .unwrap();
+    }
+    let err = wait_error(&grx, 6);
+    assert!(
+        !err.contains("introuvable"),
+        "le volet EXISTE : le refus vient de l'URL, pas d'un volet manquant : {err:?}"
+    );
+    assert!(
+        err.contains("URL refusée"),
+        "le message doit nommer explicitement la cause (URL refusée) : {err:?}"
+    );
+
+    let mut w: &PipeConn = &gui;
+    let _ = send(
+        &mut w,
+        &ClientMessage::Kill {
+            name: "REFUS2".into(),
+        },
+    );
+    std::thread::sleep(Duration::from_millis(200));
+}

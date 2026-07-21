@@ -1214,6 +1214,15 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 url,
             } => {
                 let reply = match require_gui_session(session, &gui_attach) {
+                    // Fix 5 : re-teste la garde AVANT `open_web_pane` pour
+                    // distinguer, dans le message, une URL refusée (schéma ou
+                    // origine) d'un échec « normal » (fenêtre introuvable) —
+                    // sinon un utilisateur qui tape `example.com` sans schéma
+                    // est envoyé sur une fausse piste (« échec d'ouverture du
+                    // volet web »).
+                    Ok(_) if !crate::session::url_autorisee(&url) => ServerMessage::Error(
+                        "URL refusée : seules les adresses http(s) externes sont autorisées".into(),
+                    ),
                     Ok(session) => match server.get(&session) {
                         Some(s) => match s.open_web_pane(from_pane, dir.into(), url) {
                             Some(pane_id) => ServerMessage::PaneSpawned { pane_id },
@@ -1232,6 +1241,13 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
             }
             ClientMessage::WebNavigate { session, pane, url } => {
                 let reply = match require_gui_session(session, &gui_attach) {
+                    // Fix 5 : voir le commentaire équivalent sur `OpenWebPane`
+                    // — sans ce test préalable, une URL refusée renverrait ici
+                    // « volet navigateur introuvable », un message trompeur
+                    // pour l'utilisateur qui a simplement oublié le schéma.
+                    Ok(_) if !crate::session::url_autorisee(&url) => ServerMessage::Error(
+                        "URL refusée : seules les adresses http(s) externes sont autorisées".into(),
+                    ),
                     Ok(session) => match server.get(&session) {
                         Some(s) => {
                             if s.web_navigate(pane, url) {

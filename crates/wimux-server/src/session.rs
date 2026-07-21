@@ -1321,22 +1321,81 @@ pub fn osc7_prompt_injection(shell: &str) -> Option<Vec<String>> {
 }
 
 /// N'autorise, pour un volet navigateur, qu'une URL de schéma `http://` ou
-/// `https://` (comparaison insensible à la casse).
+/// `https://` (comparaison insensible à la casse) qui ne pointe PAS sur
+/// l'origine de l'application elle-même.
 ///
-/// POURQUOI : cette URL est posée dans le `src` d'un `<iframe>` de la GUI Tauri
-/// (`tauri.conf.json` a `csp: null` et `withGlobalTauri: true`). Une URL de
-/// schéma `javascript:` posée en `src` d'iframe s'exécute en HÉRITANT DE
+/// POURQUOI (schéma) : cette URL est posée dans le `src` d'un `<iframe>` de la
+/// GUI Tauri (`tauri.conf.json` a `csp: null` et `withGlobalTauri: true`). Une
+/// URL de schéma `javascript:` posée en `src` d'iframe s'exécute en HÉRITANT DE
 /// L'ORIGINE DU PARENT (contrairement à une iframe HTTP cross-origin, isolée) :
 /// le script atteindrait donc `parent.__TAURI__.core.invoke` et toute la
 /// surface de commandes de l'application (`kill_session`, `create_agent`, …).
+///
+/// POURQUOI (origine de l'application) : filtrer le schéma ne suffit PAS. La
+/// GUI est servie sur `http://localhost:1420` en dev (`devUrl` de
+/// `tauri.conf.json`) et sur `http(s)://tauri.localhost` en production
+/// (WebView2/Tauri v2 Windows). Une iframe pointée sur CETTE origine est
+/// same-origin avec son parent : elle atteint donc, elle aussi,
+/// `window.parent.__TAURI__.core.invoke` et toute la surface de commandes —
+/// exactement la même faille que `javascript:`, juste par un autre chemin. On
+/// refuse donc en plus l'hôte `tauri.localhost` (toute casse) et
+/// `localhost`/`127.0.0.1`/`[::1]` sur le port `1420` précisément (pas un
+/// simple préfixe de port : `http://localhost:1420x/` doit rester autorisé, et
+/// surtout `http://localhost:5173/`, le cas d'usage visé — un serveur de dev
+/// quelconque — ne doit PAS être bloqué).
+///
 /// Aujourd'hui l'URL vient de l'utilisateur ou de la CLI locale, mais la phase
 /// B2 fera poser des URL par un agent à partir de contenu lu sur le web — sans
 /// ce garde-fou ce serait un chemin d'exécution de commandes hôte piloté par du
 /// contenu non fiable. Ce filtre doit être appliqué aux DEUX points d'entrée
 /// (`open_web_pane` et `web_navigate`) car la CLI n'entre pas par le frontend.
-fn url_autorisee(url: &str) -> bool {
+///
+/// Visibilité `pub(crate)` (Fix 5) : `daemon.rs` doit pouvoir la ré-appeler en
+/// amont de `open_web_pane`/`web_navigate` pour distinguer, dans le message
+/// d'erreur renvoyé au client, une URL refusée d'un volet/fenêtre introuvable.
+pub(crate) fn url_autorisee(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
-    lower.starts_with("http://") || lower.starts_with("https://")
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return false;
+    }
+    !cible_origine_application(&lower)
+}
+
+/// `url_lower` (déjà en minuscules, schéma http(s) déjà vérifié) désigne-t-elle
+/// l'origine de l'application Tauri elle-même ? Voir `url_autorisee` pour le
+/// pourquoi.
+fn cible_origine_application(url_lower: &str) -> bool {
+    let Some((_, after_scheme)) = url_lower.split_once("://") else {
+        return false;
+    };
+    let end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..end];
+    // Retire un éventuel `user:pass@` avant l'hôte (rare, par prudence).
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let (host, port) = split_host_port(authority);
+
+    if host == "tauri.localhost" {
+        return true;
+    }
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]") && port == Some("1420")
+}
+
+/// Sépare une autorité `hôte[:port]` en `(hôte, port)`. Gère l'hôte IPv6 entre
+/// crochets (`[::1]:1420`), qui contient lui-même des `:`.
+fn split_host_port(authority: &str) -> (&str, Option<&str>) {
+    if authority.starts_with('[') {
+        if let Some(close) = authority.find(']') {
+            let host = &authority[..=close];
+            let port = authority[close + 1..].strip_prefix(':');
+            return (host, port);
+        }
+    }
+    match authority.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    }
 }
 
 /// Spawn d'un volet shell avec injection OSC 7 conditionnelle (PowerShell/pwsh).
@@ -1936,6 +1995,38 @@ mod tests {
         assert!(
             !url_autorisee("JavaScript:alert(1)"),
             "le schéma en majuscules doit aussi être refusé"
+        );
+    }
+
+    #[test]
+    fn url_autorisee_refuse_lorigine_de_lapp_en_dev() {
+        assert!(
+            !url_autorisee("http://localhost:1420/"),
+            "l'origine de dev de la GUI (devUrl) doit être refusée : iframe same-origin -> __TAURI__"
+        );
+    }
+
+    #[test]
+    fn url_autorisee_refuse_tauri_localhost_meme_en_majuscules() {
+        assert!(
+            !url_autorisee("http://TAURI.localhost/x"),
+            "l'hôte de prod (WebView2) doit être refusé quelle que soit la casse"
+        );
+    }
+
+    #[test]
+    fn url_autorisee_accepte_un_serveur_de_dev_quelconque() {
+        assert!(
+            url_autorisee("http://localhost:5173/"),
+            "le cas d'usage visé (serveur de dev sur un AUTRE port) doit rester autorisé"
+        );
+    }
+
+    #[test]
+    fn url_autorisee_ne_confond_pas_un_prefixe_de_port_avec_le_port() {
+        assert!(
+            url_autorisee("http://localhost:1420x/"),
+            "« 1420x » n'est pas le port 1420 : ne pas bloquer sur un simple préfixe"
         );
     }
 
