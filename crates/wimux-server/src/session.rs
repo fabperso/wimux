@@ -197,9 +197,16 @@ impl Session {
             .and_then(|w| w.active_term_pane())
     }
 
-    /// cwd du volet actif de la fenêtre active (source du cwd de session, W3).
+    /// cwd à afficher pour la fenêtre active (source du cwd de session, W3).
+    /// Passe par `Window::label_cwd()` : un volet navigateur actif ne doit pas
+    /// faire disparaître le cwd si un autre volet terminal de la fenêtre en a
+    /// un (régression B1 corrigée).
     pub fn active_pane_cwd(&self) -> Option<String> {
-        self.active_pane().and_then(|p| p.cwd())
+        let inner = self.inner.lock().unwrap();
+        inner
+            .windows
+            .get(inner.active_window)
+            .and_then(|w| w.label_cwd())
     }
 
     /// Prépare l'attache GUI de la fenêtre active : crée UN canal fusionné, abonne
@@ -337,7 +344,7 @@ impl Session {
             .iter()
             .map(|w| WindowInfo {
                 name: w.name(),
-                cwd: w.active_term_pane().and_then(|p| p.cwd()),
+                cwd: w.label_cwd(),
             })
             .collect();
         (windows, inner.active_window as u32)
@@ -363,7 +370,7 @@ impl Session {
                 .iter()
                 .map(|w| WindowInfo {
                     name: w.name(),
-                    cwd: w.active_term_pane().and_then(|p| p.cwd()),
+                    cwd: w.label_cwd(),
                 })
                 .collect();
             (windows, inner.active_window as u32)
@@ -388,7 +395,7 @@ impl Session {
                 .iter()
                 .map(|w| WindowInfo {
                     name: w.name(),
-                    cwd: w.active_term_pane().and_then(|p| p.cwd()),
+                    cwd: w.label_cwd(),
                 })
                 .collect();
             (windows, inner.active_window as u32)
@@ -420,7 +427,7 @@ impl Session {
                 .iter()
                 .map(|w| WindowInfo {
                     name: w.name(),
-                    cwd: w.active_term_pane().and_then(|p| p.cwd()),
+                    cwd: w.label_cwd(),
                 })
                 .collect();
             (windows, inner.active_window as u32)

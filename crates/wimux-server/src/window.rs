@@ -142,6 +142,23 @@ impl Window {
         self.panes.get(&self.active).and_then(|s| s.term())
     }
 
+    /// cwd à afficher pour cette fenêtre (rail et libellé d'onglet) : celui du
+    /// volet terminal actif s'il en a un, sinon celui d'un autre volet
+    /// terminal de la fenêtre. Un volet NAVIGATEUR actif ne doit pas faire
+    /// disparaître le libellé (régression B1 : `split_web` rend le nouveau
+    /// volet actif, alors qu'un navigateur n'a pas de cwd).
+    pub fn label_cwd(&self) -> Option<String> {
+        let actif = self.active_term_pane().and_then(|p| p.cwd());
+        let mut autres_ids = self.pane_ids();
+        autres_ids.retain(|&id| id != self.active);
+        let autres = autres_ids
+            .into_iter()
+            .filter_map(|id| self.panes.get(&id))
+            .filter_map(|s| s.term())
+            .map(|p| p.cwd());
+        choisir_cwd(actif, autres)
+    }
+
     /// Volet situé à la position `(col, row)` (coordonnées de contenu, 0-based).
     pub fn pane_at(&self, col: u16, row: u16) -> Option<PaneId> {
         self.rects
@@ -502,6 +519,16 @@ fn contains_leaf(node: &Node, target: PaneId) -> bool {
         Node::Leaf(id) => *id == target,
         Node::Split { a, b, .. } => contains_leaf(a, target) || contains_leaf(b, target),
     }
+}
+
+/// Choisit le cwd à afficher : celui du volet actif s'il en a un, sinon le
+/// premier disponible parmi les autres (ordre déterministe, à l'appelant de
+/// fournir `autres` dans un ordre stable — `pane_ids()` trie déjà les ids).
+fn choisir_cwd(
+    actif: Option<String>,
+    mut autres: impl Iterator<Item = Option<String>>,
+) -> Option<String> {
+    actif.or_else(|| autres.find_map(|c| c))
 }
 
 /// Ajuste le ratio de la découpe pertinente pour redimensionner le volet actif.
@@ -896,6 +923,50 @@ mod tests {
         win.set_active(id1);
         assert!(win.active_term_pane().is_some());
         win.kill_all();
+    }
+
+    #[test]
+    fn choisir_cwd_prefere_le_volet_actif() {
+        let actif = Some("C:/actif".to_string());
+        let autres = vec![Some("C:/autre1".to_string()), Some("C:/autre2".to_string())];
+        assert_eq!(
+            choisir_cwd(actif, autres.into_iter()),
+            Some("C:/actif".to_string())
+        );
+    }
+
+    #[test]
+    fn choisir_cwd_retombe_sur_un_autre_volet_si_lactif_nen_a_pas() {
+        // C'est le cœur du correctif : le volet actif est un navigateur (pas
+        // de cwd), mais un autre volet TERMINAL de la fenêtre en a un.
+        let actif = None;
+        let autres = vec![None, Some("C:/repli".to_string())];
+        assert_eq!(
+            choisir_cwd(actif, autres.into_iter()),
+            Some("C:/repli".to_string())
+        );
+    }
+
+    #[test]
+    fn choisir_cwd_none_si_personne_nen_a() {
+        let actif = None;
+        let autres: Vec<Option<String>> = vec![None, None];
+        assert_eq!(choisir_cwd(actif, autres.into_iter()), None);
+    }
+
+    #[test]
+    fn choisir_cwd_est_deterministe_prend_le_premier_des_autres() {
+        // Avec plusieurs « autres » ayant un cwd, c'est le premier de l'ordre
+        // (trié en amont par l'appelant, cf. `pane_ids()`) qui gagne.
+        let actif = None;
+        let autres = vec![
+            Some("C:/premier".to_string()),
+            Some("C:/second".to_string()),
+        ];
+        assert_eq!(
+            choisir_cwd(actif, autres.into_iter()),
+            Some("C:/premier".to_string())
+        );
     }
 
     /// Aplatit les `PaneKind` d'un arbre de disposition (ordre non garanti).
