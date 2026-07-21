@@ -83,6 +83,15 @@ listen<[number, number[]]>("pane-output", (e) => {
 listen<string>("pane-error", (e) => {
   console.error("erreur serveur:", e.payload);
 });
+// Fix 2 : la connexion GUI persistante vient de mourir côté pont Tauri
+// (redémarrage du daemon — geste routinier sur ce projet). Le pont a déjà
+// remis sa connexion à `None` (voir `attach_session`, wimux-gui/src-tauri/
+// src/lib.rs) ; il ne reste qu'à redemander un attachement complet pour que
+// le prochain appel Tauri reconnecte au lieu de rester inerte pour toujours.
+listen("server-disconnected", () => {
+  console.warn("connexion serveur perdue, tentative de reconnexion...");
+  reattachActive();
+});
 
 // --- W2 : barre d'onglets (fenêtres de la session GUI-attachée) -------------
 type WindowInfo = { name: string | null; cwd: string | null };

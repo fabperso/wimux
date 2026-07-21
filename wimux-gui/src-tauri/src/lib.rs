@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use wimux_protocol::transport::{connect, user_pipe_name, PipeConn};
 use wimux_protocol::{
     recv, send, ClientMessage, Hello, HelloReply, ServerMessage, SplitDir, PROTOCOL_VERSION,
@@ -62,21 +62,36 @@ struct Bridge {
     /// `gui_write` évite côté serveur pour ses propres écritures ; il
     /// manquait le pendant côté client).
     ///
-    /// Ce même verrou sert aussi de garde d'initialisation pour
-    /// `attach_session` : la vérification « une connexion existe-t-elle
-    /// déjà ? » et toute la phase connexion/handshake/démarrage du thread
-    /// lecteur se font sous CE MÊME verrou, tenu sans interruption — sinon
-    /// deux appels concurrents à froid verraient tous deux `None`, ouvriraient
-    /// chacun leur connexion et démarreraient chacun leur thread lecteur, le
-    /// second écrasant la première sans jamais la fermer (fuite de thread +
-    /// événements dupliqués vers le frontend).
+    /// Fix 3 : ce verrou ne doit JAMAIS être tenu pendant une I/O réseau
+    /// (`connect`/`do_handshake`, ce dernier contenant un `recv` bloquant SANS
+    /// échéance). Si le verrou était tenu là, un daemon qui accepte la
+    /// connexion sans répondre au `Hello` bloquerait indéfiniment TOUTES les
+    /// commandes Tauri (elles passent toutes par `send_persistent`, qui prend
+    /// ce même verrou). C'est `init_lock`, ci-dessous, qui protège la phase
+    /// connexion/handshake — `write_lock` n'est repris que pour la
+    /// vérification et la publication, chacune brièvement.
     write_lock: Mutex<PersistentWriter>,
+
+    /// Fix 3 : garde d'initialisation dédiée à `attach_session`, DISTINCTE de
+    /// `write_lock`. Elle est tenue sans interruption sur TOUTE la phase
+    /// « vérifier qu'aucune connexion n'existe → connecter → handshake →
+    /// démarrer le thread lecteur → publier », ce qui est exactement ce qui
+    /// empêche deux appels concurrents à froid de voir tous deux `None` et
+    /// d'ouvrir chacun leur connexion (le TOCTOU que corrigeait déjà l'ancien
+    /// verrou unique). La différence avec l'ancien schéma : la connexion et le
+    /// handshake (I/O réseau potentiellement lente/bloquante) se font PENDANT
+    /// que `init_lock` est tenu mais SANS tenir `write_lock` — celui-ci n'est
+    /// repris que pour les deux instants brefs (lire l'état courant, puis
+    /// écrire le résultat), toujours sous `init_lock`, donc sans réintroduire
+    /// de fenêtre de course entre la vérification et la publication.
+    init_lock: Mutex<()>,
 }
 
 impl Default for Bridge {
     fn default() -> Self {
         Bridge {
             write_lock: Mutex::new(PersistentWriter(None)),
+            init_lock: Mutex::new(()),
         }
     }
 }
@@ -130,21 +145,41 @@ where
 #[tauri::command]
 fn attach_session(session: String, app: AppHandle, bridge: State<Bridge>) -> Result<(), String> {
     {
-        // Un seul garde sur TOUTE la phase vérification + initialisation :
-        // vérifier qu'aucune connexion n'existe encore, puis connecter, faire
-        // le handshake, démarrer le thread lecteur et publier le résultat,
-        // sans jamais relâcher le verrou entre ces étapes. C'est ce qui rend
-        // impossible la course où deux appels concurrents à froid verraient
-        // tous deux `None` et ouvriraient chacun leur connexion.
-        let mut guard = bridge.write_lock.lock().unwrap();
-        if guard.0.is_none() {
+        // Fix 3 : `init_lock` (et NON `write_lock`) sérialise TOUTE la phase
+        // vérification + connexion + handshake + démarrage du thread lecteur
+        // + publication. Il reste tenu sans interruption d'un bout à l'autre
+        // de ce bloc, ce qui rend impossible la course où deux appels
+        // concurrents à froid verraient tous deux « pas de connexion » et
+        // ouvriraient chacun la leur. `write_lock`, lui, n'est repris que
+        // brièvement (lecture de l'état, puis écriture du résultat) : la
+        // lente I/O réseau (`connect`/`do_handshake`, qui contient un `recv`
+        // bloquant sans échéance) ne le tient donc JAMAIS — sinon un daemon
+        // qui accepte la connexion sans répondre au `Hello` bloquerait
+        // indéfiniment toutes les autres commandes Tauri (`pane_input`,
+        // `split_pane`... qui passent toutes par `send_persistent`).
+        let _init = bridge.init_lock.lock().unwrap();
+
+        let deja_connecte = bridge.write_lock.lock().unwrap().0.is_some();
+        if !deja_connecte {
+            // AUCUN verrou tenu ici pendant l'I/O réseau (voir ci-dessus).
             let c = Arc::new(
                 connect(&user_pipe_name()).map_err(|_| "serveur wimux introuvable".to_string())?,
             );
             do_handshake(&c)?;
-            // Thread lecteur : démarré une seule fois, garanti par ce même
-            // verrou tenu sans interruption depuis la vérification ci-dessus.
-            // Il relaie snapshot/output/error au frontend.
+            // Thread lecteur : démarré une seule fois, garanti par `init_lock`
+            // tenu sans interruption depuis la vérification ci-dessus. Il
+            // relaie snapshot/output/error au frontend.
+            //
+            // Fix 2 : à la sortie de la boucle (EOF — typiquement un
+            // redémarrage du daemon, geste routinier sur ce projet), la
+            // connexion morte reste sinon publiée pour toujours : plus aucun
+            // `attach_session` ne reconnecterait (la garde ci-dessus verrait
+            // « déjà connecté »), et la GUI resterait inerte jusqu'à sa
+            // propre relance. On reprend donc le verrou pour republier
+            // `None`, mais SEULEMENT si la connexion encore publiée est bien
+            // CELLE-CI (comparaison de pointeur `Arc`) — un `attach_session`
+            // plus récent a pu entre-temps publier une connexion plus
+            // fraîche, qu'il ne faut surtout pas écraser.
             let reader = Arc::clone(&c);
             let app2 = app.clone();
             std::thread::spawn(move || {
@@ -169,11 +204,26 @@ fn attach_session(session: String, app: AppHandle, bridge: State<Bridge>) -> Res
                         _ => {}
                     }
                 }
+                // La boucle de lecture est sortie (EOF/erreur) : la connexion
+                // est morte. Remettre `None` pour qu'un futur `attach_session`
+                // reconnecte, mais seulement si personne n'a déjà publié une
+                // connexion plus récente à sa place.
+                if let Some(b) = app2.try_state::<Bridge>() {
+                    let mut guard = b.write_lock.lock().unwrap();
+                    if guard
+                        .0
+                        .as_ref()
+                        .is_some_and(|cur| Arc::ptr_eq(cur, &reader))
+                    {
+                        guard.0 = None;
+                    }
+                }
+                let _ = app2.emit("server-disconnected", ());
             });
-            guard.0 = Some(c);
+            bridge.write_lock.lock().unwrap().0 = Some(c);
         }
-    } // Garde relâché ICI : `send_persistent` reprend ce même verrou (`Mutex`
-      // std non réentrant) — l'imbriquer ici recréerait un interblocage.
+    } // `init_lock` relâché ICI ; `send_persistent` prend `write_lock`, un
+      // verrou DIFFÉRENT — pas de risque d'interblocage.
     send_persistent(&bridge, &ClientMessage::AttachGui { session })
 }
 
@@ -583,35 +633,36 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::UnsafeCell;
     use std::collections::HashSet;
     use std::time::Duration;
 
-    /// Puits d'octets partagé SANS AUCUNE synchronisation interne : plusieurs
-    /// threads peuvent y écrire « en même temps » sans qu'aucune exclusion
-    /// mutuelle ne les protège d'eux-mêmes. La seule protection attendue,
-    /// dans le test ci-dessous, est le `Mutex<W>` externe pris par
-    /// `send_serialise` — si on le retire, les écritures concurrentes
-    /// entrelacent réellement leurs octets et le flux accumulé devient
-    /// indécodable (voir la preuve consignée dans le rapport de revue).
-    struct RaceySink(UnsafeCell<Vec<u8>>);
-
-    // SAFETY : ce type n'est utilisé QUE derrière le `Mutex<RaceyWriter>`
-    // externe de `send_serialise` dans le chemin nominal du test ; il n'a
-    // volontairement aucune synchronisation propre, ce qui est précisément le
-    // point du test (prouver que c'est bien CE verrou-là qui sérialise).
-    unsafe impl Sync for RaceySink {}
+    /// Puits d'octets partagé (Fix 6) : verrouillé PAR APPEL À `write()`, et
+    /// non pas pour toute la durée d'un `send()` (qui fait DEUX `write_all`,
+    /// longueur puis corps). Les octets de deux `send` concurrents restent
+    /// donc parfaitement entrelaçables — c'est précisément ce que ce test
+    /// doit exercer — mais chaque `extend_from_slice` individuel reste une
+    /// opération atomique et sans data race : plus de comportement indéfini.
+    ///
+    /// AVANT ce correctif, ce puits était un `UnsafeCell<Vec<u8>>` planqué
+    /// derrière un `unsafe impl Sync` : sans le verrou EXTERNE de
+    /// `send_serialise`, deux `extend_from_slice` concurrents auraient été une
+    /// data race complète (réallocation concurrente du `Vec` → use-after-free
+    /// potentiel), pas un simple échec d'assertion propre. Un `Mutex` interne
+    /// prouve la même chose (l'entrelacement des TRAMES applicatives) sans
+    /// jamais franchir la ligne de l'UB, même si `send_serialise` était cassé.
+    struct RaceySink(Mutex<Vec<u8>>);
 
     struct RaceyWriter(Arc<RaceySink>);
 
     impl std::io::Write for RaceyWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut v = self.0 .0.lock().unwrap();
             // Élargit la fenêtre de course entre les deux `write_all` que fait
-            // `send` (longueur puis corps) : sans le verrou externe, un autre
-            // thread a largement le temps de s'intercaler ici.
+            // `send` (longueur puis corps) : sans le verrou EXTERNE de
+            // `send_serialise`, un autre thread a largement le temps de
+            // s'intercaler entre ces deux appels à `write` (chacun protégé
+            // individuellement ici, mais pas la paire).
             std::thread::sleep(Duration::from_micros(50));
-            // SAFETY : voir le commentaire sur `RaceySink`.
-            let v = unsafe { &mut *self.0 .0.get() };
             v.extend_from_slice(buf);
             Ok(buf.len())
         }
@@ -637,7 +688,7 @@ mod tests {
         const THREADS: u64 = 8;
         const PER_THREAD: u64 = 25;
 
-        let sink = Arc::new(RaceySink(UnsafeCell::new(Vec::new())));
+        let sink = Arc::new(RaceySink(Mutex::new(Vec::new())));
         let lock = Arc::new(Mutex::new(RaceyWriter(Arc::clone(&sink))));
 
         let mut handles = Vec::new();
@@ -658,9 +709,11 @@ mod tests {
             h.join().unwrap();
         }
 
-        // SAFETY : tous les threads écrivains ont fini (join ci-dessus) ; plus
-        // aucun accès concurrent n'est possible à ce stade.
-        let bytes = unsafe { &*sink.0.get() }.clone();
+        // Tous les threads écrivains ont fini (join ci-dessus) : plus aucun
+        // accès concurrent n'est possible à ce stade, mais on relit quand même
+        // via le `Mutex` (Fix 6) — plus besoin d'un commentaire SAFETY, il n'y
+        // a plus d'`unsafe` dans ce test.
+        let bytes = sink.0.lock().unwrap().clone();
         let mut cursor: &[u8] = &bytes;
         let mut seen = HashSet::new();
         while !cursor.is_empty() {
