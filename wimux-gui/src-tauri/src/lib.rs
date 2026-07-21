@@ -7,34 +7,92 @@ use wimux_protocol::{
     recv, send, ClientMessage, Hello, HelloReply, ServerMessage, SplitDir, PROTOCOL_VERSION,
 };
 
+/// Écrivain de la connexion GUI persistante. `None` tant qu'aucun
+/// `attach_session` n'a encore établi de connexion : écrire est alors un
+/// no-op silencieux (les commandes de volet appelées trop tôt ne doivent pas
+/// échouer bruyamment, elles n'ont simplement aucun effet).
+///
+/// Délègue sur `&PipeConn`, qui implémente `Write` sans exiger d'exclusivité
+/// côté OS (I/O overlappée, voir `transport.rs`) : lecture et écriture
+/// peuvent réellement se dérouler en parallèle sur le même handle. Le
+/// problème n'est donc pas l'accès concurrent au handle lui-même, mais
+/// l'entrelacement des trames applicatives que produiraient deux `send`
+/// concurrents (chacun fait DEUX `write_all` non atomiques : longueur puis
+/// corps). C'est ce que sérialise le `Mutex` qui enveloppe cet écrivain (voir
+/// `send_serialise`) — le verrou porte directement sur l'écrivain, si bien
+/// qu'aucun appelant ne peut écrire sans le prendre.
+struct PersistentWriter(Option<Arc<PipeConn>>);
+
+impl std::io::Write for PersistentWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match &self.0 {
+            // `&PipeConn` implémente `Write`, mais `.write()` prend `&mut
+            // self` : il faut donc une variable mutable (pas une simple
+            // expression `&**c`) pour pouvoir la reborrow mutablement, comme
+            // partout ailleurs dans ce fichier (`do_handshake`, `control`...).
+            Some(c) => {
+                let mut w: &PipeConn = c;
+                w.write(buf)
+            }
+            None => Ok(buf.len()),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &self.0 {
+            Some(c) => {
+                let mut w: &PipeConn = c;
+                w.flush()
+            }
+            None => Ok(()),
+        }
+    }
+}
+
 /// Connexion partagée au serveur wimux (écrivain).
-#[derive(Default)]
 struct Bridge {
-    conn: Mutex<Option<Arc<PipeConn>>>,
-    /// Sérialise TOUTES les écritures sur `conn` (connexion GUI persistante).
-    /// Chaque commande Tauri (pane_input, pane_resize, web_back, list_windows,
-    /// attach_session...) peut s'exécuter sur son propre thread, indépendamment
-    /// des autres : sans ce verrou, deux `send` concurrents entrelaceraient
-    /// leurs trames sur le même handle de pipe et désynchroniseraient le
-    /// protocole côté serveur (celui-ci `break`rait alors sa boucle de lecture
-    /// sur la trame illisible, coupant silencieusement tout flux futur — c'est
-    /// exactement le défaut que `gui_write` évite côté serveur pour ses propres
-    /// écritures ; il manquait le pendant côté client).
-    write_lock: Mutex<()>,
+    /// Sérialise TOUTES les écritures sur la connexion GUI persistante
+    /// (pane_input, pane_resize, web_back, list_windows, attach_session...) —
+    /// chaque commande Tauri peut s'exécuter sur son propre thread,
+    /// indépendamment des autres. Sans ce verrou, deux `send` concurrents
+    /// entrelaceraient leurs trames sur le même handle de pipe et
+    /// désynchroniseraient le protocole côté serveur (celui-ci `break`rait
+    /// alors sa boucle de lecture sur la trame illisible, coupant
+    /// silencieusement tout flux futur — c'est exactement le défaut que
+    /// `gui_write` évite côté serveur pour ses propres écritures ; il
+    /// manquait le pendant côté client).
+    ///
+    /// Ce même verrou sert aussi de garde d'initialisation pour
+    /// `attach_session` : la vérification « une connexion existe-t-elle
+    /// déjà ? » et toute la phase connexion/handshake/démarrage du thread
+    /// lecteur se font sous CE MÊME verrou, tenu sans interruption — sinon
+    /// deux appels concurrents à froid verraient tous deux `None`, ouvriraient
+    /// chacun leur connexion et démarreraient chacun leur thread lecteur, le
+    /// second écrasant la première sans jamais la fermer (fuite de thread +
+    /// événements dupliqués vers le frontend).
+    write_lock: Mutex<PersistentWriter>,
+}
+
+impl Default for Bridge {
+    fn default() -> Self {
+        Bridge {
+            write_lock: Mutex::new(PersistentWriter(None)),
+        }
+    }
+}
+
+/// Sérialise l'envoi d'un message sur `lock`, sous verrou. Générique sur
+/// l'écrivain (et non lié à `PipeConn`) pour rester testable indépendamment
+/// du pipe nommé réel : voir le module `tests` en bas de ce fichier, où un
+/// test de concurrence prouve que retirer ce verrou entrelace les trames.
+fn send_serialise<W: std::io::Write>(lock: &Mutex<W>, msg: &ClientMessage) -> Result<(), String> {
+    let mut w = lock.lock().unwrap();
+    send(&mut *w, msg).map_err(|e| e.to_string())
 }
 
 /// Envoie un message sur la connexion GUI persistante, sous `write_lock`.
-/// No-op silencieux si aucune connexion n'est encore établie (avant le premier
-/// `attach_session`) : les commandes de volet appelées trop tôt ne doivent pas
-/// échouer bruyamment, elles n'ont simplement aucun effet.
 fn send_persistent(bridge: &Bridge, msg: &ClientMessage) -> Result<(), String> {
-    let conn = bridge.conn.lock().unwrap().clone();
-    if let Some(conn) = conn {
-        let _g = bridge.write_lock.lock().unwrap();
-        let mut w: &PipeConn = &conn;
-        send(&mut w, msg).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    send_serialise(&bridge.write_lock, msg)
 }
 
 fn do_handshake(conn: &PipeConn) -> Result<(), String> {
@@ -71,19 +129,22 @@ where
 
 #[tauri::command]
 fn attach_session(session: String, app: AppHandle, bridge: State<Bridge>) -> Result<(), String> {
-    let existing = bridge.conn.lock().unwrap().clone();
-    // Le thread lecteur est démarré une seule fois, à la première connexion ;
-    // sa valeur de retour ne sert qu'à ce `match` (elle est déjà stockée dans
-    // `bridge.conn`), d'où le `_` : `send_persistent` relit `bridge.conn`.
-    let _conn = match existing {
-        Some(c) => c, // réutiliser : le thread lecteur tourne déjà
-        None => {
+    {
+        // Un seul garde sur TOUTE la phase vérification + initialisation :
+        // vérifier qu'aucune connexion n'existe encore, puis connecter, faire
+        // le handshake, démarrer le thread lecteur et publier le résultat,
+        // sans jamais relâcher le verrou entre ces étapes. C'est ce qui rend
+        // impossible la course où deux appels concurrents à froid verraient
+        // tous deux `None` et ouvriraient chacun leur connexion.
+        let mut guard = bridge.write_lock.lock().unwrap();
+        if guard.0.is_none() {
             let c = Arc::new(
                 connect(&user_pipe_name()).map_err(|_| "serveur wimux introuvable".to_string())?,
             );
             do_handshake(&c)?;
-            *bridge.conn.lock().unwrap() = Some(Arc::clone(&c));
-            // Thread lecteur (une seule fois) : relaie snapshot/output/error au frontend.
+            // Thread lecteur : démarré une seule fois, garanti par ce même
+            // verrou tenu sans interruption depuis la vérification ci-dessus.
+            // Il relaie snapshot/output/error au frontend.
             let reader = Arc::clone(&c);
             let app2 = app.clone();
             std::thread::spawn(move || {
@@ -109,9 +170,10 @@ fn attach_session(session: String, app: AppHandle, bridge: State<Bridge>) -> Res
                     }
                 }
             });
-            c
+            guard.0 = Some(c);
         }
-    };
+    } // Garde relâché ICI : `send_persistent` reprend ce même verrou (`Mutex`
+      // std non réentrant) — l'imbriquer ici recréerait un interblocage.
     send_persistent(&bridge, &ClientMessage::AttachGui { session })
 }
 
@@ -516,4 +578,118 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("erreur au lancement de wimux-gui");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::UnsafeCell;
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    /// Puits d'octets partagé SANS AUCUNE synchronisation interne : plusieurs
+    /// threads peuvent y écrire « en même temps » sans qu'aucune exclusion
+    /// mutuelle ne les protège d'eux-mêmes. La seule protection attendue,
+    /// dans le test ci-dessous, est le `Mutex<W>` externe pris par
+    /// `send_serialise` — si on le retire, les écritures concurrentes
+    /// entrelacent réellement leurs octets et le flux accumulé devient
+    /// indécodable (voir la preuve consignée dans le rapport de revue).
+    struct RaceySink(UnsafeCell<Vec<u8>>);
+
+    // SAFETY : ce type n'est utilisé QUE derrière le `Mutex<RaceyWriter>`
+    // externe de `send_serialise` dans le chemin nominal du test ; il n'a
+    // volontairement aucune synchronisation propre, ce qui est précisément le
+    // point du test (prouver que c'est bien CE verrou-là qui sérialise).
+    unsafe impl Sync for RaceySink {}
+
+    struct RaceyWriter(Arc<RaceySink>);
+
+    impl std::io::Write for RaceyWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // Élargit la fenêtre de course entre les deux `write_all` que fait
+            // `send` (longueur puis corps) : sans le verrou externe, un autre
+            // thread a largement le temps de s'intercaler ici.
+            std::thread::sleep(Duration::from_micros(50));
+            // SAFETY : voir le commentaire sur `RaceySink`.
+            let v = unsafe { &mut *self.0 .0.get() };
+            v.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `THREADS` threads envoient chacun `PER_THREAD` messages `PaneInput`
+    /// distincts vers un écrivain partagé, via `send_serialise`. On relit
+    /// ensuite le flux accumulé avec `recv` et on vérifie qu'on retrouve
+    /// EXACTEMENT `THREADS * PER_THREAD` trames décodables et cohérentes.
+    ///
+    /// Sans le verrou dans `send_serialise` (retiré temporairement pour
+    /// vérification manuelle — voir le rapport de revue), ce test échoue : le
+    /// flux entrelacé produit un nombre de trames incorrect ou un échec de
+    /// décodage postcard. C'est la preuve que ce test garde bien la
+    /// régression visée par le correctif (contrairement à l'ancien test
+    /// d'intégration mono-écrivain qui passait déjà avant le correctif).
+    #[test]
+    fn send_serialise_serialise_vraiment_les_ecritures_concurrentes() {
+        const THREADS: u64 = 8;
+        const PER_THREAD: u64 = 25;
+
+        let sink = Arc::new(RaceySink(UnsafeCell::new(Vec::new())));
+        let lock = Arc::new(Mutex::new(RaceyWriter(Arc::clone(&sink))));
+
+        let mut handles = Vec::new();
+        for t in 0..THREADS {
+            let lock = Arc::clone(&lock);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..PER_THREAD {
+                    let pane_id = t * PER_THREAD + i;
+                    let msg = ClientMessage::PaneInput {
+                        pane_id,
+                        bytes: format!("t{t}-m{i}").into_bytes(),
+                    };
+                    send_serialise(&lock, &msg).expect("send_serialise a échoué");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // SAFETY : tous les threads écrivains ont fini (join ci-dessus) ; plus
+        // aucun accès concurrent n'est possible à ce stade.
+        let bytes = unsafe { &*sink.0.get() }.clone();
+        let mut cursor: &[u8] = &bytes;
+        let mut seen = HashSet::new();
+        while !cursor.is_empty() {
+            let msg: ClientMessage =
+                recv(&mut cursor).expect("trame illisible : les écritures se sont entrelacées");
+            match msg {
+                ClientMessage::PaneInput { pane_id, bytes } => {
+                    let expected = {
+                        let t = pane_id / PER_THREAD;
+                        let i = pane_id % PER_THREAD;
+                        format!("t{t}-m{i}")
+                    };
+                    assert_eq!(
+                        String::from_utf8(bytes).unwrap(),
+                        expected,
+                        "contenu incohérent pour pane_id {pane_id}"
+                    );
+                    assert!(
+                        seen.insert(pane_id),
+                        "pane_id {pane_id} vu deux fois (trame dupliquée par l'entrelacement)"
+                    );
+                }
+                other => panic!("message inattendu : {other:?}"),
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            (THREADS * PER_THREAD) as usize,
+            "nombre de trames décodées incorrect : entrelacement suspecté"
+        );
+    }
 }

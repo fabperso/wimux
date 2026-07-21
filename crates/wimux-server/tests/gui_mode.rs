@@ -37,15 +37,21 @@ fn attach_gui_recoit_snapshot_puis_flux() {
     }
     let orx = spawn_reader(Arc::clone(&owner));
     // consommer Attached + attendre l'invite
+    // L'échéance est évaluée EN TÊTE de boucle (et non seulement dans le bras
+    // `Err`) : le volet produit des `Frame` en continu, donc si on ne
+    // vérifiait `deadline` qu'à l'échec du `recv_timeout`, un flux ininterrompu
+    // de messages ferait tourner la boucle indéfiniment au lieu d'échouer
+    // proprement (voir Fix 3 de la revue).
     let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
+    let mut got_frame = false;
+    while !got_frame && Instant::now() < deadline {
         match orx.recv_timeout(Duration::from_millis(200)) {
-            Ok(ServerMessage::Frame(_)) => break, // au moins une frame => shell demarre
+            Ok(ServerMessage::Frame(_)) => got_frame = true, // au moins une frame => shell demarre
             Ok(_) => {}
-            Err(_) if Instant::now() < deadline => {}
-            Err(_) => panic!("pas de frame"),
+            Err(_) => {}
         }
     }
+    assert!(got_frame, "pas de frame");
     std::thread::sleep(Duration::from_millis(1500)); // laisser l'invite s'etablir
 
     // Client GUI : s'attacher, recevoir le snapshot, injecter une commande.
@@ -66,14 +72,15 @@ fn attach_gui_recoit_snapshot_puis_flux() {
     // Le premier message GUI doit etre un PaneSnapshot.
     let pane_id = {
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
             match grx.recv_timeout(Duration::from_millis(200)) {
-                Ok(ServerMessage::PaneSnapshot { pane_id, .. }) => break pane_id,
+                Ok(ServerMessage::PaneSnapshot { pane_id, .. }) => found = Some(pane_id),
                 Ok(_) => {}
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => panic!("pas de PaneSnapshot"),
+                Err(_) => {}
             }
         }
+        found.expect("pas de PaneSnapshot")
     };
 
     // Injecter une commande via PaneInput ; la sortie doit revenir en PaneOutput.
@@ -92,19 +99,20 @@ fn attach_gui_recoit_snapshot_puis_flux() {
     let mut acc = String::new();
     let found = {
         let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
+        let mut ok = false;
+        while !ok && Instant::now() < deadline {
             match grx.recv_timeout(Duration::from_millis(200)) {
                 Ok(ServerMessage::PaneOutput { bytes, .. }) => {
                     acc.push_str(&String::from_utf8_lossy(&bytes));
                     if acc.contains("GUIOK") {
-                        break true;
+                        ok = true;
                     }
                 }
                 Ok(_) => {}
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => break false,
+                Err(_) => {}
             }
         }
+        ok
     };
     assert!(
         found,
@@ -158,14 +166,17 @@ fn bascule_gui_arrete_le_flux_precedent() {
     // Attendre le snapshot de A et capturer son pane_id.
     let pane_id_a = {
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(wimux_protocol::ServerMessage::PaneSnapshot { pane_id, .. }) => break pane_id,
+                Ok(wimux_protocol::ServerMessage::PaneSnapshot { pane_id, .. }) => {
+                    found = Some(pane_id)
+                }
                 Ok(_) => {}
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => panic!("pas de PaneSnapshot pour A"),
+                Err(_) => {}
             }
         }
+        found.expect("pas de PaneSnapshot pour A")
     };
 
     // Faire produire à A une sortie continue pendant plusieurs secondes, pour
@@ -207,14 +218,17 @@ fn bascule_gui_arrete_le_flux_precedent() {
     // différer de celui de A (volets distincts).
     let pane_id_b = {
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(wimux_protocol::ServerMessage::PaneSnapshot { pane_id, .. }) => break pane_id,
+                Ok(wimux_protocol::ServerMessage::PaneSnapshot { pane_id, .. }) => {
+                    found = Some(pane_id)
+                }
                 Ok(_) => {}
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => panic!("pas de snapshot après bascule sur B"),
+                Err(_) => {}
             }
         }
+        found.expect("pas de snapshot après bascule sur B")
     };
     assert_ne!(pane_id_a, pane_id_b, "A et B partagent le même pane_id");
 
@@ -383,14 +397,15 @@ fn attach_gui_session_inexistante_renvoie_erreur() {
     let rx = spawn_reader(Arc::clone(&conn));
     let got_error = {
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        let mut ok = false;
+        while !ok && Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(ServerMessage::Error(_)) => break true,
+                Ok(ServerMessage::Error(_)) => ok = true,
                 Ok(_) => {}
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => break false,
+                Err(_) => {}
             }
         }
+        ok
     };
     assert!(
         got_error,
@@ -531,14 +546,15 @@ fn setup_attached(pipe: &str, name: &str) -> (Arc<PipeConn>, Receiver<ServerMess
     }
     let orx = spawn_reader(Arc::clone(&owner));
     let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
+    let mut got_frame = false;
+    while !got_frame && Instant::now() < deadline {
         match orx.recv_timeout(Duration::from_millis(200)) {
-            Ok(ServerMessage::Frame(_)) => break,
+            Ok(ServerMessage::Frame(_)) => got_frame = true,
             Ok(_) => {}
-            Err(_) if Instant::now() < deadline => {}
-            Err(_) => panic!("pas de frame (shell non démarré)"),
+            Err(_) => {}
         }
     }
+    assert!(got_frame, "pas de frame (shell non démarré)");
     std::thread::sleep(Duration::from_millis(1000));
     // On laisse tomber `owner` : la session survit (détachée).
     let gui = Arc::new(connect_retry(pipe));
@@ -559,26 +575,26 @@ fn setup_attached(pipe: &str, name: &str) -> (Arc<PipeConn>, Receiver<ServerMess
 
 fn wait_layout(rx: &Receiver<ServerMessage>, secs: u64) -> (LayoutNode, u64) {
     let deadline = Instant::now() + Duration::from_secs(secs);
-    loop {
+    while Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(ServerMessage::WindowLayout { tree, active }) => return (tree, active),
             Ok(_) => {}
-            Err(_) if Instant::now() < deadline => {}
-            Err(_) => panic!("pas de WindowLayout"),
+            Err(_) => {}
         }
     }
+    panic!("pas de WindowLayout");
 }
 
 fn wait_window_list(rx: &Receiver<ServerMessage>, secs: u64) -> (Vec<WindowInfo>, u32) {
     let deadline = Instant::now() + Duration::from_secs(secs);
-    loop {
+    while Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(ServerMessage::WindowList { windows, active }) => return (windows, active),
             Ok(_) => {}
-            Err(_) if Instant::now() < deadline => {}
-            Err(_) => panic!("pas de WindowList"),
+            Err(_) => {}
         }
     }
+    panic!("pas de WindowList");
 }
 
 fn find_ratio(tree: &LayoutNode, node_id: u32) -> Option<f32> {
@@ -749,18 +765,19 @@ fn set_split_ratio_change_le_ratio() {
     // Récupérer le node_id du split.
     let node_id = {
         let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
             match grx.recv_timeout(Duration::from_millis(200)) {
                 Ok(ServerMessage::WindowLayout { tree, .. }) => {
                     if let LayoutNode::Split { node_id, .. } = tree {
-                        break node_id;
+                        found = Some(node_id);
                     }
                 }
                 Ok(_) => {}
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => panic!("pas de WindowLayout à un split"),
+                Err(_) => {}
             }
         }
+        found.expect("pas de WindowLayout à un split")
     };
 
     {
@@ -826,16 +843,17 @@ fn close_pane_retire_la_feuille() {
     // Capturer le nouvel id (snapshot != leaf).
     let new_id = {
         let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
             match grx.recv_timeout(Duration::from_millis(200)) {
                 Ok(ServerMessage::PaneSnapshot { pane_id, .. }) if pane_id != leaf => {
-                    break pane_id;
+                    found = Some(pane_id);
                 }
                 Ok(_) => {}
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => panic!("pas de snapshot du nouveau volet"),
+                Err(_) => {}
             }
         }
+        found.expect("pas de snapshot du nouveau volet")
     };
 
     {
@@ -845,18 +863,19 @@ fn close_pane_retire_la_feuille() {
     // Attendre un WindowLayout redevenu une feuille == leaf.
     let back_to_leaf = {
         let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
+        let mut result = None;
+        while result.is_none() && Instant::now() < deadline {
             match grx.recv_timeout(Duration::from_millis(200)) {
                 Ok(ServerMessage::WindowLayout { tree, .. }) => {
                     if let LayoutNode::Leaf { pane_id, .. } = tree {
-                        break pane_id == leaf;
+                        result = Some(pane_id == leaf);
                     }
                 }
                 Ok(_) => {}
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => break false,
+                Err(_) => {}
             }
         }
+        result.unwrap_or(false)
     };
     assert!(
         back_to_leaf,
@@ -952,14 +971,15 @@ fn attach_gui_persistent(pipe: &str, name: &str) -> (Arc<PipeConn>, Receiver<Ser
     }
     let rx = spawn_reader(Arc::clone(&gui));
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
+    let mut got_snapshot = false;
+    while !got_snapshot && Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(ServerMessage::PaneSnapshot { .. }) => break,
+            Ok(ServerMessage::PaneSnapshot { .. }) => got_snapshot = true,
             Ok(_) => {}
-            Err(_) if Instant::now() < deadline => {}
-            Err(_) => panic!("pas de PaneSnapshot pour {name}"),
+            Err(_) => {}
         }
     }
+    assert!(got_snapshot, "pas de PaneSnapshot pour {name}");
     (gui, rx)
 }
 
@@ -1027,14 +1047,15 @@ fn bascule_efface_activite() {
     }
     // Attendre le snapshot de B (bascule effective).
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
+    let mut got_snapshot = false;
+    while !got_snapshot && Instant::now() < deadline {
         match grx.recv_timeout(Duration::from_millis(200)) {
-            Ok(ServerMessage::PaneSnapshot { .. }) => break,
+            Ok(ServerMessage::PaneSnapshot { .. }) => got_snapshot = true,
             Ok(_) => {}
-            Err(_) if Instant::now() < deadline => {}
-            Err(_) => panic!("pas de snapshot après bascule sur B"),
+            Err(_) => {}
         }
     }
+    assert!(got_snapshot, "pas de snapshot après bascule sur B");
 
     // Regarder B efface son indicateur d'activité.
     assert!(
@@ -1452,16 +1473,20 @@ fn onglets_cycle_de_vie() {
     }
     let named = {
         let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
+        let mut got_list = false;
+        let mut found = None;
+        while !got_list && Instant::now() < deadline {
             match grx.recv_timeout(Duration::from_millis(200)) {
                 Ok(ServerMessage::WindowList { windows, .. }) => {
-                    break windows.first().and_then(|w| w.name.clone());
+                    found = windows.first().and_then(|w| w.name.clone());
+                    got_list = true;
                 }
                 Ok(_) => {}
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => panic!("pas de WindowList après RenameWindow"),
+                Err(_) => {}
             }
         }
+        assert!(got_list, "pas de WindowList après RenameWindow");
+        found
     };
     assert_eq!(named.as_deref(), Some("build"));
 
@@ -1592,7 +1617,8 @@ fn cwd_et_branche_via_osc7() {
     let _ = std::fs::remove_dir_all(&repo);
 }
 
-// --- B1 : reproduction du bug « retour arrière » d'un volet navigateur ----
+// --- B1 : non-régression du chemin serveur « retour arrière » d'un volet
+//     navigateur (ne reproduit pas le défaut de concurrence, voir plus bas) --
 
 /// Cherche la feuille `pane_id` dans l'arbre et renvoie son URL si c'est un
 /// volet navigateur (`None` si l'id est absent ou si c'est un terminal).
@@ -1613,15 +1639,27 @@ fn find_web_url(tree: &LayoutNode, pane_id: u64) -> Option<String> {
     }
 }
 
-/// Rejoue exactement la séquence GUI décrite dans le rapport de bug :
-/// ouvrir un volet navigateur, naviguer (page1 -> page2, ça marche selon le
-/// rapport), puis "Précédent" (qui, d'après le rapport, ne fait rien).
+/// Test de non-régression du chemin serveur historique `WebBack` : rejoue,
+/// **directement via le pipe** (sans passer par le pont Tauri), la séquence
+/// ouvrir un volet navigateur / naviguer / revenir en arrière.
+///
+/// AVERTISSEMENT (revue de suivi, Fix 1) : ce test avait été écrit à l'origine
+/// pour reproduire un bug de « retour arrière » côté GUI ; son nom laissait
+/// entendre qu'il en était la reproduction. Ce n'est pas le cas — il n'utilise
+/// qu'une seule connexion, un seul écrivain, aucune écriture concurrente n'est
+/// possible ici. Le diagnostic a montré que ce chemin serveur est sain (voir
+/// `.superpowers/sdd/bug-retour-report.md`) et que le vrai défaut était une
+/// absence de sérialisation des écritures côté pont Tauri
+/// (`wimux-gui/src-tauri/src/lib.rs`, corrigé par `send_persistent`). Ce test
+/// reste utile comme non-régression du chemin `WebBack`/historique, mais ne
+/// couvre PAS le défaut de concurrence — voir le test de concurrence dans
+/// `wimux-gui/src-tauri/src/lib.rs` pour celui-ci.
 ///
 /// Le test consigne (`eprintln!`) chaque message poussé par le serveur après
 /// `WebBack`, pour qu'on puisse voir EXACTEMENT ce qui arrive sur le pipe côté
 /// serveur, indépendamment de tout défaut frontend.
 #[test]
-fn web_back_revient_a_l_url_precedente_via_le_pipe() {
+fn webback_via_pipe_ramene_l_url_precedente() {
     let pipe = format!(r"\\.\pipe\wimux-test-{}-webback", std::process::id());
     start_daemon(&pipe);
     let (gui, grx) = setup_attached(&pipe, "WB");
@@ -1645,14 +1683,15 @@ fn web_back_revient_a_l_url_precedente_via_le_pipe() {
     }
     let pane_id = {
         let deadline = Instant::now() + Duration::from_secs(6);
-        loop {
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
             match grx.recv_timeout(Duration::from_millis(200)) {
-                Ok(ServerMessage::PaneSpawned { pane_id }) => break pane_id,
+                Ok(ServerMessage::PaneSpawned { pane_id }) => found = Some(pane_id),
                 Ok(other) => eprintln!("[OpenWebPane] message ignoré : {other:?}"),
-                Err(_) if Instant::now() < deadline => {}
-                Err(_) => panic!("pas de PaneSpawned après OpenWebPane"),
+                Err(_) => {}
             }
         }
+        found.expect("pas de PaneSpawned après OpenWebPane")
     };
 
     // 2) WebNavigate { pane, url: "http://b/" } -> un WindowLayout doit suivre,
@@ -1693,10 +1732,10 @@ fn web_back_revient_a_l_url_precedente_via_le_pipe() {
         "après WebNavigate, le WindowLayout devrait montrer http://b/"
     );
 
-    // 3) WebBack { pane } -> LE CŒUR DE LA REPRO : d'après le rapport, cliquer
-    //    Précédent dans la GUI ne fait rien. On consigne TOUT ce qui arrive
-    //    après l'envoi, dans l'ordre, pour voir précisément ce qui diffère de
-    //    l'attendu (un WindowLayout avec la feuille revenue sur http://a/).
+    // 3) WebBack { pane } -> le point vérifié par ce test de non-régression :
+    //    le serveur doit répondre par un WindowLayout dont la feuille est
+    //    revenue sur http://a/. On consigne TOUT ce qui arrive après l'envoi,
+    //    dans l'ordre, pour un diagnostic immédiat en cas d'échec.
     {
         let mut w: &PipeConn = &gui;
         send(
