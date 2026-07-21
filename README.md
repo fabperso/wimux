@@ -92,7 +92,7 @@ Un volet de la disposition peut être un navigateur : bouton 🌐 sur la barre d
 volet terminal, ou `wimux browser open --url http://localhost:5173/`. Le volet est
 possédé par le serveur : il **survit au redémarrage de la GUI**, avec son URL.
 
-Deux limites, assumées :
+Trois limites, assumées :
 
 - **Certains sites refusent l'affichage en cadre** (en-tête `X-Frame-Options` ou
   `CSP frame-ancestors`) et resteront blancs. Ce refus n'est pas détectable de
@@ -103,6 +103,13 @@ Deux limites, assumées :
   posées via la barre d'adresse ou l'ouverture du volet — pas celui du site. Les
   navigations faites *à l'intérieur* de la page (clic sur un lien) ne nous sont pas
   visibles quand elle est d'une autre origine.
+- **Reparenter l'iframe recharge la page.** `PaneManager.renderLayout` reconstruit
+  le DOM (`mount.replaceChildren(root)`) à chaque changement structurel de la
+  disposition — découpe, fermeture, bascule d'onglet, ré-attache. Or déplacer un
+  `<iframe>` existant vers un nouveau parent détruit son contexte de navigation :
+  la page se recharge intégralement, avec perte de l'état applicatif et du
+  défilement. Ce n'est pas corrigé (il faudrait déplacer les nœuds DOM existants
+  au lieu de reconstruire l'arbre) — seulement documenté ici honnêtement.
 
 ## Résumé du plan
 
