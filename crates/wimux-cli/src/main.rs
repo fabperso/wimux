@@ -205,11 +205,6 @@ mod batch {
     }
 
     /// Extrait `-g <group>` et `-i <index>` (ou `-s <session>`).
-    ///
-    /// Non utilisée avant la Task 8 (verbes `review`/`diff`/`pr`) : autorisée à
-    /// rester non appelée dans cette task pour que le module compile déjà avec
-    /// sa forme finale.
-    #[allow(dead_code)]
     pub fn parse_target(
         args: &[String],
     ) -> (Option<String>, Option<u32>, Option<String>, Vec<String>) {
@@ -913,18 +908,138 @@ fn batch_list() -> io::Result<()> {
     }
 }
 
-// TODO(Task 8) : stubs temporaires, remplacés par l'implémentation réelle de
-// `review`/`diff`/`pr` (revue agrégée d'un lot d'agents).
-fn batch_review(_args: &[String]) -> io::Result<()> {
-    Err(io::Error::other(
-        "wimux batch review : implémenté en Task 8",
-    ))
+/// Résout la cible en nom de session : `-s <session>` direct, sinon
+/// `-g <group> -i <index>` via `ReviewBatch`.
+fn resolve_agent(
+    group: Option<String>,
+    index: Option<u32>,
+    session: Option<String>,
+) -> io::Result<String> {
+    if let Some(s) = session {
+        return Ok(s);
+    }
+    let (Some(group), Some(index)) = (group, index) else {
+        return Err(io::Error::other(
+            "cible manquante : passez -s <session> ou -g <group> -i <index>",
+        ));
+    };
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(
+        &mut w,
+        &ClientMessage::ReviewBatch {
+            group: group.clone(),
+        },
+    )?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::BatchReview(v) => v
+            .into_iter()
+            .find(|a| a.index == index)
+            .map(|a| a.session)
+            .ok_or_else(|| {
+                io::Error::other(format!("aucun agent d'index {index} dans le lot {group}"))
+            }),
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
 }
-fn batch_diff(_args: &[String]) -> io::Result<()> {
-    Err(io::Error::other("wimux batch diff : implémenté en Task 8"))
+
+fn batch_review(args: &[String]) -> io::Result<()> {
+    let (group, _, _, _) = batch::parse_target(args);
+    let group = group.ok_or_else(|| io::Error::other("usage : wimux batch review -g <group>"))?;
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::ReviewBatch { group })?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::BatchReview(v) => {
+            let items: Vec<String> = v
+                .iter()
+                .map(|a| {
+                    let status = a
+                        .status
+                        .map(|s| format!("\"{s:?}\""))
+                        .unwrap_or_else(|| "null".into());
+                    format!(
+                        "{{\"session\":\"{}\",\"index\":{},\"branch\":\"{}\",\"status\":{},\
+                         \"files_changed\":{},\"insertions\":{},\"deletions\":{},\
+                         \"untracked\":{},\"has_commits\":{}}}",
+                        agent::json_escape(&a.session),
+                        a.index,
+                        agent::json_escape(&a.branch),
+                        status,
+                        a.files_changed,
+                        a.insertions,
+                        a.deletions,
+                        a.untracked,
+                        a.has_commits
+                    )
+                })
+                .collect();
+            println!("[{}]", items.join(","));
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
 }
-fn batch_pr(_args: &[String]) -> io::Result<()> {
-    Err(io::Error::other("wimux batch pr : implémenté en Task 8"))
+
+fn batch_diff(args: &[String]) -> io::Result<()> {
+    let (group, index, session, _) = batch::parse_target(args);
+    let session = resolve_agent(group, index, session)?;
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::DiffAgent { session })?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::AgentDiff(text) => {
+            println!("{text}");
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn batch_pr(args: &[String]) -> io::Result<()> {
+    let (group, index, session, rest) = batch::parse_target(args);
+    let session = resolve_agent(group, index, session)?;
+    // --title / --body sont lus dans le reliquat.
+    let (mut title, mut body) = (None, None);
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--title" => {
+                title = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--body" => {
+                body = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(
+        &mut w,
+        &ClientMessage::OpenPr {
+            session,
+            title,
+            body,
+        },
+    )?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::PrOpened { url } => {
+            println!("{{\"url\":\"{}\"}}", agent::json_escape(&url));
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
 }
 
 /// Traduit des jetons de touches en octets.
@@ -1000,6 +1115,7 @@ fn print_help() {
              ls                  Liste les sessions (alias : list-sessions)\n    \
              send-keys -t <nom> <touches...>  Injecte des frappes (scriptable)\n    \
              agent <sous-cmd>    Orchestration d'agents (spawn/list/logs/capture/send/kill/whoami)\n    \
+             batch <sous-cmd>    Lots d'agents (create/list/review/diff/pr)\n    \
              kill-session <nom>  Termine une session\n    \
              kill-server         Arrête le serveur et toutes les sessions\n\
          \n\
