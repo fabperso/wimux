@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use common::*;
 use wimux_protocol::transport::PipeConn;
 use wimux_protocol::{
-    ClientMessage, LayoutNode, ServerMessage, SessionInfo, SplitDir, WindowInfo, recv, send,
+    ClientMessage, LayoutNode, PaneKind, ServerMessage, SessionInfo, SplitDir, WindowInfo, recv,
+    send,
 };
 
 #[test]
@@ -1589,4 +1590,159 @@ fn cwd_et_branche_via_osc7() {
     }
     std::thread::sleep(Duration::from_millis(200));
     let _ = std::fs::remove_dir_all(&repo);
+}
+
+// --- B1 : reproduction du bug « retour arrière » d'un volet navigateur ----
+
+/// Cherche la feuille `pane_id` dans l'arbre et renvoie son URL si c'est un
+/// volet navigateur (`None` si l'id est absent ou si c'est un terminal).
+fn find_web_url(tree: &LayoutNode, pane_id: u64) -> Option<String> {
+    match tree {
+        LayoutNode::Leaf { pane_id: id, kind } => {
+            if *id != pane_id {
+                return None;
+            }
+            match kind {
+                PaneKind::Web { url } => Some(url.clone()),
+                PaneKind::Terminal => None,
+            }
+        }
+        LayoutNode::Split { a, b, .. } => {
+            find_web_url(a, pane_id).or_else(|| find_web_url(b, pane_id))
+        }
+    }
+}
+
+/// Rejoue exactement la séquence GUI décrite dans le rapport de bug :
+/// ouvrir un volet navigateur, naviguer (page1 -> page2, ça marche selon le
+/// rapport), puis "Précédent" (qui, d'après le rapport, ne fait rien).
+///
+/// Le test consigne (`eprintln!`) chaque message poussé par le serveur après
+/// `WebBack`, pour qu'on puisse voir EXACTEMENT ce qui arrive sur le pipe côté
+/// serveur, indépendamment de tout défaut frontend.
+#[test]
+fn web_back_revient_a_l_url_precedente_via_le_pipe() {
+    let pipe = format!(r"\\.\pipe\wimux-test-{}-webback", std::process::id());
+    start_daemon(&pipe);
+    let (gui, grx) = setup_attached(&pipe, "WB");
+
+    // Consommer le layout initial (feuille terminal) avant d'ouvrir le volet web.
+    let _ = wait_layout(&grx, 6);
+
+    // 1) OpenWebPane { url: "http://a/" } -> PaneSpawned { pane_id }.
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::OpenWebPane {
+                session: String::new(),
+                from_pane: None,
+                dir: SplitDir::LeftRight,
+                url: "http://a/".into(),
+            },
+        )
+        .unwrap();
+    }
+    let pane_id = {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            match grx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ServerMessage::PaneSpawned { pane_id }) => break pane_id,
+                Ok(other) => eprintln!("[OpenWebPane] message ignoré : {other:?}"),
+                Err(_) if Instant::now() < deadline => {}
+                Err(_) => panic!("pas de PaneSpawned après OpenWebPane"),
+            }
+        }
+    };
+
+    // 2) WebNavigate { pane, url: "http://b/" } -> un WindowLayout doit suivre,
+    //    reflétant la feuille web sur http://b/ (ceci fonctionne d'après le
+    //    rapport : "la page change bien -> la navigation fonctionne").
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::WebNavigate {
+                session: String::new(),
+                pane: pane_id,
+                url: "http://b/".into(),
+            },
+        )
+        .unwrap();
+    }
+    let after_navigate = {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
+            match grx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ServerMessage::WindowLayout { tree, .. }) => {
+                    eprintln!("[WebNavigate] WindowLayout reçu : {tree:?}");
+                    if let Some(url) = find_web_url(&tree, pane_id) {
+                        found = Some(url);
+                    }
+                }
+                Ok(other) => eprintln!("[WebNavigate] message reçu : {other:?}"),
+                Err(_) => {}
+            }
+        }
+        found
+    };
+    assert_eq!(
+        after_navigate.as_deref(),
+        Some("http://b/"),
+        "après WebNavigate, le WindowLayout devrait montrer http://b/"
+    );
+
+    // 3) WebBack { pane } -> LE CŒUR DE LA REPRO : d'après le rapport, cliquer
+    //    Précédent dans la GUI ne fait rien. On consigne TOUT ce qui arrive
+    //    après l'envoi, dans l'ordre, pour voir précisément ce qui diffère de
+    //    l'attendu (un WindowLayout avec la feuille revenue sur http://a/).
+    {
+        let mut w: &PipeConn = &gui;
+        send(
+            &mut w,
+            &ClientMessage::WebBack {
+                session: String::new(),
+                pane: pane_id,
+            },
+        )
+        .unwrap();
+    }
+    let mut trace: Vec<String> = Vec::new();
+    let after_back = {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
+            match grx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ServerMessage::WindowLayout { tree, active }) => {
+                    let url = find_web_url(&tree, pane_id);
+                    trace.push(format!(
+                        "WindowLayout {{ active: {active}, url_du_volet: {url:?}, tree: {tree:?} }}"
+                    ));
+                    if let Some(u) = url {
+                        found = Some(u);
+                    }
+                }
+                Ok(other) => trace.push(format!("{other:?}")),
+                Err(_) => {}
+            }
+        }
+        found
+    };
+    eprintln!("--- Messages reçus après WebBack (dans l'ordre) ---");
+    for line in &trace {
+        eprintln!("  {line}");
+    }
+    if trace.is_empty() {
+        eprintln!("  (AUCUN message reçu après WebBack dans le délai imparti)");
+    }
+    assert_eq!(
+        after_back.as_deref(),
+        Some("http://a/"),
+        "après WebBack, le WindowLayout devrait montrer http://a/ (retour). Trace complète : {trace:#?}"
+    );
+
+    let mut w: &PipeConn = &gui;
+    let _ = send(&mut w, &ClientMessage::Kill { name: "WB".into() });
+    std::thread::sleep(Duration::from_millis(200));
 }
