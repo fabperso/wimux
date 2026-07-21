@@ -443,11 +443,26 @@ impl Session {
 
     /// Frappe GUI vers le volet DÉSIGNÉ de la fenêtre active (repli : volet actif
     /// si l'id est introuvable, ex. course avec une fermeture).
+    ///
+    /// Le repli sur le volet actif ne doit jouer QUE si `pane_id` est vraiment
+    /// introuvable (course avec une fermeture) — pas si c'est un volet
+    /// NAVIGATEUR de cette fenêtre : `w.pane(pane_id)` renvoie `None` dans les
+    /// deux cas (il ne connaît que les terminaux), donc sans ce distinguo une
+    /// frappe destinée à un navigateur serait routée vers le terminal actif au
+    /// lieu d'être ignorée.
     pub fn gui_input(&self, pane_id: u64, bytes: &[u8]) {
         let pane = {
             let inner = self.inner.lock().unwrap();
             let win = inner.windows.get(inner.active_window);
-            win.and_then(|w| w.pane(pane_id).or_else(|| w.active_term_pane()))
+            win.and_then(|w| {
+                w.pane(pane_id).or_else(|| {
+                    if w.contains(pane_id) {
+                        None
+                    } else {
+                        w.active_term_pane()
+                    }
+                })
+            })
         };
         if let Some(pane) = pane {
             pane.send_input(bytes);
@@ -601,7 +616,13 @@ impl Session {
     ///
     /// Comme `spawn_pane`, on découpe la fenêtre où se trouve réellement
     /// `from_pane`, pour que le navigateur apparaisse à côté de son demandeur.
+    ///
+    /// SÉCURITÉ : refuse toute URL dont le schéma n'est pas `http(s)` — voir
+    /// `url_autorisee`.
     pub fn open_web_pane(&self, from_pane: Option<u64>, dir: SplitDir, url: String) -> Option<u64> {
+        if !url_autorisee(&url) {
+            return None;
+        }
         let web = Arc::new(crate::webpane::WebPane::new(
             crate::pane::next_pane_id(),
             url,
@@ -627,7 +648,13 @@ impl Session {
 
     /// B1 : fait naviguer un volet navigateur. `false` si l'id n'est pas un
     /// volet navigateur de cette session.
+    ///
+    /// SÉCURITÉ : refuse toute URL dont le schéma n'est pas `http(s)` — voir
+    /// `url_autorisee`. Dans ce cas l'URL courante du volet n'est PAS modifiée.
     pub fn web_navigate(&self, pane_id: u64, url: String) -> bool {
+        if !url_autorisee(&url) {
+            return false;
+        }
         let Some(web) = self.find_web(pane_id) else {
             return false;
         };
@@ -718,6 +745,13 @@ impl Session {
     /// A1 : ferme le volet `pane_id` (dans quelque fenêtre que ce soit). Retire la
     /// fenêtre si elle devient vide. `false` si l'id est introuvable.
     ///
+    /// B1 : porte sur `win.contains` (et non `win.pane`) pour fermer aussi bien
+    /// un volet TERMINAL qu'un volet NAVIGATEUR — `win.pane` ne reconnaît que les
+    /// terminaux, et un volet navigateur qu'on ne peut jamais fermer serait un
+    /// volet fantôme qu'un agent aurait créé sans pouvoir le refermer.
+    /// `Window::close_pane` gère déjà les deux natures (il ne tue le processus
+    /// que pour un terminal).
+    ///
     /// Purge best-effort du journal (spec : « purge best-effort au kill ») : le
     /// chemin est capturé AVANT la fermeture (pendant qu'on peut encore atteindre
     /// le volet), puis le fichier est supprimé APRÈS — sans jamais faire échouer
@@ -728,8 +762,9 @@ impl Session {
             let mut hit = None;
             let mut log_path = None;
             for (wi, win) in inner.windows.iter_mut().enumerate() {
-                if let Some(pane) = win.pane(pane_id) {
-                    log_path = pane.log_path();
+                if win.contains(pane_id) {
+                    // `None` pour un volet navigateur (pas de journal à purger).
+                    log_path = win.pane(pane_id).and_then(|p| p.log_path());
                     let empty = win.close_pane(pane_id);
                     hit = Some((wi, empty));
                     break;
@@ -1276,6 +1311,25 @@ pub fn osc7_prompt_injection(shell: &str) -> Option<Vec<String>> {
     } else {
         None
     }
+}
+
+/// N'autorise, pour un volet navigateur, qu'une URL de schéma `http://` ou
+/// `https://` (comparaison insensible à la casse).
+///
+/// POURQUOI : cette URL est posée dans le `src` d'un `<iframe>` de la GUI Tauri
+/// (`tauri.conf.json` a `csp: null` et `withGlobalTauri: true`). Une URL de
+/// schéma `javascript:` posée en `src` d'iframe s'exécute en HÉRITANT DE
+/// L'ORIGINE DU PARENT (contrairement à une iframe HTTP cross-origin, isolée) :
+/// le script atteindrait donc `parent.__TAURI__.core.invoke` et toute la
+/// surface de commandes de l'application (`kill_session`, `create_agent`, …).
+/// Aujourd'hui l'URL vient de l'utilisateur ou de la CLI locale, mais la phase
+/// B2 fera poser des URL par un agent à partir de contenu lu sur le web — sans
+/// ce garde-fou ce serait un chemin d'exécution de commandes hôte piloté par du
+/// contenu non fiable. Ce filtre doit être appliqué aux DEUX points d'entrée
+/// (`open_web_pane` et `web_navigate`) car la CLI n'entre pas par le frontend.
+fn url_autorisee(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 /// Spawn d'un volet shell avec injection OSC 7 conditionnelle (PowerShell/pwsh).
@@ -1857,6 +1911,115 @@ mod tests {
         assert!(
             layout_contient_web(&tree, id, "http://persist/2"),
             "après ré-attache, le volet et son URL courante sont retrouvés : {tree:?}"
+        );
+        s.kill();
+    }
+
+    // --- Fix 1 (sécurité) : validation du schéma d'URL --------------------
+
+    #[test]
+    fn url_autorisee_accepte_http_et_https() {
+        assert!(url_autorisee("http://a/"));
+        assert!(url_autorisee("https://a/"));
+    }
+
+    #[test]
+    fn url_autorisee_refuse_javascript_meme_en_majuscules() {
+        assert!(!url_autorisee("javascript:alert(1)"));
+        assert!(
+            !url_autorisee("JavaScript:alert(1)"),
+            "le schéma en majuscules doit aussi être refusé"
+        );
+    }
+
+    #[test]
+    fn open_web_pane_refuse_un_schema_javascript() {
+        let s = Session::new("secu1".into(), 80, 24, "cmd.exe").unwrap();
+        assert!(
+            s.open_web_pane(None, SplitDir::LeftRight, "javascript:alert(1)".into())
+                .is_none(),
+            "un schéma javascript: ne doit jamais créer de volet navigateur"
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn open_web_pane_accepte_http_et_https() {
+        let s = Session::new("secu2".into(), 80, 24, "cmd.exe").unwrap();
+        assert!(
+            s.open_web_pane(None, SplitDir::LeftRight, "http://a/".into())
+                .is_some()
+        );
+        s.kill();
+        let s2 = Session::new("secu3".into(), 80, 24, "cmd.exe").unwrap();
+        assert!(
+            s2.open_web_pane(None, SplitDir::LeftRight, "https://a/".into())
+                .is_some()
+        );
+        s2.kill();
+    }
+
+    #[test]
+    fn web_navigate_refuse_un_schema_javascript_et_ne_change_pas_l_url() {
+        let s = Session::new("secu4".into(), 80, 24, "cmd.exe").unwrap();
+        let id = s
+            .open_web_pane(None, SplitDir::LeftRight, "http://a/".into())
+            .unwrap();
+        assert!(!s.web_navigate(id, "javascript:alert(1)".into()));
+        let (tree, _) = s.window_layout().unwrap();
+        assert!(
+            layout_contient_web(&tree, id, "http://a/"),
+            "l'URL courante ne doit pas avoir changé après un refus : {tree:?}"
+        );
+        s.kill();
+    }
+
+    // --- Fix 2 : gui_input ne confond plus « volet inconnu » et « volet
+    // navigateur » ---------------------------------------------------------
+
+    #[test]
+    fn gui_input_vers_un_volet_navigateur_nest_pas_route_au_terminal_actif() {
+        let s = Session::new("gi".into(), 80, 24, "cmd.exe").unwrap();
+        let term_id = match s.window_layout().unwrap().0 {
+            LayoutNode::Leaf { pane_id, .. } => pane_id,
+            _ => panic!("une session neuve n'a qu'un volet"),
+        };
+        let web_id = s
+            .open_web_pane(None, SplitDir::LeftRight, "http://a/".into())
+            .unwrap();
+        // Le volet navigateur vient de devenir actif (split_web) ; on refocalise
+        // le terminal pour reproduire le cas où le volet navigateur n'est PAS
+        // le volet actif de la fenêtre (ex. l'utilisateur a reporté le focus
+        // ailleurs sans jamais avoir pu focaliser l'iframe, cf. Fix 3).
+        s.gui_focus(term_id);
+
+        s.gui_input(web_id, b"PAYLOAD");
+        // L'ancien comportement retombait sur le terminal actif : on vérifie que
+        // ce n'est plus le cas.
+        std::thread::sleep(Duration::from_millis(300));
+        let txt = s.capture_pane(term_id).unwrap();
+        assert!(
+            !txt.contains("PAYLOAD"),
+            "une frappe adressée à un volet navigateur ne doit pas atteindre le terminal actif : {txt}"
+        );
+        s.kill();
+    }
+
+    // --- Fix 3 : kill_pane ferme aussi un volet navigateur -----------------
+
+    #[test]
+    fn kill_pane_ferme_un_volet_navigateur() {
+        let s = Session::new("kw".into(), 80, 24, "cmd.exe").unwrap();
+        let id = s
+            .open_web_pane(None, SplitDir::LeftRight, "http://a/".into())
+            .unwrap();
+        assert!(
+            s.kill_pane(id),
+            "kill_pane doit trouver et fermer un volet navigateur"
+        );
+        assert!(
+            s.capture_pane(id).is_none(),
+            "le volet navigateur ne doit plus être trouvable après kill_pane"
         );
         s.kill();
     }
