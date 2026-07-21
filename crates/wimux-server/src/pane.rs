@@ -54,6 +54,12 @@ static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 /// Identifiant unique de volet.
 pub type PaneId = u64;
 
+/// Alloue le prochain identifiant de volet. Partagé par les volets terminal et
+/// les volets navigateur (B1) : les ids sont uniques toutes natures confondues.
+pub fn next_pane_id() -> PaneId {
+    NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Contexte de spawn d'un volet (A1) : le nom de session (pour l'env de contexte)
 /// et un drapeau de journalisation (posé pour les volets agents).
 #[derive(Clone)]
@@ -510,7 +516,7 @@ impl Pane {
         let cols = cols.max(1);
         let rows = rows.max(1);
         // Allouer l'id AVANT la CommandBuilder pour pouvoir l'injecter en env.
-        let id = NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed);
+        let id = next_pane_id();
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {

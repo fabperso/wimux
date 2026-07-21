@@ -596,14 +596,91 @@ impl Session {
         Some(new_id)
     }
 
+    /// B1 : ouvre un volet NAVIGATEUR en découpant depuis `from_pane` (défaut :
+    /// volet actif de la fenêtre active). Renvoie l'id du volet créé.
+    ///
+    /// Comme `spawn_pane`, on découpe la fenêtre où se trouve réellement
+    /// `from_pane`, pour que le navigateur apparaisse à côté de son demandeur.
+    pub fn open_web_pane(&self, from_pane: Option<u64>, dir: SplitDir, url: String) -> Option<u64> {
+        let web = Arc::new(crate::webpane::WebPane::new(
+            crate::pane::next_pane_id(),
+            url,
+        ));
+        let new_id = web.id;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let target_window = from_pane
+                .and_then(|id| inner.windows.iter().position(|w| w.contains(id)))
+                .unwrap_or(inner.active_window);
+            let win = inner.windows.get_mut(target_window)?;
+            let target = from_pane
+                .filter(|id| win.contains(*id))
+                .unwrap_or_else(|| win.active_pane_id());
+            win.split_web(target, dir, Arc::clone(&web));
+            let area = content_area(inner.cols, inner.rows);
+            inner.windows[target_window].reflow(area);
+        }
+        self.bump_layout_rev();
+        self.notifier.bump();
+        Some(new_id)
+    }
+
+    /// B1 : fait naviguer un volet navigateur. `false` si l'id n'est pas un
+    /// volet navigateur de cette session.
+    pub fn web_navigate(&self, pane_id: u64, url: String) -> bool {
+        let Some(web) = self.find_web(pane_id) else {
+            return false;
+        };
+        web.navigate(url);
+        self.notifier.bump();
+        true
+    }
+
+    /// B1 : recule d'un cran. `false` si l'id n'est pas navigable OU si on est
+    /// déjà en tête de pile.
+    pub fn web_back(&self, pane_id: u64) -> bool {
+        let Some(web) = self.find_web(pane_id) else {
+            return false;
+        };
+        let moved = web.back();
+        if moved {
+            self.notifier.bump();
+        }
+        moved
+    }
+
+    /// B1 : avance d'un cran. Mêmes conventions que `web_back`.
+    pub fn web_forward(&self, pane_id: u64) -> bool {
+        let Some(web) = self.find_web(pane_id) else {
+            return false;
+        };
+        let moved = web.forward();
+        if moved {
+            self.notifier.bump();
+        }
+        moved
+    }
+
+    /// Cherche un volet navigateur par id dans toutes les fenêtres.
+    fn find_web(&self, pane_id: u64) -> Option<Arc<crate::webpane::WebPane>> {
+        let inner = self.inner.lock().unwrap();
+        inner.windows.iter().find_map(|w| w.web_pane(pane_id))
+    }
+
     /// A1 : contenu visible du volet `pane_id` (n'importe quelle fenêtre), texte.
+    /// B1 : pour un volet navigateur, renvoie le substitut textuel plutôt qu'une
+    /// erreur — l'appelant obtient une réponse utile, pas un échec.
     pub fn capture_pane(&self, pane_id: u64) -> Option<String> {
         let inner = self.inner.lock().unwrap();
-        inner
-            .windows
-            .iter()
-            .find_map(|w| w.pane(pane_id))
-            .map(|p| p.capture_text())
+        for win in &inner.windows {
+            if let Some(p) = win.pane(pane_id) {
+                return Some(p.capture_text());
+            }
+            if let Some(w) = win.web_pane(pane_id) {
+                return Some(format!("[navigateur]\r\n{}", w.url()));
+            }
+        }
+        None
     }
 
     /// A1 : inventaire structuré des volets de toutes les fenêtres.
@@ -1705,5 +1782,91 @@ mod tests {
         );
         assert!(!s.send_keys_pane(999_999, b"x"), "id inconnu -> false");
         s.kill();
+    }
+
+    #[test]
+    fn open_web_pane_ajoute_une_feuille_navigateur() {
+        let s = Session::new("web".into(), 80, 24, "cmd.exe").unwrap();
+        let rev0 = s.layout_rev();
+        let id = s
+            .open_web_pane(None, SplitDir::LeftRight, "http://localhost:5173/".into())
+            .expect("un id de volet");
+        assert!(s.layout_rev() > rev0, "layout_rev doit être bumpé");
+
+        // La disposition annonce la feuille comme navigateur, avec son URL.
+        let (tree, _) = s.window_layout().unwrap();
+        assert!(
+            layout_contient_web(&tree, id, "http://localhost:5173/"),
+            "la feuille {id} doit être un navigateur sur la bonne URL : {tree:?}"
+        );
+        s.kill();
+    }
+
+    #[test]
+    fn navigation_web_met_a_jour_l_url_et_l_historique() {
+        let s = Session::new("web2".into(), 80, 24, "cmd.exe").unwrap();
+        let id = s
+            .open_web_pane(None, SplitDir::LeftRight, "http://a/".into())
+            .unwrap();
+
+        assert!(s.web_navigate(id, "http://b/".into()));
+        let (tree, _) = s.window_layout().unwrap();
+        assert!(layout_contient_web(&tree, id, "http://b/"));
+
+        assert!(s.web_back(id));
+        let (tree, _) = s.window_layout().unwrap();
+        assert!(layout_contient_web(&tree, id, "http://a/"));
+
+        assert!(s.web_forward(id));
+        let (tree, _) = s.window_layout().unwrap();
+        assert!(layout_contient_web(&tree, id, "http://b/"));
+
+        // Un id inconnu ou un volet terminal ne sont pas navigables.
+        assert!(!s.web_navigate(999_999, "http://x/".into()));
+        s.kill();
+    }
+
+    #[test]
+    fn capture_pane_dun_volet_web_renvoie_le_substitut() {
+        let s = Session::new("web3".into(), 80, 24, "cmd.exe").unwrap();
+        let id = s
+            .open_web_pane(None, SplitDir::LeftRight, "http://localhost:9/".into())
+            .unwrap();
+        let txt = s.capture_pane(id).expect("une capture");
+        assert!(txt.contains("[navigateur]"), "substitut attendu : {txt}");
+        assert!(txt.contains("http://localhost:9/"), "URL attendue : {txt}");
+        s.kill();
+    }
+
+    #[test]
+    fn le_volet_web_est_toujours_la_apres_une_re_attache() {
+        // La persistance est la raison d'être du choix « volet possédé par le
+        // serveur » : une nouvelle attache doit retrouver le volet ET son URL.
+        let s = Session::new("web4".into(), 80, 24, "cmd.exe").unwrap();
+        let id = s
+            .open_web_pane(None, SplitDir::LeftRight, "http://persist/".into())
+            .unwrap();
+        s.web_navigate(id, "http://persist/2".into());
+
+        // `gui_attach_window` est le cycle d'attache complet joué par la GUI.
+        let (tree, _, _, _, _) = s.gui_attach_window().expect("une fenêtre active");
+        assert!(
+            layout_contient_web(&tree, id, "http://persist/2"),
+            "après ré-attache, le volet et son URL courante sont retrouvés : {tree:?}"
+        );
+        s.kill();
+    }
+
+    /// La disposition contient-elle une feuille `id` de nature web sur `url` ?
+    fn layout_contient_web(node: &LayoutNode, id: u64, url: &str) -> bool {
+        match node {
+            LayoutNode::Leaf { pane_id, kind } => {
+                *pane_id == id
+                    && matches!(kind, wimux_protocol::PaneKind::Web { url: u } if u == url)
+            }
+            LayoutNode::Split { a, b, .. } => {
+                layout_contient_web(a, id, url) || layout_contient_web(b, id, url)
+            }
+        }
     }
 }
