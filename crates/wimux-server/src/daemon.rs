@@ -15,8 +15,8 @@ use std::thread::JoinHandle;
 use anyhow::Result;
 use wimux_protocol::transport::{PipeConn, PipeListener, user_pipe_name};
 use wimux_protocol::{
-    AgentTemplate, ClientMessage, Hello, HelloReply, NotificationInfo, PROTOCOL_VERSION,
-    ServerMessage, SessionInfo, recv, send,
+    AgentResult, AgentTemplate, BatchInfo, ClientMessage, Hello, HelloReply, NotificationInfo,
+    PROTOCOL_VERSION, ServerMessage, SessionInfo, recv, send,
 };
 
 use crate::config::{Action, Config};
@@ -427,6 +427,98 @@ impl Server {
 
         let names = created.into_iter().map(|(n, _)| n).collect();
         Ok((group, names))
+    }
+
+    /// Rang d'un agent dans son lot, dérivé du nom de session M3
+    /// `<template>-<group>-<i>` : on lit le suffixe après le dernier `-`.
+    fn agent_index(name: &str) -> u32 {
+        name.rsplit('-')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// M4 : lots en cours, construits depuis les sessions portant un `group`.
+    fn list_batches(&self) -> Vec<BatchInfo> {
+        let sessions = {
+            let s = self.sessions.lock().unwrap();
+            s.values().cloned().collect::<Vec<_>>()
+        };
+        let mut by_group: std::collections::BTreeMap<String, Vec<Arc<Session>>> =
+            std::collections::BTreeMap::new();
+        for s in sessions {
+            if let Some(g) = s.group() {
+                by_group.entry(g).or_default().push(s);
+            }
+        }
+        by_group
+            .into_iter()
+            .map(|(group, mut members)| {
+                members.sort_by_key(|s| Self::agent_index(&s.name()));
+                // base_repo / base_branch : pris sur le premier membre (identiques
+                // pour tout le lot, posés à la création).
+                let wt = members.first().and_then(|s| s.worktree());
+                BatchInfo {
+                    group,
+                    sessions: members.iter().map(|s| s.name()).collect(),
+                    base_repo: wt
+                        .as_ref()
+                        .map(|w| w.base_repo.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    base_branch: wt.map(|w| w.base_branch).unwrap_or_default(),
+                }
+            })
+            .collect()
+    }
+
+    /// M4 : résumé par agent des résultats d'un lot.
+    fn review_batch(&self, group: &str) -> Result<Vec<AgentResult>, String> {
+        let members = {
+            let s = self.sessions.lock().unwrap();
+            let mut v: Vec<Arc<Session>> = s
+                .values()
+                .filter(|s| s.group().as_deref() == Some(group))
+                .cloned()
+                .collect();
+            v.sort_by_key(|s| Self::agent_index(&s.name()));
+            v
+        };
+        if members.is_empty() {
+            return Err(format!("lot introuvable : {group}"));
+        }
+        let idle = std::time::Duration::from_secs(self.config.agent_idle_seconds);
+        let mut out = Vec::new();
+        for s in members {
+            let name = s.name();
+            let Some(wt) = s.worktree() else {
+                return Err(format!("la session « {name} » n'a pas de worktree"));
+            };
+            let stats = crate::batch::diff_stats(&wt.path, &wt.base_sha)
+                .map_err(|e| format!("diff de « {name} » : {e}"))?;
+            out.push(AgentResult {
+                session: name.clone(),
+                index: Self::agent_index(&name),
+                branch: wt.branch.clone(),
+                status: s.agent_status(idle),
+                files_changed: stats.files_changed,
+                insertions: stats.insertions,
+                deletions: stats.deletions,
+                untracked: crate::batch::untracked(&wt.path).len() as u32,
+                has_commits: crate::batch::has_commits(&wt.path, &wt.base_sha),
+            });
+        }
+        Ok(out)
+    }
+
+    /// M4 : diff complet du travail d'un agent.
+    fn diff_agent(&self, session: &str) -> Result<String, String> {
+        let s = self
+            .get(session)
+            .ok_or_else(|| format!("session introuvable : {session}"))?;
+        let wt = s
+            .worktree()
+            .ok_or_else(|| format!("la session « {session} » n'a pas de worktree"))?;
+        crate::batch::full_diff(&wt.path, &wt.base_sha)
     }
 
     fn rename_session(&self, from: &str, to: &str) -> Result<(), String> {
@@ -954,13 +1046,34 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
-            // M4 (intérim) : ces messages ne sont émis par aucun client tant que la
-            // CLI `wimux batch` n'existe pas ; Task 4 REMPLACE ce bras par les vrais
-            // handlers (ListBatches/ReviewBatch/DiffAgent) + un bras OpenPr temporaire.
-            ClientMessage::ListBatches
-            | ClientMessage::ReviewBatch { .. }
-            | ClientMessage::DiffAgent { .. }
-            | ClientMessage::OpenPr { .. } => {}
+            ClientMessage::ListBatches => {
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &ServerMessage::Batches(server.list_batches()))?;
+            }
+            ClientMessage::ReviewBatch { group } => {
+                let reply = match server.review_batch(&group) {
+                    Ok(v) => ServerMessage::BatchReview(v),
+                    Err(e) => ServerMessage::Error(e),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::DiffAgent { session } => {
+                let reply = match server.diff_agent(&session) {
+                    Ok(text) => ServerMessage::AgentDiff(text),
+                    Err(e) => ServerMessage::Error(e),
+                };
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            // M4 : handler réel en Task 6.
+            ClientMessage::OpenPr { .. } => {
+                let mut wr: &PipeConn = &conn;
+                send(
+                    &mut wr,
+                    &ServerMessage::Error("OpenPr : non implémenté (Task 6)".into()),
+                )?;
+            }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
                     let outcome = route_input(&a.session, &server.config, &mut prefix, &bytes);
@@ -1332,6 +1445,24 @@ mod tests {
         let (events, rest) = extract_mouse_events(b"bonjour\r");
         assert!(events.is_empty());
         assert_eq!(rest, b"bonjour\r");
+    }
+
+    #[test]
+    fn list_batches_vide_sans_lot() {
+        let server = Server::new();
+        assert!(server.list_batches().is_empty(), "aucun lot au démarrage");
+    }
+
+    #[test]
+    fn review_batch_groupe_inconnu_est_erreur() {
+        let server = Server::new();
+        assert!(server.review_batch("batch-inexistant").is_err());
+    }
+
+    #[test]
+    fn diff_agent_session_inconnue_est_erreur() {
+        let server = Server::new();
+        assert!(server.diff_agent("session-inexistante").is_err());
     }
 
     #[test]

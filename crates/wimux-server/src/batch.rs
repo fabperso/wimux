@@ -52,14 +52,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Chiffres du diff des fichiers SUIVIS du worktree vs `base_sha` (commité + en
 /// cours). Non mutant.
-#[allow(dead_code)] // utilisé par daemon.rs en Task 4
 pub fn diff_stats(wt: &Path, base_sha: &str) -> Result<DiffStats, String> {
     let out = git(wt, &["diff", "--numstat", base_sha])?;
     Ok(parse_numstat(&out))
 }
 
 /// Fichiers NON suivis du worktree (hors ignorés). Non mutant.
-#[allow(dead_code)] // utilisé par daemon.rs en Task 4
 pub fn untracked(wt: &Path) -> Vec<String> {
     match git(wt, &["ls-files", "--others", "--exclude-standard"]) {
         Ok(out) => out
@@ -73,7 +71,6 @@ pub fn untracked(wt: &Path) -> Vec<String> {
 }
 
 /// L'agent a-t-il au moins un commit au-delà de `base_sha` ?
-#[allow(dead_code)] // utilisé par daemon.rs en Task 4
 pub fn has_commits(wt: &Path, base_sha: &str) -> bool {
     git(wt, &["rev-list", "--count", &format!("{base_sha}..HEAD")])
         .ok()
@@ -85,7 +82,6 @@ pub fn has_commits(wt: &Path, base_sha: &str) -> bool {
 /// Diff complet du travail de l'agent : les fichiers suivis vs `base_sha`, PUIS
 /// le contenu de chaque fichier non suivi (via `diff --no-index` contre
 /// `/dev/null`, accepté par git y compris sous Windows). Non mutant.
-#[allow(dead_code)] // utilisé par daemon.rs en Task 4
 pub fn full_diff(wt: &Path, base_sha: &str) -> Result<String, String> {
     let mut text = git(wt, &["diff", base_sha])?;
     for file in untracked(wt) {
