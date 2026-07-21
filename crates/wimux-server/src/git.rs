@@ -15,8 +15,9 @@ pub fn git_branch(cwd: &Path) -> Option<String> {
             return read_head_branch(&git);
         }
         if git.is_file() {
-            // `.git` fichier = worktree lié (`gitdir: ...`). Repli `None`.
-            return None;
+            // `.git` fichier = worktree lié : il contient `gitdir: <chemin>`.
+            // On suit ce chemin pour lire le HEAD du worktree (M4).
+            return read_gitdir_pointer(&git).and_then(|d| read_head_branch(&d));
         }
         dir = d.parent();
     }
@@ -37,6 +38,17 @@ fn read_head_branch(git_dir: &Path) -> Option<String> {
         return Some(head[..7].to_string());
     }
     None
+}
+
+/// Lit un `.git` FICHIER de worktree lié (`gitdir: <chemin>`) et renvoie le
+/// répertoire git pointé. `None` si le format est inattendu.
+fn read_gitdir_pointer(git_file: &Path) -> Option<std::path::PathBuf> {
+    let content = std::fs::read_to_string(git_file).ok()?;
+    let path = content.trim().strip_prefix("gitdir:")?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -106,9 +118,31 @@ mod tests {
     }
 
     #[test]
-    fn git_fichier_worktree_donne_none() {
+    fn git_fichier_worktree_suit_gitdir() {
         let t = TempDir::new("wt");
-        fs::write(t.path().join(".git"), "gitdir: C:/repo/.git/worktrees/wt\n").unwrap();
-        assert_eq!(git_branch(t.path()), None);
+        // Répertoire git du worktree, avec son propre HEAD.
+        let gitdir = t.path().join("wtgit");
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/wimux/batch0/1\n").unwrap();
+        // Le worktree : un `.git` FICHIER qui pointe vers ce répertoire.
+        let wt = t.path().join("arbre");
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", gitdir.to_string_lossy()),
+        )
+        .unwrap();
+
+        assert_eq!(git_branch(&wt).as_deref(), Some("wimux/batch0/1"));
+    }
+
+    #[test]
+    fn git_fichier_worktree_illisible_donne_none() {
+        let t = TempDir::new("wtko");
+        let wt = t.path().join("arbre");
+        fs::create_dir_all(&wt).unwrap();
+        // `gitdir:` pointant nulle part : repli `None`, sans panique.
+        fs::write(wt.join(".git"), "gitdir: C:/inexistant/xyz\n").unwrap();
+        assert_eq!(git_branch(&wt), None);
     }
 }
