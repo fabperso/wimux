@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, State};
-use wimux_protocol::transport::{PipeConn, connect, user_pipe_name};
+use wimux_protocol::transport::{connect, user_pipe_name, PipeConn};
 use wimux_protocol::{
-    ClientMessage, Hello, HelloReply, PROTOCOL_VERSION, ServerMessage, SplitDir, recv, send,
+    recv, send, ClientMessage, Hello, HelloReply, ServerMessage, SplitDir, PROTOCOL_VERSION,
 };
 
 /// Connexion partagée au serveur wimux (écrivain).
@@ -15,10 +15,14 @@ struct Bridge {
 
 fn do_handshake(conn: &PipeConn) -> Result<(), String> {
     let mut w: &PipeConn = conn;
-    send(&mut w, &ClientMessage::Hello(Hello {
-        client_version: PROTOCOL_VERSION,
-        client_build: env!("CARGO_PKG_VERSION").to_string(),
-    })).map_err(|e| e.to_string())?;
+    send(
+        &mut w,
+        &ClientMessage::Hello(Hello {
+            client_version: PROTOCOL_VERSION,
+            client_build: env!("CARGO_PKG_VERSION").to_string(),
+        }),
+    )
+    .map_err(|e| e.to_string())?;
     let mut r: &PipeConn = conn;
     match recv::<_, ServerMessage>(&mut r).map_err(|e| e.to_string())? {
         ServerMessage::Hello(HelloReply::Ok { .. }) => Ok(()),
@@ -385,8 +389,15 @@ fn set_split_ratio(node_id: u32, ratio: f32, bridge: State<Bridge>) -> Result<()
 fn pane_resize(pane_id: u64, cols: u16, rows: u16, bridge: State<Bridge>) -> Result<(), String> {
     if let Some(conn) = bridge.conn.lock().unwrap().as_ref() {
         let mut w: &PipeConn = conn;
-        send(&mut w, &ClientMessage::PaneResize { pane_id, cols, rows })
-            .map_err(|e| e.to_string())?;
+        send(
+            &mut w,
+            &ClientMessage::PaneResize {
+                pane_id,
+                cols,
+                rows,
+            },
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
