@@ -5,8 +5,10 @@
 
 use std::path::Path;
 
-/// Branche git du dépôt contenant `cwd`, ou `None` (hors dépôt / HEAD illisible /
-/// `.git` de worktree — repli `None` au premier jet).
+/// Branche git du dépôt contenant `cwd`, ou `None` (hors dépôt). Pour un
+/// worktree lié (`.git` fichier), on suit le pointeur `gitdir:` jusqu'au
+/// répertoire git réel et on y lit `HEAD` (M4) ; `None` seulement si ce
+/// pointeur ou le `HEAD` visé sont illisibles.
 pub fn git_branch(cwd: &Path) -> Option<String> {
     let mut dir = Some(cwd);
     while let Some(d) = dir {
@@ -48,7 +50,15 @@ fn read_gitdir_pointer(git_file: &Path) -> Option<std::path::PathBuf> {
     if path.is_empty() {
         return None;
     }
-    Some(std::path::PathBuf::from(path))
+    let p = std::path::PathBuf::from(path);
+    // git peut écrire un `gitdir:` RELATIF (option `worktree.useRelativePaths`
+    // ou `git worktree add --relative-paths`) : il faut le résoudre par rapport
+    // au dossier du fichier `.git`, pas au cwd du démon (sinon repli `None`).
+    Some(if p.is_relative() {
+        git_file.parent()?.join(p)
+    } else {
+        p
+    })
 }
 
 #[cfg(test)]
@@ -134,6 +144,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(git_branch(&wt).as_deref(), Some("wimux/batch0/1"));
+    }
+
+    #[test]
+    fn git_fichier_worktree_gitdir_relatif_est_resolu() {
+        let t = TempDir::new("wtrel");
+        // Répertoire git du worktree, avec son propre HEAD.
+        let gitdir = t.path().join("wtgit");
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/wimux/batch0/2\n").unwrap();
+        // Le worktree : un `.git` FICHIER dont le `gitdir:` est RELATIF (ex.
+        // `worktree.useRelativePaths` / `git worktree add --relative-paths`) :
+        // il doit être résolu par rapport au dossier du `.git`, pas au cwd.
+        let wt = t.path().join("arbre");
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(wt.join(".git"), "gitdir: ../wtgit\n").unwrap();
+
+        assert_eq!(git_branch(&wt).as_deref(), Some("wimux/batch0/2"));
     }
 
     #[test]

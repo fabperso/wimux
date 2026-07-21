@@ -58,10 +58,26 @@ pub fn diff_stats(wt: &Path, base_sha: &str) -> Result<DiffStats, String> {
 }
 
 /// Fichiers NON suivis du worktree (hors ignorés). Non mutant.
+///
+/// `core.quotePath=false` + `-z` : sans ça, git C-quote les chemins non-ASCII
+/// dans sa sortie (ex. `café.txt` → `"caf\303\251.txt"`), et ce chemin quoté
+/// n'existe pas sur le disque — `full_diff` échouerait silencieusement dessus
+/// (voir Fix 1/2 de la revue M4). La sortie `-z` (séparée par NUL) évite en
+/// plus toute ambiguïté avec des noms contenant des retours à la ligne.
 pub fn untracked(wt: &Path) -> Vec<String> {
-    match git(wt, &["ls-files", "--others", "--exclude-standard"]) {
+    match git(
+        wt,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+        ],
+    ) {
         Ok(out) => out
-            .lines()
+            .split('\0')
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .map(str::to_string)
@@ -87,13 +103,42 @@ pub fn full_diff(wt: &Path, base_sha: &str) -> Result<String, String> {
     for file in untracked(wt) {
         // `diff --no-index` sort avec le code 1 quand ça diffère : c'est le cas
         // nominal ici, donc on lit stdout sans traiter le code comme une erreur.
+        // Mais un VRAI échec (fichier illisible, supprimé entre-temps, binaire
+        // refusé…) donnerait aussi un stdout vide sans lever d'erreur Rust : le
+        // contenu manquant serait alors indiscernable d'un « pas de contenu ».
+        // On signale donc explicitement ce cas par une ligne de marqueur.
+        // `core.quotePath=false` : sinon git C-quote le chemin non-ASCII dans
+        // l'en-tête `diff --git a/… b/…` de sa propre sortie (le contenu lu est
+        // correct, seul l'en-tête reste quoté), ce qui gênerait la revue.
         let out = Command::new("git")
             .arg("-C")
             .arg(wt)
-            .args(["diff", "--no-index", "--", "/dev/null", &file])
+            .args([
+                "-c",
+                "core.quotePath=false",
+                "diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                &file,
+            ])
             .output();
-        if let Ok(out) = out {
-            text.push_str(&String::from_utf8_lossy(&out.stdout));
+        match out {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stdout.is_empty() && !stderr.is_empty() {
+                    text.push_str(&format!(
+                        "# wimux: contenu de {file} illisible ({})\n",
+                        stderr.trim()
+                    ));
+                } else {
+                    text.push_str(&stdout);
+                }
+            }
+            Err(e) => {
+                text.push_str(&format!("# wimux: contenu de {file} illisible ({e})\n"));
+            }
         }
     }
     Ok(text)
@@ -231,6 +276,16 @@ mod tests {
         assert_eq!(s.deletions, 0);
     }
 
+    #[test]
+    fn parse_numstat_ligne_malformee_ignoree() {
+        // Une ligne sans le 3e champ (chemin) est malformée : ignorée, tous les
+        // compteurs restent à zéro. Test pur, sans git.
+        let s = parse_numstat("abc\n");
+        assert_eq!(s.files_changed, 0);
+        assert_eq!(s.insertions, 0);
+        assert_eq!(s.deletions, 0);
+    }
+
     /// git est-il disponible ?
     fn git_available() -> bool {
         Command::new("git")
@@ -320,6 +375,53 @@ mod tests {
             untracked(&repo),
             vec!["nouveau.txt".to_string()],
             "la collecte ne doit rien stager"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn untracked_avec_nom_non_ascii_non_quote() {
+        if !git_available() {
+            eprintln!("git absent : test untracked_avec_nom_non_ascii ignoré");
+            return;
+        }
+        let repo =
+            std::env::temp_dir().join(format!("wimux-batch-nonascii-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(git_in(&repo, &["init"]));
+        std::fs::write(repo.join("a.txt"), "ligne1\n").unwrap();
+        assert!(git_in(&repo, &["add", "."]));
+        assert!(git_in(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "init"
+            ]
+        ));
+        let base_sha = crate::worktree::head_sha(&repo).unwrap();
+
+        // Fichier non suivi au nom non-ASCII : git le C-quote par défaut dans
+        // `ls-files` (ex. "caf\303\251.txt"). `untracked()` doit renvoyer le nom
+        // BRUT, non quoté, et `full_diff()` doit en contenir le contenu.
+        std::fs::write(repo.join("café.txt"), "contenu café\n").unwrap();
+
+        assert_eq!(
+            untracked(&repo),
+            vec!["café.txt".to_string()],
+            "le nom non-ASCII ne doit pas apparaître C-quoté"
+        );
+
+        let diff = full_diff(&repo, &base_sha).unwrap();
+        assert!(
+            diff.contains("café.txt"),
+            "le fichier non-ASCII non suivi doit apparaître dans le diff, obtenu : {diff}"
         );
 
         let _ = std::fs::remove_dir_all(&repo);
