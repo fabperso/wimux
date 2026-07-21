@@ -194,7 +194,7 @@ impl Session {
         inner
             .windows
             .get(inner.active_window)
-            .map(|w| w.active_pane())
+            .and_then(|w| w.active_term_pane())
     }
 
     /// cwd du volet actif de la fenêtre active (source du cwd de session, W3).
@@ -337,7 +337,7 @@ impl Session {
             .iter()
             .map(|w| WindowInfo {
                 name: w.name(),
-                cwd: w.active_pane().cwd(),
+                cwd: w.active_term_pane().and_then(|p| p.cwd()),
             })
             .collect();
         (windows, inner.active_window as u32)
@@ -363,7 +363,7 @@ impl Session {
                 .iter()
                 .map(|w| WindowInfo {
                     name: w.name(),
-                    cwd: w.active_pane().cwd(),
+                    cwd: w.active_term_pane().and_then(|p| p.cwd()),
                 })
                 .collect();
             (windows, inner.active_window as u32)
@@ -388,7 +388,7 @@ impl Session {
                 .iter()
                 .map(|w| WindowInfo {
                     name: w.name(),
-                    cwd: w.active_pane().cwd(),
+                    cwd: w.active_term_pane().and_then(|p| p.cwd()),
                 })
                 .collect();
             (windows, inner.active_window as u32)
@@ -420,7 +420,7 @@ impl Session {
                 .iter()
                 .map(|w| WindowInfo {
                     name: w.name(),
-                    cwd: w.active_pane().cwd(),
+                    cwd: w.active_term_pane().and_then(|p| p.cwd()),
                 })
                 .collect();
             (windows, inner.active_window as u32)
@@ -447,7 +447,7 @@ impl Session {
         let pane = {
             let inner = self.inner.lock().unwrap();
             let win = inner.windows.get(inner.active_window);
-            win.and_then(|w| w.pane(pane_id).or_else(|| Some(w.active_pane())))
+            win.and_then(|w| w.pane(pane_id).or_else(|| w.active_term_pane()))
         };
         if let Some(pane) = pane {
             pane.send_input(bytes);
@@ -883,7 +883,7 @@ impl Session {
             inner
                 .windows
                 .get(inner.active_window)
-                .map(|w| w.active_pane())
+                .and_then(|w| w.active_term_pane())
         };
         if let Some(pane) = pane {
             pane.send_input(bytes);

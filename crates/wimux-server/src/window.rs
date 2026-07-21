@@ -10,9 +10,28 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use wimux_vt::{Cell, Color, Grid, Pen};
 
 use crate::pane::{Pane, PaneId};
+use crate::webpane::WebPane;
 
 /// Attribue un identifiant stable à chaque nœud de découpe (par processus).
 static NEXT_NODE_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Contenu d'une feuille de disposition (B1) : un terminal, ou un navigateur.
+/// C'est une ÉNUMÉRATION (et non une table parallèle) pour que le compilateur
+/// recense tous les sites d'appel lors de l'ajout d'une nature.
+pub enum PaneSlot {
+    Term(Arc<Pane>),
+    Web(Arc<WebPane>),
+}
+
+impl PaneSlot {
+    /// Le volet terminal, ou `None` si cette feuille est un navigateur.
+    fn term(&self) -> Option<Arc<Pane>> {
+        match self {
+            PaneSlot::Term(p) => Some(Arc::clone(p)),
+            PaneSlot::Web(_) => None,
+        }
+    }
+}
 
 /// Sens d'une découpe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +80,7 @@ struct Border {
 pub struct Window {
     name: Option<String>,
     root: Node,
-    panes: HashMap<PaneId, Arc<Pane>>,
+    panes: HashMap<PaneId, PaneSlot>,
     active: PaneId,
     rects: HashMap<PaneId, Rect>,
     borders: Vec<Border>,
@@ -73,7 +92,7 @@ impl Window {
     pub fn new(pane: Arc<Pane>) -> Window {
         let id = pane.id;
         let mut panes = HashMap::new();
-        panes.insert(id, pane);
+        panes.insert(id, PaneSlot::Term(pane));
         Window {
             name: None,
             root: Node::Leaf(id),
@@ -118,8 +137,9 @@ impl Window {
         resize_walk(&mut self.root, self.active, horizontal, grow);
     }
 
-    pub fn active_pane(&self) -> Arc<Pane> {
-        Arc::clone(&self.panes[&self.active])
+    /// Volet TERMINAL actif, ou `None` si le volet actif est un navigateur.
+    pub fn active_term_pane(&self) -> Option<Arc<Pane>> {
+        self.panes.get(&self.active).and_then(|s| s.term())
     }
 
     /// Volet situé à la position `(col, row)` (coordonnées de contenu, 0-based).
@@ -130,8 +150,23 @@ impl Window {
             .map(|(&id, _)| id)
     }
 
+    /// Volet TERMINAL d'identifiant `id` (`None` si absent ou si c'est un
+    /// navigateur) — sémantique volontairement inchangée pour les appelants.
     pub fn pane(&self, id: PaneId) -> Option<Arc<Pane>> {
-        self.panes.get(&id).map(Arc::clone)
+        self.panes.get(&id).and_then(|s| s.term())
+    }
+
+    /// Volet NAVIGATEUR d'identifiant `id`, s'il en est un.
+    pub fn web_pane(&self, id: PaneId) -> Option<Arc<WebPane>> {
+        match self.panes.get(&id) {
+            Some(PaneSlot::Web(w)) => Some(Arc::clone(w)),
+            _ => None,
+        }
+    }
+
+    /// La fenêtre contient-elle cette feuille, quelle que soit sa nature ?
+    pub fn contains(&self, id: PaneId) -> bool {
+        self.panes.contains_key(&id)
     }
 
     pub fn set_active(&mut self, id: PaneId) {
@@ -146,7 +181,36 @@ impl Window {
 
     /// Traduit l'arbre interne en `LayoutNode` sérialisable pour la GUI.
     pub fn layout_tree(&self) -> wimux_protocol::LayoutNode {
-        node_to_layout(&self.root)
+        self.node_to_layout(&self.root)
+    }
+
+    /// Traduit un `Node` interne, en renseignant la NATURE de chaque feuille.
+    fn node_to_layout(&self, node: &Node) -> wimux_protocol::LayoutNode {
+        match node {
+            Node::Leaf(id) => wimux_protocol::LayoutNode::Leaf {
+                pane_id: *id,
+                kind: match self.panes.get(id) {
+                    Some(PaneSlot::Web(w)) => wimux_protocol::PaneKind::Web { url: w.url() },
+                    _ => wimux_protocol::PaneKind::Terminal,
+                },
+            },
+            Node::Split {
+                node_id,
+                dir,
+                ratio,
+                a,
+                b,
+            } => wimux_protocol::LayoutNode::Split {
+                node_id: *node_id,
+                dir: match dir {
+                    SplitDir::LeftRight => wimux_protocol::SplitDir::LeftRight,
+                    SplitDir::TopBottom => wimux_protocol::SplitDir::TopBottom,
+                },
+                ratio: *ratio,
+                a: Box::new(self.node_to_layout(a)),
+                b: Box::new(self.node_to_layout(b)),
+            },
+        }
     }
 
     /// Identifiant du volet actif.
@@ -167,9 +231,12 @@ impl Window {
     }
 
     /// Termine tous les volets de la fenêtre (pour `kill-session`).
+    /// Un volet navigateur n'a pas de processus : rien à tuer.
     pub fn kill_all(&self) {
-        for pane in self.panes.values() {
-            pane.kill();
+        for slot in self.panes.values() {
+            if let PaneSlot::Term(p) = slot {
+                p.kill();
+            }
         }
     }
 
@@ -179,9 +246,14 @@ impl Window {
         ids.sort_unstable();
         ids.iter()
             .map(|id| {
-                let (c, r) = self.panes[id].size();
                 let active = if *id == self.active { " (actif)" } else { "" };
-                format!("volet {id}: {c}x{r}{active}")
+                match &self.panes[id] {
+                    PaneSlot::Term(p) => {
+                        let (c, r) = p.size();
+                        format!("volet {id}: {c}x{r}{active}")
+                    }
+                    PaneSlot::Web(w) => format!("volet {id}: navigateur {}{active}", w.url()),
+                }
             })
             .collect()
     }
@@ -204,7 +276,24 @@ impl Window {
             a: Box::new(old),
             b: Box::new(Node::Leaf(new_id)),
         });
-        self.panes.insert(new_id, new_pane);
+        self.panes.insert(new_id, PaneSlot::Term(new_pane));
+        self.active = new_id;
+    }
+
+    /// Découpe le volet `target` en y insérant un volet NAVIGATEUR, qui devient
+    /// actif (même mécanique que `split_pane`, autre nature de feuille).
+    pub fn split_web(&mut self, target: PaneId, dir: SplitDir, web: Arc<WebPane>) {
+        self.zoomed = false;
+        let new_id = web.id;
+        let node_id = NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed);
+        Self::replace_leaf(&mut self.root, target, |old| Node::Split {
+            node_id,
+            dir,
+            ratio: 0.5,
+            a: Box::new(old),
+            b: Box::new(Node::Leaf(new_id)),
+        });
+        self.panes.insert(new_id, PaneSlot::Web(web));
         self.active = new_id;
     }
 
@@ -217,8 +306,8 @@ impl Window {
     /// Ferme le volet DÉSIGNÉ `target`. Renvoie `true` si la fenêtre est vide.
     pub fn close_pane(&mut self, target: PaneId) -> bool {
         self.zoomed = false;
-        if let Some(pane) = self.panes.remove(&target) {
-            pane.kill();
+        if let Some(PaneSlot::Term(p)) = self.panes.remove(&target) {
+            p.kill();
         }
         if self.panes.is_empty() {
             return true;
@@ -240,7 +329,11 @@ impl Window {
         let dead: Vec<PaneId> = self
             .panes
             .iter()
-            .filter(|(_, p)| !p.is_alive() && p.log_path().is_none())
+            .filter(|(_, s)| match s {
+                // Un volet navigateur n'a pas de processus : il ne meurt jamais.
+                PaneSlot::Web(_) => false,
+                PaneSlot::Term(p) => !p.is_alive() && p.log_path().is_none(),
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in dead {
@@ -301,7 +394,7 @@ impl Window {
 
         // Zoom : seul le volet actif est visible, à pleine taille.
         if self.zoomed && self.panes.contains_key(&self.active) {
-            if let Some(pane) = self.panes.get(&self.active) {
+            if let Some(PaneSlot::Term(pane)) = self.panes.get(&self.active) {
                 pane.resize(area.w, area.h);
             }
             self.rects.insert(self.active, area);
@@ -312,7 +405,7 @@ impl Window {
         let mut borders = Vec::new();
         layout(&self.root, area, &mut rects, &mut borders);
         for (&id, r) in &rects {
-            if let Some(pane) = self.panes.get(&id) {
+            if let Some(PaneSlot::Term(pane)) = self.panes.get(&id) {
                 pane.resize(r.w, r.h);
             }
         }
@@ -330,15 +423,21 @@ impl Window {
         // Volets.
         let mut cursor = (0, 0);
         for (&id, r) in &self.rects {
-            if let Some(pane) = self.panes.get(&id) {
-                let (grid, (cc, cr)) = pane.snapshot();
-                into.blit(&grid, r.x, r.y);
-                if id == self.active {
-                    cursor = (
-                        r.x + cc.min(r.w.saturating_sub(1)),
-                        r.y + cr.min(r.h.saturating_sub(1)),
-                    );
+            match self.panes.get(&id) {
+                Some(PaneSlot::Term(pane)) => {
+                    let (grid, (cc, cr)) = pane.snapshot();
+                    into.blit(&grid, r.x, r.y);
+                    if id == self.active {
+                        cursor = (
+                            r.x + cc.min(r.w.saturating_sub(1)),
+                            r.y + cr.min(r.h.saturating_sub(1)),
+                        );
+                    }
                 }
+                // Un client TEXTE ne peut pas afficher une page : on dessine un
+                // substitut lisible plutôt que de laisser un trou.
+                Some(PaneSlot::Web(web)) => draw_web_placeholder(into, *r, &web.url()),
+                None => {}
             }
         }
         // Bordures.
@@ -520,30 +619,20 @@ fn layout(node: &Node, area: Rect, rects: &mut HashMap<PaneId, Rect>, borders: &
     }
 }
 
-/// Traduit un `Node` interne en `LayoutNode` de protocole.
-fn node_to_layout(node: &Node) -> wimux_protocol::LayoutNode {
-    match node {
-        Node::Leaf(id) => wimux_protocol::LayoutNode::Leaf {
-            pane_id: *id,
-            // B1 (intérim) : Task 3 émettra la vraie nature depuis la table des volets.
-            kind: wimux_protocol::PaneKind::Terminal,
-        },
-        Node::Split {
-            node_id,
-            dir,
-            ratio,
-            a,
-            b,
-        } => wimux_protocol::LayoutNode::Split {
-            node_id: *node_id,
-            dir: match dir {
-                SplitDir::LeftRight => wimux_protocol::SplitDir::LeftRight,
-                SplitDir::TopBottom => wimux_protocol::SplitDir::TopBottom,
-            },
-            ratio: *ratio,
-            a: Box::new(node_to_layout(a)),
-            b: Box::new(node_to_layout(b)),
-        },
+/// Dessine le substitut d'un volet navigateur pour les clients texte : une
+/// étiquette et l'URL, tronquées à la largeur disponible.
+fn draw_web_placeholder(into: &mut Grid, r: Rect, url: &str) {
+    let pen = Pen {
+        fg: Color::Indexed(6),
+        ..Pen::default()
+    };
+    if r.h == 0 || r.w == 0 {
+        return;
+    }
+    let clip = |s: &str| -> String { s.chars().take(r.w as usize).collect() };
+    into.set_str(r.x, r.y, &clip("[navigateur]"), pen);
+    if r.h >= 2 {
+        into.set_str(r.x, r.y + 1, &clip(url), pen);
     }
 }
 
@@ -604,27 +693,30 @@ mod tests {
 
     #[test]
     fn layout_tree_dun_split() {
-        let root = Node::Split {
-            node_id: 7,
-            dir: SplitDir::LeftRight,
-            ratio: 0.5,
-            a: Box::new(Node::Leaf(1)),
-            b: Box::new(Node::Leaf(2)),
-        };
-        match node_to_layout(&root) {
-            wimux_protocol::LayoutNode::Split { node_id, a, b, .. } => {
-                assert_eq!(node_id, 7);
+        let p1 = dummy_pane();
+        let id1 = p1.id;
+        let mut win = Window::new(p1);
+        win.split_pane(id1, SplitDir::LeftRight, dummy_pane());
+        match win.layout_tree() {
+            wimux_protocol::LayoutNode::Split { a, b, .. } => {
                 assert!(matches!(
                     *a,
-                    wimux_protocol::LayoutNode::Leaf { pane_id: 1, .. }
+                    wimux_protocol::LayoutNode::Leaf {
+                        kind: wimux_protocol::PaneKind::Terminal,
+                        ..
+                    }
                 ));
                 assert!(matches!(
                     *b,
-                    wimux_protocol::LayoutNode::Leaf { pane_id: 2, .. }
+                    wimux_protocol::LayoutNode::Leaf {
+                        kind: wimux_protocol::PaneKind::Terminal,
+                        ..
+                    }
                 ));
             }
             _ => panic!("attendu un Split"),
         }
+        win.kill_all();
     }
 
     #[test]
@@ -731,5 +823,90 @@ mod tests {
         win.set_name(None);
         assert_eq!(win.name(), None);
         win.kill_all();
+    }
+
+    fn dummy_web() -> Arc<crate::webpane::WebPane> {
+        Arc::new(crate::webpane::WebPane::new(
+            9_001,
+            "http://localhost:5173/".into(),
+        ))
+    }
+
+    #[test]
+    fn volet_web_est_une_feuille_mais_pas_un_volet_terminal() {
+        let p1 = dummy_pane();
+        let id1 = p1.id;
+        let mut win = Window::new(p1);
+        let web = dummy_web();
+        let idw = web.id;
+        win.split_web(id1, SplitDir::LeftRight, Arc::clone(&web));
+
+        // Il est dans la fenêtre…
+        assert!(win.contains(idw), "le volet web est présent");
+        assert!(win.pane_ids().contains(&idw));
+        // …mais ce n'est pas un volet TERMINAL.
+        assert!(
+            win.pane(idw).is_none(),
+            "pane() ne doit renvoyer que des terminaux"
+        );
+        assert!(win.web_pane(idw).is_some());
+        // La disposition l'annonce comme navigateur, avec son URL.
+        let tree = win.layout_tree();
+        let kinds = collect_kinds(&tree);
+        assert!(
+            kinds.contains(&wimux_protocol::PaneKind::Web {
+                url: "http://localhost:5173/".into()
+            }),
+            "la feuille web doit porter son URL : {kinds:?}"
+        );
+        win.kill_all();
+    }
+
+    #[test]
+    fn volet_web_survit_au_reap() {
+        let p1 = dummy_pane();
+        let id1 = p1.id;
+        let mut win = Window::new(p1);
+        let web = dummy_web();
+        let idw = web.id;
+        win.split_web(id1, SplitDir::TopBottom, web);
+
+        // Tuer le volet terminal puis reaper : le web doit rester.
+        win.pane(id1).unwrap().kill();
+        // `reap_dead` retire les terminaux morts ; il ne doit PAS toucher au web.
+        let _ = win.reap_dead();
+        assert!(win.contains(idw), "un volet web n'est jamais reapé");
+        win.kill_all();
+    }
+
+    #[test]
+    fn active_term_pane_est_none_sur_un_volet_web() {
+        let p1 = dummy_pane();
+        let id1 = p1.id;
+        let mut win = Window::new(p1);
+        let web = dummy_web();
+        let idw = web.id;
+        // `split_web` rend le nouveau volet actif.
+        win.split_web(id1, SplitDir::LeftRight, web);
+        assert_eq!(win.active_pane_id(), idw);
+        assert!(
+            win.active_term_pane().is_none(),
+            "le volet actif est un navigateur : pas de volet terminal actif"
+        );
+        win.set_active(id1);
+        assert!(win.active_term_pane().is_some());
+        win.kill_all();
+    }
+
+    /// Aplatit les `PaneKind` d'un arbre de disposition (ordre non garanti).
+    fn collect_kinds(node: &wimux_protocol::LayoutNode) -> Vec<wimux_protocol::PaneKind> {
+        match node {
+            wimux_protocol::LayoutNode::Leaf { kind, .. } => vec![kind.clone()],
+            wimux_protocol::LayoutNode::Split { a, b, .. } => {
+                let mut v = collect_kinds(a);
+                v.extend(collect_kinds(b));
+                v
+            }
+        }
     }
 }
