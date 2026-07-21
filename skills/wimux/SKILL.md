@@ -23,6 +23,31 @@ chacun lançant une tâche dans son propre terminal, puis lire leur sortie.
 5. **Répondre à une invite** : `wimux agent send -p N "oui" Enter`.
 6. **Fermer** : `wimux agent kill -p N`.
 
+## Revue d'un lot d'agents (fan-out)
+
+Quand une tâche mérite plusieurs tentatives indépendantes, lance un **lot** :
+chacun agent travaille dans son propre worktree git isolé.
+
+1. **Lancer** : `wimux batch create --repo <chemin> --template claude --prompt "<tâche>" --count 3`
+   → `{"group":"batch0","sessions":[…]}`
+2. **Suivre** : `wimux batch list`, et l'avancement de chaque agent via
+   `wimux agent list` / `wimux agent logs`.
+3. **Résumer** : `wimux batch review -g batch0` → par agent : fichiers changés,
+   `+/-`, non suivis, présence de commits, statut.
+4. **Comparer** : `wimux batch diff -g batch0 -i <n>` pour lire le travail d'un
+   agent en détail.
+5. **Intégrer le gagnant** :
+   `wimux batch pr -g batch0 -i <n> --title "<titre>" --body "<pourquoi celui-ci>"`
+   → commite son travail en cours, pousse sa branche, ouvre la PR, renvoie son URL,
+   et **supprime les perdants**. Le gagnant reste vivant pour traiter la revue.
+
+**Deux règles :**
+- Passe **toujours par `review` avant `diff`** : le résumé coûte quelques lignes,
+  un diff complet peut être énorme. Ne lis en détail que les agents plausibles.
+- Fournis **toujours `--title` et `--body`** : tu viens de lire les diffs, tu es
+  le seul à pouvoir écrire un titre utile et expliquer pourquoi cette tentative
+  l'emporte. wimux ajoute de lui-même un pied de page de provenance.
+
 ## Bonnes pratiques
 - Préfère les sous-agents **non-interactifs / print** (`claude -p ...`) : leur
   journal est un transcript linéaire lisible. Pour un agent TUI qui se redessine,
