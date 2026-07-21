@@ -70,6 +70,15 @@ export class PaneManager {
   // Élements .split-child (a/b) de chaque noeud de split, indexés par node_id,
   // pour pouvoir mettre à jour flexGrow sans reconstruire le DOM.
   private splitChildren = new Map<number, { a: HTMLElement; b: HTMLElement }>();
+  // Navigation explicite demandée (◀ / ▶ / Entrée sur le champ URL) pour ces
+  // volets : quand le serveur repousse la même URL (ex. ◀ déjà en tête de
+  // pile d'historique), rien ne distingue cette mise à jour d'un simple
+  // redraw — ni l'URL (identique à `src`), ni la signature de disposition
+  // (identique elle aussi, donc `renderLayout` peut prendre la branche
+  // « structure inchangée » sans même appeler `ensureWebView`). On marque
+  // ici l'intention pour réaffirmer `src` inconditionnellement après le
+  // rendu, quelle que soit la branche empruntée.
+  private navDemandee = new Set<number>();
 
   constructor(mount: HTMLElement, cb: PaneCallbacks) {
     this.mount = mount;
@@ -119,6 +128,7 @@ export class PaneManager {
     this.lastPaneIds = null;
     this.lastActive = null;
     this.splitChildren.clear();
+    this.navDemandee.clear();
   }
 
   renderLayout(tree: LayoutNode, active: number) {
@@ -187,6 +197,36 @@ export class PaneManager {
       this.views.get(active)?.term.focus();
       this.lastActive = active;
     }
+
+    // Réaffirmation de navigation (◀ / ▶ / champ URL) : indépendamment de la
+    // branche empruntée ci-dessus (structure inchangée ou reconstruite), on
+    // reposte `src` pour tout volet ayant une intention de navigation en
+    // attente, même si l'URL reçue est identique à l'attribut courant. C'est
+    // ce qui permet à ◀ de fonctionner quand le serveur, déjà en tête de
+    // pile, repousse la même URL que celle affichée après une navigation
+    // interne à la page (cf. commentaire sur `navDemandee`).
+    if (this.navDemandee.size > 0) {
+      for (const paneId of this.navDemandee) {
+        const url = this.findWebUrl(tree, paneId);
+        const view = this.webViews.get(paneId);
+        if (url !== undefined && view && urlAutorisee(url)) {
+          view.frame.setAttribute("src", url);
+        }
+      }
+      this.navDemandee.clear();
+    }
+  }
+
+  /// Retrouve, dans l'arbre de disposition reçu, l'URL du volet navigateur
+  /// `paneId` — ou `undefined` si ce volet n'existe pas dans l'arbre ou n'est
+  /// pas un volet navigateur.
+  private findWebUrl(tree: LayoutNode, paneId: number): string | undefined {
+    if ("Leaf" in tree) {
+      if (tree.Leaf.pane_id !== paneId) return undefined;
+      const k = tree.Leaf.kind;
+      return k !== "Terminal" && "Web" in k ? k.Web.url : undefined;
+    }
+    return this.findWebUrl(tree.Split.a, paneId) ?? this.findWebUrl(tree.Split.b, paneId);
   }
 
   private collectIds(tree: LayoutNode, into: Set<number>) {
@@ -319,11 +359,19 @@ export class PaneManager {
     const back = document.createElement("button");
     back.textContent = "◀";
     back.title = "Précédent";
-    back.onclick = () => this.cb.onWebBack(paneId);
+    back.onclick = () => {
+      // Intention explicite : réaffirmer `src` après coup même si le serveur
+      // repousse la même URL (cf. commentaire sur `navDemandee`).
+      this.navDemandee.add(paneId);
+      this.cb.onWebBack(paneId);
+    };
     const fwd = document.createElement("button");
     fwd.textContent = "▶";
     fwd.title = "Suivant";
-    fwd.onclick = () => this.cb.onWebForward(paneId);
+    fwd.onclick = () => {
+      this.navDemandee.add(paneId);
+      this.cb.onWebForward(paneId);
+    };
     const reload = document.createElement("button");
     reload.textContent = "⟳";
     // Ce bouton réassigne `src` à l'URL du volet : après une navigation
@@ -335,7 +383,10 @@ export class PaneManager {
     input.className = "web-url";
     input.value = url;
     input.onkeydown = (ev) => {
-      if (ev.key === "Enter") this.cb.onWebNavigate(paneId, input.value.trim());
+      if (ev.key === "Enter") {
+        this.navDemandee.add(paneId);
+        this.cb.onWebNavigate(paneId, input.value.trim());
+      }
     };
     const close = document.createElement("button");
     close.textContent = "✕";

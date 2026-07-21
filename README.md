@@ -102,7 +102,10 @@ Trois limites, assumées :
 - **Précédent/suivant parcourent l'historique de wimux**, c'est-à-dire les URL
   posées via la barre d'adresse ou l'ouverture du volet — pas celui du site. Les
   navigations faites *à l'intérieur* de la page (clic sur un lien) ne nous sont pas
-  visibles quand elle est d'une autre origine.
+  visibles quand elle est d'une autre origine : si vous cliquez un lien puis
+  appuyez sur ◀, wimux ne connaît pas la page affichée par le lien — ◀ vous
+  ramène à la **dernière URL connue de wimux** (celle d'avant le clic), pas à
+  une page intermédiaire que le site aurait pu montrer.
 - **Reparenter l'iframe recharge la page.** `PaneManager.renderLayout` reconstruit
   le DOM (`mount.replaceChildren(root)`) à chaque changement structurel de la
   disposition — découpe, fermeture, bascule d'onglet, ré-attache. Or déplacer un
