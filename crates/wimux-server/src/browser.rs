@@ -138,6 +138,7 @@ pub enum BrowserCommand {
 }
 
 /// Réponse du thread moteur.
+#[derive(Debug)]
 pub enum BrowserReply {
     Ok,
     Status { running: bool, url: Option<String> },
@@ -288,7 +289,32 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
                 url,
             })
         }
-        // Navigate/Url/Snapshot/Screenshot : Tasks 4 et 5.
+        BrowserCommand::Navigate(url) => {
+            if !is_allowed_url(&url) {
+                return Err("URL refusée : http(s) seulement".into());
+            }
+            // Lancement paresseux.
+            if sess.is_none() {
+                *sess = Some(launch_session().await?);
+            }
+            let page = &sess.as_ref().unwrap().page;
+            page.goto(url)
+                .await
+                .map_err(|e| format!("navigation : {e}"))?;
+            page.wait_for_navigation()
+                .await
+                .map_err(|e| format!("attente de chargement : {e}"))?;
+            let finale = page.url().await.ok().flatten().unwrap_or_default();
+            Ok(BrowserReply::Text(finale))
+        }
+        BrowserCommand::Url => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let u = s.page.url().await.ok().flatten().unwrap_or_default();
+            Ok(BrowserReply::Text(u))
+        }
+        // Snapshot/Screenshot : Task 5.
         _ => Err("commande non implémentée".into()),
     }
 }
@@ -302,6 +328,61 @@ mod tests {
     /// tests d'intégration, comme les tests git de M3/M4.)
     fn navigateur_dispo() -> bool {
         find_browser_binary(&default_candidates()).is_some()
+    }
+
+    /// Sert `html` sur `127.0.0.1:<port libre>` le temps du test ; renvoie l'URL.
+    fn servir_page_locale(html: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            // Sert la même page à la première connexion, puis s'arrête.
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html.len(),
+                    html
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), handle)
+    }
+
+    #[test]
+    fn navigate_refuse_les_schemas_non_http() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test navigate_refuse ignoré");
+            return;
+        }
+        let engine = BrowserEngine::new();
+        let err = engine
+            .exec(BrowserCommand::Navigate("file:///C:/x".into()))
+            .unwrap_err();
+        assert!(err.contains("http"), "message de refus attendu : {err}");
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn navigate_puis_url_reflete_la_page() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test navigate_puis_url ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale("<!doctype html><title>T</title><h1>Bonjour</h1>");
+        let engine = BrowserEngine::new();
+        match engine.exec(BrowserCommand::Navigate(url.clone())).unwrap() {
+            BrowserReply::Text(finale) => assert!(finale.starts_with("http://127.0.0.1:")),
+            _ => panic!("Text attendu"),
+        }
+        match engine.exec(BrowserCommand::Url).unwrap() {
+            BrowserReply::Text(u) => assert!(u.starts_with("http://127.0.0.1:"), "url : {u}"),
+            _ => panic!("Text attendu"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
     }
 
     #[test]
