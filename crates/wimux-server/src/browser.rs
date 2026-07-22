@@ -235,9 +235,23 @@ fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>) {
 async fn launch_session() -> Result<Session, String> {
     let bin = find_browser_binary(&default_candidates())
         .ok_or_else(|| "aucun navigateur Chrome/Edge trouvé sur cette machine".to_string())?;
+    // Profil (`user-data-dir`) DÉDIÉ et JETABLE, unique par navigateur lancé :
+    // - Isolation des tests : sans ça, tous les `BrowserEngine` partagent le
+    //   profil par défaut de chromiumoxide (`%TEMP%\chromiumoxide-runner`), et
+    //   deux navigateurs simultanés (tests en parallèle, threads par défaut de
+    //   `cargo test`) se marchent dessus sur le fichier verrou du profil
+    //   (« Lock file can not be created ! »).
+    // - Sécurité (fil rouge B2) : le navigateur d'automatisation ne doit PAS
+    //   hériter du profil réel de l'utilisateur (cookies, sessions connectées,
+    //   historique). Un profil neuf à chaque lancement est le défaut sûr —
+    //   un partage délibéré de profil serait une décision explicite, pas
+    //   celle-ci. Le dossier peut rester sur disque après fermeture
+    //   (best-effort, pas de nettoyage fragile).
+    let profile_dir = browser_profile_dir()?;
     let config = BrowserConfig::builder()
         .with_head()
         .chrome_executable(bin)
+        .user_data_dir(&profile_dir)
         .build()
         .map_err(|e| format!("config navigateur : {e}"))?;
     let (browser, mut handler) = Browser::launch(config)
@@ -276,11 +290,12 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
                 // Best-effort : fermeture propre du navigateur. `close()` ne fait
                 // qu'envoyer la commande CDP `Browser.close` : le process OS peut
                 // encore tourner un instant après. `wait()` attend sa sortie
-                // effective, ce qui libère le verrou de profil (répertoire
-                // `user-data-dir` partagé par toutes les sessions) avant de
-                // répondre — sans ça, un `Launch`/`Navigate` immédiatement
-                // suivant (le prochain test, en série) peut échouer avec
-                // « Lock file can not be created ! ».
+                // effective avant de répondre, pour ne pas laisser un process
+                // Chrome zombie derrière un `Close` qui semble terminé. (Chaque
+                // session a désormais son propre `user-data-dir` — voir
+                // `browser_profile_dir` — donc la collision de verrou entre
+                // navigateurs n'est plus possible ; le dossier de profil reste
+                // sur disque après fermeture, best-effort, sans nettoyage.)
                 let mut b = s.browser;
                 let _ = b.close().await;
                 let _ = b.wait().await;
@@ -408,6 +423,27 @@ fn map_ax_node(n: &chromiumoxide::cdp::browser_protocol::accessibility::AxNode) 
     }
 }
 
+/// Dossier de profil navigateur DÉDIÉ, sous
+/// `%LOCALAPPDATA%\wimux\browser-profile\<pid>-<compteur>` — un par navigateur
+/// lancé (même style que `screenshot_path` ci-dessous). Numérotation monotone
+/// par process (pas d'horloge : déterministe, et unique même si deux
+/// `BrowserEngine` du même process se lancent en parallèle, ex. tests).
+fn browser_profile_dir() -> Result<PathBuf, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let base =
+        std::env::var_os("LOCALAPPDATA").ok_or_else(|| "%LOCALAPPDATA% introuvable".to_string())?;
+    let i = N.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let dir = PathBuf::from(base)
+        .join("wimux")
+        .join("browser-profile")
+        .join(format!("{pid}-{i}"));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("création dossier profil navigateur : {e}"))?;
+    Ok(dir)
+}
+
 /// Chemin de capture sous `%LOCALAPPDATA%\wimux\screenshots\shot-<pid>-<compteur>.png`.
 /// Numérotation monotone par process (pas d'horloge : évite une dépendance temps
 /// et reste déterministe pour les tests).
@@ -446,8 +482,20 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = std::thread::spawn(move || {
-            // Sert la même page à la première connexion, puis s'arrête.
-            if let Ok((mut stream, _)) = listener.accept() {
+            // Sert jusqu'à 8 connexions, puis s'arrête. Une seule connexion ne
+            // suffit PAS : Chrome ouvre souvent plus d'une connexion vers la
+            // même origine pour une seule navigation (ex. `favicon.ico` en
+            // plus de la page). Avec un serveur à connexion unique, la
+            // première connexion acceptée ferme le `TcpListener` (fin du
+            // thread) avant que la seconde n'arrive, qui se voit alors
+            // refusée (`ERR_CONNECTION_REFUSED`) — flaky de façon intermittente
+            // selon laquelle des deux connexions gagne la course. Accepter
+            // plusieurs connexions absorbe ces requêtes additionnelles sans
+            // affecter le test (chaque connexion reçoit la même page).
+            for _ in 0..8 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf);
                 let resp = format!(
