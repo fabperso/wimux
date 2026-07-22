@@ -1399,6 +1399,15 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }
+            ClientMessage::BrowserPress { key, ref_ } => {
+                let reply = browser_reply(
+                    server
+                        .browser
+                        .exec(crate::browser::BrowserCommand::Press { key, ref_ }),
+                );
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
                     let outcome = route_input(&a.session, &server.config, &mut prefix, &bytes);

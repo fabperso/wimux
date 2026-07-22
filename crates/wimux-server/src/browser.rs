@@ -226,6 +226,32 @@ pub enum BrowserCommand {
         ref_: String,
         text: String,
     },
+    /// B2.2 : appuie une touche nommée (optionnellement après focus sur une ref).
+    Press {
+        key: String,
+        ref_: Option<String>,
+    },
+}
+
+/// Nom de touche → (key, code, windows_virtual_key_code) pour CDP. `None` si
+/// non gérée. Ensemble volontairement restreint (navigation/édition usuelles).
+fn touche_cdp(nom: &str) -> Option<(&'static str, &'static str, i64)> {
+    Some(match nom {
+        "Enter" => ("Enter", "Enter", 13),
+        "Tab" => ("Tab", "Tab", 9),
+        "Escape" => ("Escape", "Escape", 27),
+        "Backspace" => ("Backspace", "Backspace", 8),
+        "Delete" => ("Delete", "Delete", 46),
+        "ArrowUp" => ("ArrowUp", "ArrowUp", 38),
+        "ArrowDown" => ("ArrowDown", "ArrowDown", 40),
+        "ArrowLeft" => ("ArrowLeft", "ArrowLeft", 37),
+        "ArrowRight" => ("ArrowRight", "ArrowRight", 39),
+        "Home" => ("Home", "Home", 36),
+        "End" => ("End", "End", 35),
+        "PageUp" => ("PageUp", "PageUp", 33),
+        "PageDown" => ("PageDown", "PageDown", 34),
+        _ => return None,
+    })
 }
 
 /// Réponse du thread moteur.
@@ -654,6 +680,45 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
             focus_backend(&s.page, bid).await?;
             select_all(&s.page).await?;
             insert_text(&s.page, &text).await?;
+            Ok(BrowserReply::Ok)
+        }
+        BrowserCommand::Press { key, ref_ } => {
+            use chromiumoxide::cdp::browser_protocol::input::DispatchKeyEventType;
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            if let Some(r) = &ref_ {
+                let bid = backend_id_for(s, r)?;
+                focus_backend(&s.page, bid).await?;
+            }
+            let (k, code, vk) = touche_cdp(&key).ok_or_else(|| {
+                format!(
+                    "touche inconnue : {key} (gérées : Enter, Tab, Escape, Backspace, \
+                     Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown)"
+                )
+            })?;
+            // Enter émet aussi le caractère de retour ; les touches d'édition non.
+            let text = if key == "Enter" { Some("\r") } else { None };
+            dispatch_key(
+                &s.page,
+                DispatchKeyEventType::KeyDown,
+                k,
+                code,
+                vk,
+                text,
+                None,
+            )
+            .await?;
+            dispatch_key(
+                &s.page,
+                DispatchKeyEventType::KeyUp,
+                k,
+                code,
+                vk,
+                text,
+                None,
+            )
+            .await?;
             Ok(BrowserReply::Ok)
         }
     }
@@ -1298,6 +1363,52 @@ mod tests {
         ));
         match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => assert!(t.contains("Fabrice"), "après type : {t}"),
+            _ => panic!("Text"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn touche_cdp_connait_les_touches_usuelles() {
+        assert_eq!(touche_cdp("Enter"), Some(("Enter", "Enter", 13)));
+        assert_eq!(
+            touche_cdp("ArrowDown"),
+            Some(("ArrowDown", "ArrowDown", 40))
+        );
+        assert_eq!(touche_cdp("PageUp"), Some(("PageUp", "PageUp", 33)));
+        assert_eq!(touche_cdp("Grokk"), None);
+    }
+
+    #[test]
+    fn press_enter_soumet_un_formulaire() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test press ignoré");
+            return;
+        }
+        // Enter dans le champ soumet le form -> navigation vers /page2 (même contenu).
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title>\
+             <form action=\"page2\"><input aria-label=Q></form>",
+        );
+        let engine = BrowserEngine::new();
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Q").expect("ref du champ");
+        engine
+            .exec(BrowserCommand::Press {
+                key: "Enter".into(),
+                ref_: Some(r),
+            })
+            .unwrap();
+        // Laisser la navigation se faire, puis vérifier l'URL.
+        // NOTE (Task 4) : `BrowserCommand::Wait` n'existe pas encore (Task 6) ;
+        // remplacement temporaire par un sleep, à rétablir en Task 6.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        match engine.exec(BrowserCommand::Url).unwrap() {
+            BrowserReply::Text(u) => assert!(u.contains("page2"), "url après Enter : {u}"),
             _ => panic!("Text"),
         }
         let _ = engine.exec(BrowserCommand::Close);

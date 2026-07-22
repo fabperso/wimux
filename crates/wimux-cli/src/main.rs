@@ -353,6 +353,25 @@ mod browser {
         })?;
         Ok(TypeArgs { ref_, text })
     }
+
+    #[derive(Debug, PartialEq)]
+    pub struct PressArgs {
+        pub key: String,
+        pub ref_: Option<String>,
+    }
+
+    /// `<touche> [--ref <eN>]` : la touche est le premier argument non-flag.
+    pub fn parse_press(args: &[String]) -> io::Result<PressArgs> {
+        let key = args
+            .iter()
+            .find(|a| !a.starts_with("--"))
+            .cloned()
+            .ok_or_else(|| io::Error::other("usage : wimux browser press <touche> [--ref <eN>]"))?;
+        Ok(PressArgs {
+            key,
+            ref_: flag(args, "--ref"),
+        })
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1216,6 +1235,13 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
                 text: a.text,
             })
         }
+        Some("press") => {
+            let a = browser::parse_press(&args[1..])?;
+            browser_simple(ClientMessage::BrowserPress {
+                key: a.key,
+                ref_: a.ref_,
+            })
+        }
         _ => Err(io::Error::other(
             "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait> …",
         )),
@@ -1585,6 +1611,17 @@ mod browser_tests {
         assert_eq!(a.ref_, "e2");
         assert_eq!(a.text, "Bonjour");
         assert!(parse_type(&["--ref".into(), "e2".into()]).is_err()); // --text manquant
+    }
+
+    #[test]
+    fn parse_press_touche_positionnelle_et_ref_option() {
+        let a = parse_press(&["Enter".into()]).unwrap();
+        assert_eq!(a.key, "Enter");
+        assert_eq!(a.ref_, None);
+        let b = parse_press(&["Tab".into(), "--ref".into(), "e3".into()]).unwrap();
+        assert_eq!(b.key, "Tab");
+        assert_eq!(b.ref_, Some("e3".into()));
+        assert!(parse_press(&[]).is_err()); // touche manquante
     }
 }
 

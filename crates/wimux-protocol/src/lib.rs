@@ -489,6 +489,11 @@ pub enum ClientMessage {
         ref_: String,
         text: String,
     },
+    /// B2.2 : appuie une touche nommée (focus optionnel sur une ref).
+    BrowserPress {
+        key: String,
+        ref_: Option<String>,
+    },
 }
 
 /// Messages serveur -> client.
