@@ -272,18 +272,22 @@ struct Job {
 /// Pont synchrone → thread moteur asynchrone. Démarre le thread au premier appel.
 pub struct BrowserEngine {
     tx: Mutex<Option<tokio::sync::mpsc::Sender<Job>>>,
+    /// Sans fenêtre visible par défaut (fiabilité clavier — voir le commentaire
+    /// sur `Config::browser_headless`). `false` = fenêtre visible (« vitrine »).
+    headless: bool,
 }
 
 impl Default for BrowserEngine {
     fn default() -> Self {
-        Self::new()
+        Self::new(true)
     }
 }
 
 impl BrowserEngine {
-    pub fn new() -> BrowserEngine {
+    pub fn new(headless: bool) -> BrowserEngine {
         BrowserEngine {
             tx: Mutex::new(None),
+            headless,
         }
     }
 
@@ -306,9 +310,10 @@ impl BrowserEngine {
             return tx.clone();
         }
         let (tx, rx) = tokio::sync::mpsc::channel::<Job>(32);
+        let headless = self.headless;
         std::thread::Builder::new()
             .name("wimux-browser".into())
-            .spawn(move || worker(rx))
+            .spawn(move || worker(rx, headless))
             .expect("thread moteur navigateur");
         *g = Some(tx.clone());
         tx
@@ -326,7 +331,7 @@ struct Session {
 }
 
 /// Corps du thread moteur : un runtime tokio qui traite les commandes en série.
-fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>) {
+fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>, headless: bool) {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -344,7 +349,7 @@ fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>) {
     rt.block_on(async move {
         let mut sess: Option<Session> = None;
         while let Some(job) = rx.recv().await {
-            let res = dispatch(&mut sess, job.cmd).await;
+            let res = dispatch(&mut sess, job.cmd, headless).await;
             let _ = job.reply.send(res);
         }
         // Canal fermé (BrowserEngine droppé) : `sess` est droppé -> Chrome fermé.
@@ -352,7 +357,8 @@ fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>) {
 }
 
 /// Lance le navigateur (découverte Chrome→Edge) et ouvre une page vierge.
-async fn launch_session() -> Result<Session, String> {
+/// `headless` : sans fenêtre visible (par défaut) ou « vitrine » (`with_head`).
+async fn launch_session(headless: bool) -> Result<Session, String> {
     let bin = find_browser_binary(&default_candidates())
         .ok_or_else(|| "aucun navigateur Chrome/Edge trouvé sur cette machine".to_string())?;
     // Profil (`user-data-dir`) DÉDIÉ et JETABLE, unique par navigateur lancé :
@@ -368,8 +374,11 @@ async fn launch_session() -> Result<Session, String> {
     //   celle-ci. Le dossier peut rester sur disque après fermeture
     //   (best-effort, pas de nettoyage fragile).
     let profile_dir = browser_profile_dir()?;
-    let config = BrowserConfig::builder()
-        .with_head()
+    let mut builder = BrowserConfig::builder();
+    if !headless {
+        builder = builder.with_head();
+    }
+    let config = builder
         .chrome_executable(bin)
         .user_data_dir(&profile_dir)
         .build()
@@ -560,11 +569,15 @@ async fn insert_text(page: &chromiumoxide::Page, text: &str) -> Result<(), Strin
 }
 
 /// Traite une commande. `sess` est l'état mutable de la session (None = non lancé).
-async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<BrowserReply, String> {
+async fn dispatch(
+    sess: &mut Option<Session>,
+    cmd: BrowserCommand,
+    headless: bool,
+) -> Result<BrowserReply, String> {
     match cmd {
         BrowserCommand::Launch => {
             if sess.is_none() {
-                *sess = Some(launch_session().await?);
+                *sess = Some(launch_session(headless).await?);
             }
             Ok(BrowserReply::Ok)
         }
@@ -602,7 +615,7 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
             }
             // Lancement paresseux.
             if sess.is_none() {
-                *sess = Some(launch_session().await?);
+                *sess = Some(launch_session(headless).await?);
             }
             let page = &sess.as_ref().unwrap().page;
             // Borne de temps : le worker est strictement sériel. Une page qui ne
@@ -891,7 +904,7 @@ mod tests {
              <button onclick=\"document.getElementById('r').textContent='clické'\">Go</button>\
              <p id=r>vide</p>",
         );
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => t,
@@ -915,7 +928,7 @@ mod tests {
             eprintln!("aucun navigateur : test navigate_refuse ignoré");
             return;
         }
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         let err = engine
             .exec(BrowserCommand::Navigate("file:///C:/x".into()))
             .unwrap_err();
@@ -930,7 +943,7 @@ mod tests {
             return;
         }
         let (url, _srv) = servir_page_locale("<!doctype html><title>T</title><h1>Bonjour</h1>");
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         match engine.exec(BrowserCommand::Navigate(url.clone())).unwrap() {
             BrowserReply::Text(finale) => assert!(finale.starts_with("http://127.0.0.1:")),
             _ => panic!("Text attendu"),
@@ -948,7 +961,7 @@ mod tests {
             eprintln!("aucun Chrome/Edge : test launch_status_close ignoré");
             return;
         }
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         // Avant lancement : pas en cours.
         match engine.exec(BrowserCommand::Status).unwrap() {
             BrowserReply::Status { running, .. } => assert!(!running),
@@ -1169,7 +1182,7 @@ mod tests {
         }
         let (url, _srv) =
             servir_page_locale("<!doctype html><title>T</title><button>Continuer</button>");
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
 
         match engine.exec(BrowserCommand::Snapshot).unwrap() {
@@ -1209,7 +1222,7 @@ mod tests {
         }
         let (url, _srv) =
             servir_page_locale("<!doctype html><title>T</title><button>Continuer</button>");
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => {
@@ -1345,7 +1358,7 @@ mod tests {
              <input aria-label=Nom oninput=\"document.getElementById('m').textContent=this.value\">\
              <p id=m>vide</p>",
         );
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => t,
@@ -1385,13 +1398,13 @@ mod tests {
             eprintln!("aucun navigateur : test press ignoré");
             return;
         }
-        // onkeydown recopie le nom de la touche dans un <p> -> visible au snapshot.
+        // onkeydown écrit le nom de la touche dans location.hash : lisible via `Url`
+        // (URL du document en direct, insensible au cache de l'arbre d'accessibilité).
         let (url, _srv) = servir_page_locale(
             "<!doctype html><title>T</title>\
-             <input aria-label=Q onkeydown=\"document.getElementById('m').textContent=event.key\">\
-             <p id=m>vide</p>",
+             <input aria-label=Q onkeydown=\"location.hash=event.key\">",
         );
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => t,
@@ -1405,9 +1418,9 @@ mod tests {
             })
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
-        match engine.exec(BrowserCommand::Snapshot).unwrap() {
-            BrowserReply::Text(t) => assert!(t.contains("ArrowDown"), "après press : {t}"),
-            _ => panic!("Text"),
+        match engine.exec(BrowserCommand::Url).unwrap() {
+            BrowserReply::Text(u) => assert!(u.contains("ArrowDown"), "url après press : {u}"),
+            _ => panic!("Text attendu"),
         }
         let _ = engine.exec(BrowserCommand::Close);
     }
