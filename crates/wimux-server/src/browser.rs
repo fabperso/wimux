@@ -440,6 +440,14 @@ async fn scroll_into_view(page: &chromiumoxide::Page, backend: i64) -> Result<()
 }
 
 /// Centre géométrique de l'élément (moyenne des 4 coins du quad `content`).
+///
+/// Vérifié empiriquement (revue B2.2, voir
+/// `click_sous_la_ligne_de_flottaison`) : `DOM.getBoxModel` rend déjà des
+/// coordonnées VIEWPORT (pas document) sur cet environnement — cohérent avec
+/// le traitement fait par Puppeteer de `getContentQuads`/`getBoxModel`. Une
+/// soustraction du décalage de défilement (`Page.getLayoutMetrics`) a été
+/// testée et cassait le clic après scroll (coordonnée négative, hors écran) :
+/// pas de conversion supplémentaire ici.
 async fn element_center(page: &chromiumoxide::Page, backend: i64) -> Result<(f64, f64), String> {
     use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, GetBoxModelParams};
     let resp = page
@@ -646,6 +654,11 @@ async fn dispatch(
             if sess.is_none() {
                 *sess = Some(launch_session(headless).await?);
             }
+            // Vidées AVANT la navigation (pas après) : les refs pointent le DOM
+            // de l'ancienne page. Si `goto`/`wait_for_navigation` échoue ou
+            // timeout ci-dessous, on ne veut PAS laisser des refs de l'ancienne
+            // page survivre comme si elles étaient encore valides.
+            sess.as_mut().unwrap().refs.clear();
             let page = &sess.as_ref().unwrap().page;
             // Borne de temps : le worker est strictement sériel. Une page qui ne
             // déclenche jamais `load` bloquerait TOUTES les commandes suivantes
@@ -663,10 +676,15 @@ async fn dispatch(
             })
             .await
             .map_err(|_| "navigation : délai dépassé (30 s)".to_string())??;
-            // Les refs du snapshot précédent ne valent plus rien après navigation.
-            let s = sess.as_mut().unwrap();
-            s.refs.clear();
-            let finale = s.page.url().await.ok().flatten().unwrap_or_default();
+            let finale = sess
+                .as_ref()
+                .unwrap()
+                .page
+                .url()
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             Ok(BrowserReply::Text(finale))
         }
         BrowserCommand::Url => {
@@ -783,22 +801,30 @@ async fn dispatch(
             use std::time::Duration;
             if let Some(t) = text {
                 let s = sess
-                    .as_ref()
+                    .as_mut()
                     .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
-                let texte = tokio::time::timeout(Duration::from_secs(10), async {
+                let nodes = tokio::time::timeout(Duration::from_secs(10), async {
                     loop {
                         let nodes = snapshot_nodes(&s.page).await?;
                         let (texte, _) = render_ax_tree(&nodes);
                         if texte.contains(t.as_str()) {
-                            return Ok::<String, String>(texte);
+                            return Ok::<Vec<AxSnapshotNode>, String>(nodes);
                         }
                         tokio::time::sleep(Duration::from_millis(250)).await;
                     }
                 })
                 .await
                 .map_err(|_| format!("wait --text : « {t} » non trouvé (timeout 10 s)"))??;
+                // Le texte affiché par `wait --text` contient des `[ref=eN]` : il
+                // faut les enregistrer (comme `Snapshot`), sinon une ref montrée
+                // ici est périmée/inconnue pour un `click --ref` qui suit.
+                let (texte, refs) = render_ax_tree(&nodes);
+                s.refs = refs.into_iter().collect();
                 Ok(BrowserReply::Text(texte))
             } else if let Some(n) = ms {
+                // Borne : le worker est sériel — un délai énorme figerait toutes les
+                // commandes navigateur (de tous les clients) sans reprise. Plafond 60 s.
+                let n = n.min(60_000);
                 tokio::time::sleep(Duration::from_millis(n)).await;
                 Ok(BrowserReply::Ok)
             } else if settle {
@@ -1581,6 +1607,34 @@ mod tests {
             err.contains("timeout") || err.contains("non trouvé"),
             "err : {err}"
         );
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    // Prouve que getBoxModel rend des coordonnées viewport : le clic après
+    // scroll atteint sa cible sans conversion.
+    #[test]
+    fn click_sous_la_ligne_de_flottaison() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test click sous la ligne ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title><div style=height:2000px></div>\
+             <button onclick=\"document.getElementById('r').textContent='clické'\">Bas</button>\
+             <p id=r>vide</p>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Bas").expect("ref du bouton bas");
+        engine.exec(BrowserCommand::Click { ref_: r }).unwrap();
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => assert!(t.contains("clické"), "après clic bas : {t}"),
+            _ => panic!("Text"),
+        }
         let _ = engine.exec(BrowserCommand::Close);
     }
 }
