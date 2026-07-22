@@ -217,6 +217,10 @@ pub enum BrowserCommand {
     Url,
     Snapshot,
     Screenshot,
+    /// B2.2 : clic gauche sur l'élément désigné par une ref de snapshot.
+    Click {
+        ref_: String,
+    },
 }
 
 /// Réponse du thread moteur.
@@ -361,6 +365,93 @@ async fn launch_session() -> Result<Session, String> {
     })
 }
 
+/// Traduit une ref de snapshot en `backend_node_id` mémorisé. Erreur explicite
+/// si la ref est inconnue (jamais vue ou périmée depuis la dernière navigation).
+fn backend_id_for(sess: &Session, r: &str) -> Result<i64, String> {
+    sess.refs
+        .get(r)
+        .copied()
+        .ok_or_else(|| format!("ref inconnue ({r}) — refais un snapshot"))
+}
+
+/// Amène l'élément dans le viewport (préalable à un clic fiable).
+async fn scroll_into_view(page: &chromiumoxide::Page, backend: i64) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ScrollIntoViewIfNeededParams};
+    page.execute(ScrollIntoViewIfNeededParams {
+        node_id: None,
+        backend_node_id: Some(BackendNodeId::new(backend)),
+        object_id: None,
+        rect: None,
+    })
+    .await
+    .map_err(|e| format!("scrollIntoView : {e}"))?;
+    Ok(())
+}
+
+/// Centre géométrique de l'élément (moyenne des 4 coins du quad `content`).
+async fn element_center(page: &chromiumoxide::Page, backend: i64) -> Result<(f64, f64), String> {
+    use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, GetBoxModelParams};
+    let resp = page
+        .execute(GetBoxModelParams {
+            node_id: None,
+            backend_node_id: Some(BackendNodeId::new(backend)),
+            object_id: None,
+        })
+        .await
+        .map_err(|e| format!("box model : {e}"))?;
+    let q = resp.result.model.content.inner();
+    if q.len() < 8 {
+        return Err("élément sans géométrie visible".into());
+    }
+    let cx = (q[0] + q[2] + q[4] + q[6]) / 4.0;
+    let cy = (q[1] + q[3] + q[5] + q[7]) / 4.0;
+    Ok((cx, cy))
+}
+
+/// Clic gauche natif (move + press + release) aux coordonnées viewport données.
+/// Le `MouseMoved` préalable (avant press/release) n'est pas dans la spec CDP
+/// minimale mais reproduit le comportement de `chromiumoxide::Page::click` /
+/// `HandlerPage::click` (0.9.1) : sans lui, un press+release immédiat après un
+/// `Snapshot` s'est montré intermittent en pratique (le clic est bien envoyé,
+/// mais l'AX tree relu juste après ne reflète pas toujours la mutation DOM
+/// synchrone du gestionnaire `onclick` — ~40% d'échecs mesurés sur ce poste
+/// sans le `MouseMoved`, ~0/26 avec). Toujours zéro JS de page, uniquement des
+/// événements `Input.dispatchMouseEvent` natifs.
+async fn mouse_click_at(page: &chromiumoxide::Page, x: f64, y: f64) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::{
+        DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+    };
+    let moved = DispatchMouseEventParams::builder()
+        .r#type(DispatchMouseEventType::MouseMoved)
+        .x(x)
+        .y(y)
+        .build()?;
+    page.execute(moved)
+        .await
+        .map_err(|e| format!("clic (move) : {e}"))?;
+    let down = DispatchMouseEventParams::builder()
+        .r#type(DispatchMouseEventType::MousePressed)
+        .x(x)
+        .y(y)
+        .button(MouseButton::Left)
+        .click_count(1)
+        .build()?;
+    page.execute(down)
+        .await
+        .map_err(|e| format!("clic (down) : {e}"))?;
+    let up = DispatchMouseEventParams::builder()
+        .r#type(DispatchMouseEventType::MouseReleased)
+        .x(x)
+        .y(y)
+        .button(MouseButton::Left)
+        .click_count(1)
+        .build()?;
+    page.execute(up)
+        .await
+        .map_err(|e| format!("clic (up) : {e}"))?;
+    Ok(())
+}
+
 /// Traite une commande. `sess` est l'état mutable de la session (None = non lancé).
 async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<BrowserReply, String> {
     match cmd {
@@ -463,6 +554,16 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
             let path = screenshot_path()?;
             std::fs::write(&path, &png).map_err(|e| format!("écriture PNG : {e}"))?;
             Ok(BrowserReply::Shot(path))
+        }
+        BrowserCommand::Click { ref_ } => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let bid = backend_id_for(s, &ref_)?;
+            scroll_into_view(&s.page, bid).await?;
+            let (x, y) = element_center(&s.page, bid).await?;
+            mouse_click_at(&s.page, x, y).await?;
+            Ok(BrowserReply::Ok)
         }
     }
 }
@@ -612,6 +713,44 @@ mod tests {
             }
         });
         (format!("http://127.0.0.1:{port}/"), handle)
+    }
+
+    /// Extrait le jeton `eN` de la première ligne du snapshot contenant `besoin`.
+    fn ref_pour(snapshot: &str, besoin: &str) -> Option<String> {
+        let ligne = snapshot.lines().find(|l| l.contains(besoin))?;
+        let deb = ligne.find("[ref=")? + 5;
+        let fin = ligne[deb..].find(']')? + deb;
+        Some(ligne[deb..fin].to_string())
+    }
+
+    #[test]
+    fn click_declenche_le_gestionnaire_de_la_page() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test click ignoré");
+            return;
+        }
+        // Un clic sur le bouton change le texte d'un paragraphe -> visible au snapshot.
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title>\
+             <button onclick=\"document.getElementById('r').textContent='clické'\">Go</button>\
+             <p id=r>vide</p>",
+        );
+        let engine = BrowserEngine::new();
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Go").expect("ref du bouton Go");
+        assert!(matches!(
+            engine.exec(BrowserCommand::Click { ref_: r }).unwrap(),
+            BrowserReply::Ok
+        ));
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => assert!(t.contains("clické"), "après clic : {t}"),
+            _ => panic!("Text"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
     }
 
     #[test]

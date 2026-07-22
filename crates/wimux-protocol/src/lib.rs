@@ -480,6 +480,10 @@ pub enum ClientMessage {
     BrowserSnapshot,
     /// B2.1 : capture PNG écrite sur disque, renvoie le chemin (erreur si non lancé).
     BrowserScreenshot,
+    /// B2.2 : clic gauche sur l'élément désigné par une ref de snapshot.
+    BrowserClick {
+        ref_: String,
+    },
 }
 
 /// Messages serveur -> client.

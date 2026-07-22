@@ -323,6 +323,19 @@ mod browser {
             "usage : wimux browser navigate --url <url>",
         ))
     }
+
+    /// Valeur suivant `--<nom>` dans `args`, si présente.
+    pub fn flag(args: &[String], nom: &str) -> Option<String> {
+        args.iter()
+            .position(|a| a == nom)
+            .and_then(|i| args.get(i + 1).cloned())
+    }
+
+    /// `--ref <eN>` obligatoire.
+    pub fn parse_ref(args: &[String]) -> io::Result<String> {
+        flag(args, "--ref")
+            .ok_or_else(|| io::Error::other("usage : wimux browser click --ref <eN>"))
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1176,8 +1189,11 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
         Some("url") => browser_text(ClientMessage::BrowserUrl),
         Some("snapshot") => browser_text(ClientMessage::BrowserSnapshot),
         Some("screenshot") => browser_screenshot(),
+        Some("click") => browser_simple(ClientMessage::BrowserClick {
+            ref_: browser::parse_ref(&args[1..])?,
+        }),
         _ => Err(io::Error::other(
-            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot> …",
+            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait> …",
         )),
     }
 }
