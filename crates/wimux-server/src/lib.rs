@@ -2,6 +2,7 @@
 //! et les tests d'intégration l'exercent directement.
 
 pub mod batch;
+pub mod browser;
 pub mod commands;
 pub mod config;
 pub mod daemon;
