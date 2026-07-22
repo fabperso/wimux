@@ -464,6 +464,22 @@ pub enum ClientMessage {
         session: String,
         pane: u64,
     },
+    /// B2.1 : lance le navigateur pilotable (no-op s'il tourne déjà).
+    BrowserLaunch,
+    /// B2.1 : ferme le navigateur pilotable.
+    BrowserClose,
+    /// B2.1 : état du navigateur (lancé ? URL courante ?).
+    BrowserStatus,
+    /// B2.1 : navigue (lance au besoin) ; refuse les schémas non http(s).
+    BrowserNavigate {
+        url: String,
+    },
+    /// B2.1 : URL courante (erreur si non lancé).
+    BrowserUrl,
+    /// B2.1 : arbre d'accessibilité de la page (erreur si non lancé).
+    BrowserSnapshot,
+    /// B2.1 : capture PNG écrite sur disque, renvoie le chemin (erreur si non lancé).
+    BrowserScreenshot,
 }
 
 /// Messages serveur -> client.
@@ -546,6 +562,17 @@ pub enum ServerMessage {
     /// M4 : réponse à `OpenPr` — URL de la Pull Request créée.
     PrOpened {
         url: String,
+    },
+    /// B2.1 : réponse à `BrowserStatus`.
+    BrowserState {
+        running: bool,
+        url: Option<String>,
+    },
+    /// B2.1 : réponse texte (url / navigate / snapshot).
+    BrowserText(String),
+    /// B2.1 : réponse à `BrowserScreenshot` — chemin du PNG.
+    BrowserShot {
+        path: String,
     },
 }
 
@@ -1168,6 +1195,40 @@ mod tests {
         assert!(matches!(
             postcard::from_bytes::<ClientMessage>(&bytes).unwrap(),
             ClientMessage::WebBack { pane: 4, .. }
+        ));
+    }
+
+    #[test]
+    fn aller_retour_messages_navigateur() {
+        let msg = ClientMessage::BrowserNavigate {
+            url: "http://localhost:8899/".into(),
+        };
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        assert!(matches!(
+            postcard::from_bytes::<ClientMessage>(&bytes).unwrap(),
+            ClientMessage::BrowserNavigate { url } if url == "http://localhost:8899/"
+        ));
+
+        let reply = ServerMessage::BrowserState {
+            running: true,
+            url: Some("http://localhost:8899/".into()),
+        };
+        let bytes = postcard::to_allocvec(&reply).unwrap();
+        match postcard::from_bytes::<ServerMessage>(&bytes).unwrap() {
+            ServerMessage::BrowserState { running, url } => {
+                assert!(running);
+                assert_eq!(url.as_deref(), Some("http://localhost:8899/"));
+            }
+            _ => panic!("variante inattendue"),
+        }
+
+        let shot = ServerMessage::BrowserShot {
+            path: "C:\\x\\1.png".into(),
+        };
+        let bytes = postcard::to_allocvec(&shot).unwrap();
+        assert!(matches!(
+            postcard::from_bytes::<ServerMessage>(&bytes).unwrap(),
+            ServerMessage::BrowserShot { path } if path == "C:\\x\\1.png"
         ));
     }
 }

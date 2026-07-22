@@ -306,6 +306,23 @@ mod browser {
             )),
         }
     }
+
+    /// Lit `--url <url>` (pour `navigate`).
+    pub fn parse_url_flag(args: &[String]) -> io::Result<String> {
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--url" {
+                return args
+                    .get(i + 1)
+                    .cloned()
+                    .ok_or_else(|| io::Error::other("--url attend une valeur"));
+            }
+            i += 1;
+        }
+        Err(io::Error::other(
+            "usage : wimux browser navigate --url <url>",
+        ))
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1151,8 +1168,84 @@ fn batch_pr(args: &[String]) -> io::Result<()> {
 
 fn cmd_browser(args: &[String]) -> io::Result<()> {
     match args.first().map(String::as_str) {
-        Some("open") => browser_open(&args[1..]),
-        _ => Err(io::Error::other("usage : wimux browser open --url <url> …")),
+        Some("open") => browser_open(&args[1..]), // B1 : volet iframe
+        Some("launch") => browser_simple(ClientMessage::BrowserLaunch),
+        Some("close") => browser_simple(ClientMessage::BrowserClose),
+        Some("status") => browser_status(),
+        Some("navigate") => browser_navigate(&args[1..]),
+        Some("url") => browser_text(ClientMessage::BrowserUrl),
+        Some("snapshot") => browser_text(ClientMessage::BrowserSnapshot),
+        Some("screenshot") => browser_screenshot(),
+        _ => Err(io::Error::other(
+            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot> …",
+        )),
+    }
+}
+
+/// Envoie un message et attend `Ok`/`Error`.
+fn browser_simple(msg: ClientMessage) -> io::Result<()> {
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &msg)?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::Ok => Ok(()),
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn browser_status() -> io::Result<()> {
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::BrowserStatus)?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::BrowserState { running, url } => {
+            let u = url
+                .map(|u| format!("\"{}\"", agent::json_escape(&u)))
+                .unwrap_or_else(|| "null".into());
+            println!("{{\"running\":{running},\"url\":{u}}}");
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn browser_navigate(args: &[String]) -> io::Result<()> {
+    let url = browser::parse_url_flag(args)?;
+    browser_text(ClientMessage::BrowserNavigate { url })
+}
+
+/// Envoie un message et imprime la réponse texte (url / navigate / snapshot).
+fn browser_text(msg: ClientMessage) -> io::Result<()> {
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &msg)?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::BrowserText(t) => {
+            println!("{t}");
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+fn browser_screenshot() -> io::Result<()> {
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &ClientMessage::BrowserScreenshot)?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::BrowserShot { path } => {
+            println!("{{\"path\":\"{}\"}}", agent::json_escape(&path));
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
     }
 }
 
@@ -1260,7 +1353,7 @@ fn print_help() {
              send-keys -t <nom> <touches...>  Injecte des frappes (scriptable)\n    \
              agent <sous-cmd>    Orchestration d'agents (spawn/list/logs/capture/send/kill/whoami)\n    \
              batch <sous-cmd>    Lots d'agents (create/list/review/diff/pr)\n    \
-             browser open --url <url>    Ouvre un volet navigateur\n    \
+             browser <sous-cmd>  Navigateur : open (volet) | launch/close/status/navigate/url/snapshot/screenshot (pilotable)\n    \
              kill-session <nom>  Termine une session\n    \
              kill-server         Arrête le serveur et toutes les sessions\n\
          \n\
@@ -1438,5 +1531,19 @@ mod browser_tests {
         assert!(parse_open(&[]).is_err(), "sans --url c'est une erreur");
         let a = parse_open(&["--url".into(), "http://a/".into()]).unwrap();
         assert!(matches!(a.dir, SplitDir::LeftRight), "défaut : côte à côte");
+    }
+}
+
+#[cfg(test)]
+mod browser_engine_tests {
+    use super::browser::parse_url_flag;
+
+    #[test]
+    fn parse_url_flag_lit_l_url() {
+        assert_eq!(
+            parse_url_flag(&["--url".into(), "http://x/".into()]).unwrap(),
+            "http://x/"
+        );
+        assert!(parse_url_flag(&[]).is_err());
     }
 }
