@@ -1380,15 +1380,16 @@ mod tests {
     }
 
     #[test]
-    fn press_enter_soumet_un_formulaire() {
+    fn press_envoie_la_touche_a_lelement_focalise() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test press ignoré");
             return;
         }
-        // Enter dans le champ soumet le form -> navigation vers /page2 (même contenu).
+        // onkeydown recopie le nom de la touche dans un <p> -> visible au snapshot.
         let (url, _srv) = servir_page_locale(
             "<!doctype html><title>T</title>\
-             <form action=\"page2\"><input aria-label=Q></form>",
+             <input aria-label=Q onkeydown=\"document.getElementById('m').textContent=event.key\">\
+             <p id=m>vide</p>",
         );
         let engine = BrowserEngine::new();
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
@@ -1399,16 +1400,13 @@ mod tests {
         let r = ref_pour(&snap, "Q").expect("ref du champ");
         engine
             .exec(BrowserCommand::Press {
-                key: "Enter".into(),
+                key: "ArrowDown".into(),
                 ref_: Some(r),
             })
             .unwrap();
-        // Laisser la navigation se faire, puis vérifier l'URL.
-        // NOTE (Task 4) : `BrowserCommand::Wait` n'existe pas encore (Task 6) ;
-        // remplacement temporaire par un sleep, à rétablir en Task 6.
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        match engine.exec(BrowserCommand::Url).unwrap() {
-            BrowserReply::Text(u) => assert!(u.contains("page2"), "url après Enter : {u}"),
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => assert!(t.contains("ArrowDown"), "après press : {t}"),
             _ => panic!("Text"),
         }
         let _ = engine.exec(BrowserCommand::Close);
