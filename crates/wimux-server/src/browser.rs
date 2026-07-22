@@ -231,6 +231,11 @@ pub enum BrowserCommand {
         key: String,
         ref_: Option<String>,
     },
+    /// B2.2 : défile vers une ref (dans le viewport) OU d'un delta molette (px).
+    Scroll {
+        ref_: Option<String>,
+        dy: Option<i64>,
+    },
 }
 
 /// Nom de touche → (key, code, windows_virtual_key_code) pour CDP. `None` si
@@ -492,6 +497,24 @@ async fn mouse_click_at(page: &chromiumoxide::Page, x: f64, y: f64) -> Result<()
     Ok(())
 }
 
+/// Molette verticale au point (0,0) du viewport (défilement du document).
+async fn mouse_wheel(page: &chromiumoxide::Page, dy: f64) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::{
+        DispatchMouseEventParams, DispatchMouseEventType,
+    };
+    let p = DispatchMouseEventParams::builder()
+        .r#type(DispatchMouseEventType::MouseWheel)
+        .x(0.0)
+        .y(0.0)
+        .delta_x(0.0)
+        .delta_y(dy)
+        .build()?;
+    page.execute(p)
+        .await
+        .map_err(|e| format!("molette : {e}"))?;
+    Ok(())
+}
+
 /// Met le focus clavier sur l'élément.
 async fn focus_backend(page: &chromiumoxide::Page, backend: i64) -> Result<(), String> {
     use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, FocusParams};
@@ -732,6 +755,22 @@ async fn dispatch(
                 None,
             )
             .await?;
+            Ok(BrowserReply::Ok)
+        }
+        BrowserCommand::Scroll { ref_, dy } => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            match (ref_, dy) {
+                (Some(r), None) => {
+                    let bid = backend_id_for(s, &r)?;
+                    scroll_into_view(&s.page, bid).await?;
+                }
+                (None, Some(d)) => {
+                    mouse_wheel(&s.page, d as f64).await?;
+                }
+                _ => return Err("scroll : fournis --ref OU --dy (exactement un)".into()),
+            }
             Ok(BrowserReply::Ok)
         }
     }
@@ -1422,6 +1461,46 @@ mod tests {
             BrowserReply::Text(u) => assert!(u.contains("ArrowDown"), "url après press : {u}"),
             _ => panic!("Text attendu"),
         }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn scroll_vers_une_ref_reussit() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test scroll ignoré");
+            return;
+        }
+        // Élément tout en bas d'une page haute.
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title><div style=height:3000px></div>\
+             <button>EnBas</button>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "EnBas").expect("ref du bouton bas");
+        assert!(matches!(
+            engine
+                .exec(BrowserCommand::Scroll {
+                    ref_: Some(r),
+                    dy: None
+                })
+                .unwrap(),
+            BrowserReply::Ok
+        ));
+        // Delta molette : ne doit pas échouer non plus.
+        assert!(matches!(
+            engine
+                .exec(BrowserCommand::Scroll {
+                    ref_: None,
+                    dy: Some(-500)
+                })
+                .unwrap(),
+            BrowserReply::Ok
+        ));
         let _ = engine.exec(BrowserCommand::Close);
     }
 }

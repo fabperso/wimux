@@ -494,6 +494,11 @@ pub enum ClientMessage {
         key: String,
         ref_: Option<String>,
     },
+    /// B2.2 : défile vers une ref ou d'un delta molette.
+    BrowserScroll {
+        ref_: Option<String>,
+        dy: Option<i64>,
+    },
 }
 
 /// Messages serveur -> client.

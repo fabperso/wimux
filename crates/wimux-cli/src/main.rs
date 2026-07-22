@@ -372,6 +372,30 @@ mod browser {
             ref_: flag(args, "--ref"),
         })
     }
+
+    #[derive(Debug, PartialEq)]
+    pub struct ScrollArgs {
+        pub ref_: Option<String>,
+        pub dy: Option<i64>,
+    }
+
+    /// `--ref <eN>` XOR `--dy <entier>` (exactement un).
+    pub fn parse_scroll(args: &[String]) -> io::Result<ScrollArgs> {
+        let ref_ = flag(args, "--ref");
+        let dy = match flag(args, "--dy") {
+            Some(v) => Some(
+                v.parse::<i64>()
+                    .map_err(|_| io::Error::other("--dy attend un entier"))?,
+            ),
+            None => None,
+        };
+        match (&ref_, dy) {
+            (Some(_), None) | (None, Some(_)) => Ok(ScrollArgs { ref_, dy }),
+            _ => Err(io::Error::other(
+                "usage : wimux browser scroll --ref <eN> | --dy <entier>",
+            )),
+        }
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1242,6 +1266,13 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
                 ref_: a.ref_,
             })
         }
+        Some("scroll") => {
+            let a = browser::parse_scroll(&args[1..])?;
+            browser_simple(ClientMessage::BrowserScroll {
+                ref_: a.ref_,
+                dy: a.dy,
+            })
+        }
         _ => Err(io::Error::other(
             "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait> …",
         )),
@@ -1622,6 +1653,21 @@ mod browser_tests {
         assert_eq!(b.key, "Tab");
         assert_eq!(b.ref_, Some("e3".into()));
         assert!(parse_press(&[]).is_err()); // touche manquante
+    }
+
+    #[test]
+    fn parse_scroll_exige_ref_xor_dy() {
+        assert_eq!(
+            parse_scroll(&["--ref".into(), "e5".into()]).unwrap().ref_,
+            Some("e5".into())
+        );
+        assert_eq!(
+            parse_scroll(&["--dy".into(), "300".into()]).unwrap().dy,
+            Some(300)
+        );
+        assert!(parse_scroll(&[]).is_err()); // aucun
+        assert!(parse_scroll(&["--ref".into(), "e5".into(), "--dy".into(), "9".into()]).is_err()); // les deux
+        assert!(parse_scroll(&["--dy".into(), "abc".into()]).is_err()); // dy non entier
     }
 }
 
