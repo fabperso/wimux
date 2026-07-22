@@ -1315,6 +1315,20 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 // `gui_write` lui-même, et un `Mutex` std n'est pas réentrant.
                 push_layout_if_gui(&gui_attach, &conn, &gui_write)?;
             }
+            // B2.1 (intérim) : handlers réels en Task 6.
+            ClientMessage::BrowserLaunch
+            | ClientMessage::BrowserClose
+            | ClientMessage::BrowserStatus
+            | ClientMessage::BrowserNavigate { .. }
+            | ClientMessage::BrowserUrl
+            | ClientMessage::BrowserSnapshot
+            | ClientMessage::BrowserScreenshot => {
+                let mut wr: &PipeConn = &conn;
+                send(
+                    &mut wr,
+                    &ServerMessage::Error("navigateur : pas encore implémenté (Task 6)".into()),
+                )?;
+            }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
                     let outcome = route_input(&a.session, &server.config, &mut prefix, &bytes);
