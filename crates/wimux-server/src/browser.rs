@@ -273,9 +273,17 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
         BrowserCommand::Close => {
             // Drop de la session : ferme Chrome (le Browser droppé tue le process).
             if let Some(s) = sess.take() {
-                // Best-effort : fermeture propre du navigateur.
+                // Best-effort : fermeture propre du navigateur. `close()` ne fait
+                // qu'envoyer la commande CDP `Browser.close` : le process OS peut
+                // encore tourner un instant après. `wait()` attend sa sortie
+                // effective, ce qui libère le verrou de profil (répertoire
+                // `user-data-dir` partagé par toutes les sessions) avant de
+                // répondre — sans ça, un `Launch`/`Navigate` immédiatement
+                // suivant (le prochain test, en série) peut échouer avec
+                // « Lock file can not be created ! ».
                 let mut b = s.browser;
                 let _ = b.close().await;
+                let _ = b.wait().await;
             }
             Ok(BrowserReply::Ok)
         }
@@ -314,9 +322,110 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
             let u = s.page.url().await.ok().flatten().unwrap_or_default();
             Ok(BrowserReply::Text(u))
         }
-        // Snapshot/Screenshot : Task 5.
-        _ => Err("commande non implémentée".into()),
+        BrowserCommand::Snapshot => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            use chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams;
+            let resp = s
+                .page
+                .execute(GetFullAxTreeParams::default())
+                .await
+                .map_err(|e| format!("arbre d'accessibilité : {e}"))?;
+            // Mappe les AxNode CDP vers notre type découplé, puis rend.
+            let nodes: Vec<AxSnapshotNode> = resp.result.nodes.iter().map(map_ax_node).collect();
+            Ok(BrowserReply::Text(render_ax_tree(&nodes)))
+        }
+        BrowserCommand::Screenshot => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+            use chromiumoxide::page::ScreenshotParams;
+            let png = s
+                .page
+                .screenshot(
+                    ScreenshotParams::builder()
+                        .format(CaptureScreenshotFormat::Png)
+                        .build(),
+                )
+                .await
+                .map_err(|e| format!("capture : {e}"))?;
+            let path = screenshot_path()?;
+            std::fs::write(&path, &png).map_err(|e| format!("écriture PNG : {e}"))?;
+            Ok(BrowserReply::Shot(path))
+        }
     }
+}
+
+/// Convertit un nœud d'accessibilité CDP en notre `AxSnapshotNode` découplé.
+/// Isole les particularités `chromiumoxide` 0.9.1 : rôle/nom sont des `AxValue`
+/// dont le `.value` est un `serde_json::Value` (chaîne JSON) — on le convertit
+/// en `String` Rust via `Value::as_str` (pas un simple `to_string`, qui
+/// garderait les guillemets JSON).
+fn map_ax_node(n: &chromiumoxide::cdp::browser_protocol::accessibility::AxNode) -> AxSnapshotNode {
+    let role = n
+        .role
+        .as_ref()
+        .and_then(|v| v.value.as_ref())
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let name = n
+        .name
+        .as_ref()
+        .and_then(|v| v.value.as_ref())
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    // États pertinents (focusable, disabled, checked…) : les propriétés dont la
+    // valeur booléenne calculée vaut `true`. `AxPropertyName` expose `AsRef<str>`
+    // (via le nom CDP, ex. "focusable"), converti en minuscules pour l'affichage.
+    let states: Vec<String> = n
+        .properties
+        .iter()
+        .flatten()
+        .filter_map(|p| {
+            let est_vrai = p
+                .value
+                .value
+                .as_ref()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            est_vrai.then(|| p.name.as_ref().to_ascii_lowercase())
+        })
+        .collect();
+    AxSnapshotNode {
+        node_id: n.node_id.inner().clone(),
+        role,
+        name,
+        states,
+        child_ids: n
+            .child_ids
+            .iter()
+            .flatten()
+            .map(|c| c.inner().clone())
+            .collect(),
+    }
+}
+
+/// Chemin de capture sous `%LOCALAPPDATA%\wimux\screenshots\shot-<pid>-<compteur>.png`.
+/// Numérotation monotone par process (pas d'horloge : évite une dépendance temps
+/// et reste déterministe pour les tests).
+fn screenshot_path() -> Result<String, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let base =
+        std::env::var_os("LOCALAPPDATA").ok_or_else(|| "%LOCALAPPDATA% introuvable".to_string())?;
+    let dir = std::path::PathBuf::from(base)
+        .join("wimux")
+        .join("screenshots");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("création dossier captures : {e}"))?;
+    let i = N.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    Ok(dir
+        .join(format!("shot-{pid}-{i}.png"))
+        .to_string_lossy()
+        .into_owned())
 }
 
 #[cfg(test)]
@@ -539,6 +648,46 @@ mod tests {
             !out.contains("    button") && !out.contains("    link"),
             "pas de double indentation : {out:?}"
         );
+    }
+
+    #[test]
+    fn snapshot_et_screenshot_sur_page_locale() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test snapshot/screenshot ignoré");
+            return;
+        }
+        let (url, _srv) =
+            servir_page_locale("<!doctype html><title>T</title><button>Continuer</button>");
+        let engine = BrowserEngine::new();
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(tree) => {
+                assert!(
+                    tree.contains("button"),
+                    "le bouton doit apparaître : {tree}"
+                );
+                assert!(
+                    tree.contains("Continuer"),
+                    "son nom doit apparaître : {tree}"
+                );
+            }
+            _ => panic!("Text attendu"),
+        }
+
+        match engine.exec(BrowserCommand::Screenshot).unwrap() {
+            BrowserReply::Shot(path) => {
+                let p = std::path::Path::new(&path);
+                assert!(p.exists(), "le PNG doit exister : {path}");
+                assert!(
+                    std::fs::metadata(p).unwrap().len() > 0,
+                    "le PNG ne doit pas être vide"
+                );
+                let _ = std::fs::remove_file(p);
+            }
+            _ => panic!("Shot attendu"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
     }
 
     #[test]
