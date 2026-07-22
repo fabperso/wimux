@@ -360,17 +360,26 @@ mod browser {
         pub ref_: Option<String>,
     }
 
-    /// `<touche> [--ref <eN>]` : la touche est le premier argument non-flag.
+    /// `<touche> [--ref <eN>]` : la touche est le premier argument positionnel,
+    /// `--ref <eN>` pouvant précéder ou suivre.
     pub fn parse_press(args: &[String]) -> io::Result<PressArgs> {
-        let key = args
-            .iter()
-            .find(|a| !a.starts_with("--"))
-            .cloned()
+        let ref_ = flag(args, "--ref");
+        // La touche = premier argument positionnel, en sautant `--ref <valeur>`.
+        let mut key = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--ref" => i += 2, // saute le flag ET sa valeur
+                s if s.starts_with("--") => i += 1,
+                s => {
+                    key = Some(s.to_string());
+                    break;
+                }
+            }
+        }
+        let key = key
             .ok_or_else(|| io::Error::other("usage : wimux browser press <touche> [--ref <eN>]"))?;
-        Ok(PressArgs {
-            key,
-            ref_: flag(args, "--ref"),
-        })
+        Ok(PressArgs { key, ref_ })
     }
 
     #[derive(Debug, PartialEq)]
@@ -1502,7 +1511,7 @@ fn print_help() {
              send-keys -t <nom> <touches...>  Injecte des frappes (scriptable)\n    \
              agent <sous-cmd>    Orchestration d'agents (spawn/list/logs/capture/send/kill/whoami)\n    \
              batch <sous-cmd>    Lots d'agents (create/list/review/diff/pr)\n    \
-             browser <sous-cmd>  Navigateur : open (volet) | launch/close/status/navigate/url/snapshot/screenshot (pilotable)\n    \
+             browser <sous-cmd>  Navigateur : open (volet B1) | launch/close/status/navigate/url/snapshot/screenshot (moteur pilotable) | click/type/press/scroll/wait (actions B2.2)\n    \
              kill-session <nom>  Termine une session\n    \
              kill-server         Arrête le serveur et toutes les sessions\n\
          \n\
@@ -1705,6 +1714,13 @@ mod browser_tests {
         assert_eq!(b.key, "Tab");
         assert_eq!(b.ref_, Some("e3".into()));
         assert!(parse_press(&[]).is_err()); // touche manquante
+    }
+
+    #[test]
+    fn parse_press_ref_avant_la_touche() {
+        let a = parse_press(&["--ref".into(), "e3".into(), "Tab".into()]).unwrap();
+        assert_eq!(a.key, "Tab");
+        assert_eq!(a.ref_, Some("e3".into()));
     }
 
     #[test]

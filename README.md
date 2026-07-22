@@ -114,6 +114,66 @@ Trois limites, assumées :
   défilement. Ce n'est pas corrigé (il faudrait déplacer les nœuds DOM existants
   au lieu de reconstruire l'arbre) — seulement documenté ici honnêtement.
 
+## Navigateur pilotable (CDP)
+
+En plus du volet iframe ci-dessus, `wimux browser` pilote un navigateur
+Chromium (Edge/Chrome) via CDP, sans afficher de fenêtre par défaut
+(**headless**) : c'est plus fiable pour l'automatisation clavier — certains
+gestionnaires JS de page ne reçoivent pas toujours `Input.dispatchKeyEvent`
+quand le processus tourne en mode « tête » (fenêtre visible) mais en
+arrière-plan. Pour repasser en mode visible (la « vitrine », utile pour
+observer ou démontrer un scénario), ajoute dans la config wimux :
+
+```
+set browser-headless off
+```
+
+Commandes de base :
+
+```
+wimux browser launch                       # démarre le moteur
+wimux browser navigate --url <url>         # charge une page (vide les refs)
+wimux browser url                          # URL courante
+wimux browser snapshot                     # arbre d'accessibilité + [ref=eN]
+wimux browser screenshot                   # capture PNG
+wimux browser status                       # état du moteur
+wimux browser close                        # arrête le moteur
+```
+
+### Actions (B2.2)
+
+`snapshot` liste les éléments interactifs avec une référence `[ref=eN]`
+(ex. `[ref=e3] textbox "Email"`). Ces refs servent de cible aux verbes
+d'action ci-dessous via `--ref eN` ; elles sont **vidées à chaque
+navigation** (une ref d'une page précédente est rejetée avec une erreur).
+
+| Verbe | Usage |
+|-------|-------|
+| `click` | `wimux browser click --ref <eN>` |
+| `type` | `wimux browser type --ref <eN> --text <texte>` |
+| `press` | `wimux browser press <touche> [--ref <eN>]` |
+| `scroll` | `wimux browser scroll --ref <eN>` \| `--dy <entier>` |
+| `wait` | `wimux browser wait --text <s>` \| `--ms <n>` \| `--settle` |
+
+Exemple minimal (connexion sur une page de login) :
+
+```
+wimux browser navigate --url https://example.com/login
+wimux browser snapshot                 # repère [ref=e3] textbox "Email", [ref=e7] button "Se connecter"
+wimux browser type --ref e3 --text "moi@example.com"
+wimux browser press Tab
+wimux browser wait --settle
+wimux browser click --ref e7           # action sortante : à confirmer avec l'utilisateur
+```
+
+**Sécurité :** ces verbes exécutent mécaniquement ce qu'on leur demande, sans
+jugement sur le contenu de la page. Ne jamais saisir d'identifiants, mots de
+passe ou données financières via `type`. Toute action irréversible ou
+sortante — un `click` sur un bouton de soumission, un `press Enter` qui
+valide un formulaire — doit être confirmée avec l'utilisateur avant d'être
+lancée, exactement comme pour toute autre action de ce type dans wimux.
+`select` (menus déroulants) est différé à une itération ultérieure (B2.3).
+
 ## Résumé du plan
 
 - **Stack** : Rust · ConPTY (`portable-pty`) · émulation VT côté serveur (`wezterm-term`) · IPC par Named Pipes · client TUI (`crossterm`).

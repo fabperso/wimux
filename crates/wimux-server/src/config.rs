@@ -341,4 +341,14 @@ mod tests {
         c.apply("set agent-worktree-root C:\\x\\y\n");
         assert_eq!(c.agent_worktree_root, std::path::PathBuf::from("C:\\x\\y"));
     }
+
+    #[test]
+    fn directive_browser_headless() {
+        let mut c = Config::default();
+        assert!(c.browser_headless); // défaut = headless
+        c.apply("set browser-headless off\n");
+        assert!(!c.browser_headless);
+        c.apply("set browser-headless on\n");
+        assert!(c.browser_headless);
+    }
 }
