@@ -52,11 +52,13 @@ pub struct AxSnapshotNode {
 
 impl AxSnapshotNode {
     /// Un nœud est décoratif (élagable) s'il n'apporte rien : rôle ignoré/none,
-    /// pas de nom, pas d'enfant.
+    /// pas de nom — quel que soit son nombre d'enfants. Un nœud générique
+    /// (ex. wrapper `<div>`) avec de vrais enfants reste décoratif : ses
+    /// enfants sont promus d'un cran (voir `render_node`), sa propre ligne
+    /// n'est pas imprimée.
     fn est_decoratif(&self) -> bool {
         (self.role == "none" || self.role == "ignored" || self.role.is_empty())
             && self.name.is_none()
-            && self.child_ids.is_empty()
     }
 }
 
@@ -64,23 +66,33 @@ impl AxSnapshotNode {
 /// par ligne, profondeur = indentation de 2 espaces. Les nœuds décoratifs sont
 /// élagués. La racine est le premier nœud (CDP renvoie la racine en tête).
 pub fn render_ax_tree(nodes: &[AxSnapshotNode]) -> String {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     if nodes.is_empty() {
         return String::new();
     }
     let index: HashMap<&str, &AxSnapshotNode> =
         nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
     let mut out = String::new();
-    render_node(&nodes[0], &index, 0, &mut out);
+    // Garde anti-cycle : les données viennent de la PAGE (via `map_ax_node`,
+    // Task 5), donc non fiables. Un `child_ids` cyclique (A -> B -> A) sans
+    // cette garde ferait déborder la pile et planterait le daemon entier.
+    let mut visites: HashSet<&str> = HashSet::new();
+    render_node(&nodes[0], &index, 0, &mut out, &mut visites);
     out.trim_end().to_string()
 }
 
-fn render_node(
-    node: &AxSnapshotNode,
-    index: &std::collections::HashMap<&str, &AxSnapshotNode>,
+fn render_node<'a>(
+    node: &'a AxSnapshotNode,
+    index: &std::collections::HashMap<&'a str, &'a AxSnapshotNode>,
     depth: usize,
     out: &mut String,
+    visites: &mut std::collections::HashSet<&'a str>,
 ) {
+    // Marqué visité avant de descendre : chaque nœud est traité au plus une
+    // fois, ce qui garantit la terminaison même en présence d'un cycle.
+    if !visites.insert(node.node_id.as_str()) {
+        return;
+    }
     if !node.est_decoratif() {
         for _ in 0..depth {
             out.push_str("  ");
@@ -94,7 +106,8 @@ fn render_node(
         }
         out.push('\n');
     }
-    // Un nœud décoratif ne consomme pas de profondeur : ses enfants remontent.
+    // Un nœud décoratif ne consomme pas de profondeur : ses enfants remontent
+    // (promotion), qu'il ait ou non déjà des enfants propres.
     let child_depth = if node.est_decoratif() {
         depth
     } else {
@@ -102,7 +115,8 @@ fn render_node(
     };
     for cid in &node.child_ids {
         if let Some(child) = index.get(cid.as_str()) {
-            render_node(child, index, child_depth, out);
+            // `render_node` re-vérifie et ignore silencieusement si déjà visité.
+            render_node(child, index, child_depth, out, visites);
         }
     }
 }
@@ -180,5 +194,85 @@ mod tests {
     #[test]
     fn render_ax_tree_vide_donne_chaine_vide() {
         assert_eq!(render_ax_tree(&[]), "");
+    }
+
+    #[test]
+    fn render_ax_tree_promeut_les_enfants_dun_noeud_decoratif_avec_enfants() {
+        let nodes = vec![
+            AxSnapshotNode {
+                node_id: "1".into(),
+                role: "RootWebArea".into(),
+                name: Some("Page".into()),
+                states: vec![],
+                child_ids: vec!["2".into()],
+            },
+            // Nœud générique (wrapper), sans nom, mais AVEC de vrais enfants :
+            // doit rester décoratif et promouvoir ses enfants d'un cran.
+            AxSnapshotNode {
+                node_id: "2".into(),
+                role: "none".into(),
+                name: None,
+                states: vec![],
+                child_ids: vec!["3".into(), "4".into()],
+            },
+            AxSnapshotNode {
+                node_id: "3".into(),
+                role: "button".into(),
+                name: Some("A".into()),
+                states: vec![],
+                child_ids: vec![],
+            },
+            AxSnapshotNode {
+                node_id: "4".into(),
+                role: "link".into(),
+                name: Some("B".into()),
+                states: vec![],
+                child_ids: vec![],
+            },
+        ];
+        let out = render_ax_tree(&nodes);
+        assert!(!out.contains("none"), "le wrapper élagué : {out}");
+        // Le wrapper "none" n'a pas consommé de profondeur : button/link sont
+        // au même niveau d'indentation que si "none" n'avait jamais existé,
+        // c'est-à-dire un seul cran (2 espaces) sous la racine — pas deux.
+        assert!(
+            out.contains("\n  button \"A\"\n") || out.ends_with("\n  button \"A\""),
+            "button indenté d'un seul cran : {out:?}"
+        );
+        assert!(
+            out.contains("\n  link \"B\"\n") || out.ends_with("\n  link \"B\""),
+            "link indenté d'un seul cran : {out:?}"
+        );
+        assert!(
+            !out.contains("    button") && !out.contains("    link"),
+            "pas de double indentation : {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_ax_tree_cycle_termine_sans_deborder_la_pile() {
+        // A et B se pointent mutuellement : sans garde anti-cycle, récursion
+        // infinie -> débordement de pile -> crash du binaire de test.
+        let nodes = vec![
+            AxSnapshotNode {
+                node_id: "a".into(),
+                role: "generic".into(),
+                name: Some("A".into()),
+                states: vec![],
+                child_ids: vec!["b".into()],
+            },
+            AxSnapshotNode {
+                node_id: "b".into(),
+                role: "generic".into(),
+                name: Some("B".into()),
+                states: vec![],
+                child_ids: vec!["a".into()],
+            },
+        ];
+        let out = render_ax_tree(&nodes);
+        // La fonction doit retourner (pas de panic/débordement) et chaque
+        // nœud n'apparaît qu'une seule fois.
+        assert_eq!(out.matches("generic \"A\"").count(), 1, "sortie : {out}");
+        assert_eq!(out.matches("generic \"B\"").count(), 1, "sortie : {out}");
     }
 }
