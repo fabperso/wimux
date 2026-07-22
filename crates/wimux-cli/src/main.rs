@@ -396,6 +396,33 @@ mod browser {
             )),
         }
     }
+
+    #[derive(Debug, PartialEq)]
+    pub struct WaitArgs {
+        pub text: Option<String>,
+        pub ms: Option<u64>,
+        pub settle: bool,
+    }
+
+    /// Exactement un mode : `--text <s>` | `--ms <n>` | `--settle`.
+    pub fn parse_wait(args: &[String]) -> io::Result<WaitArgs> {
+        let text = flag(args, "--text");
+        let ms = match flag(args, "--ms") {
+            Some(v) => Some(
+                v.parse::<u64>()
+                    .map_err(|_| io::Error::other("--ms attend un entier"))?,
+            ),
+            None => None,
+        };
+        let settle = args.iter().any(|a| a == "--settle");
+        let n = text.is_some() as u8 + ms.is_some() as u8 + settle as u8;
+        if n != 1 {
+            return Err(io::Error::other(
+                "usage : wimux browser wait --text <s> | --ms <n> | --settle",
+            ));
+        }
+        Ok(WaitArgs { text, ms, settle })
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1273,6 +1300,14 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
                 dy: a.dy,
             })
         }
+        Some("wait") => {
+            let a = browser::parse_wait(&args[1..])?;
+            browser_wait(ClientMessage::BrowserWait {
+                text: a.text,
+                ms: a.ms,
+                settle: a.settle,
+            })
+        }
         _ => Err(io::Error::other(
             "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait> …",
         )),
@@ -1322,6 +1357,23 @@ fn browser_text(msg: ClientMessage) -> io::Result<()> {
     send(&mut w, &msg)?;
     let mut r: &PipeConn = &conn;
     match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::BrowserText(t) => {
+            println!("{t}");
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+/// Attente : `Ok` (délai/settle) ou un texte (mode --text).
+fn browser_wait(msg: ClientMessage) -> io::Result<()> {
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &msg)?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::Ok => Ok(()),
         ServerMessage::BrowserText(t) => {
             println!("{t}");
             Ok(())
@@ -1668,6 +1720,22 @@ mod browser_tests {
         assert!(parse_scroll(&[]).is_err()); // aucun
         assert!(parse_scroll(&["--ref".into(), "e5".into(), "--dy".into(), "9".into()]).is_err()); // les deux
         assert!(parse_scroll(&["--dy".into(), "abc".into()]).is_err()); // dy non entier
+    }
+
+    #[test]
+    fn parse_wait_exactement_un_mode() {
+        assert_eq!(
+            parse_wait(&["--text".into(), "Merci".into()]).unwrap().text,
+            Some("Merci".into())
+        );
+        assert_eq!(
+            parse_wait(&["--ms".into(), "500".into()]).unwrap().ms,
+            Some(500)
+        );
+        assert!(parse_wait(&["--settle".into()]).unwrap().settle);
+        assert!(parse_wait(&[]).is_err()); // aucun
+        assert!(parse_wait(&["--text".into(), "x".into(), "--settle".into()]).is_err()); // deux
+        assert!(parse_wait(&["--ms".into(), "abc".into()]).is_err()); // ms non entier
     }
 }
 

@@ -499,6 +499,12 @@ pub enum ClientMessage {
         ref_: Option<String>,
         dy: Option<i64>,
     },
+    /// B2.2 : attend un texte, un délai, ou la stabilisation du chargement.
+    BrowserWait {
+        text: Option<String>,
+        ms: Option<u64>,
+        settle: bool,
+    },
 }
 
 /// Messages serveur -> client.

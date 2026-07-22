@@ -236,6 +236,12 @@ pub enum BrowserCommand {
         ref_: Option<String>,
         dy: Option<i64>,
     },
+    /// B2.2 : attend qu'un texte apparaisse, un délai fixe, ou la stabilisation.
+    Wait {
+        text: Option<String>,
+        ms: Option<u64>,
+        settle: bool,
+    },
 }
 
 /// Nom de touche → (key, code, windows_virtual_key_code) pour CDP. `None` si
@@ -772,6 +778,41 @@ async fn dispatch(
                 _ => return Err("scroll : fournis --ref OU --dy (exactement un)".into()),
             }
             Ok(BrowserReply::Ok)
+        }
+        BrowserCommand::Wait { text, ms, settle } => {
+            use std::time::Duration;
+            if let Some(t) = text {
+                let s = sess
+                    .as_ref()
+                    .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+                let texte = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let nodes = snapshot_nodes(&s.page).await?;
+                        let (texte, _) = render_ax_tree(&nodes);
+                        if texte.contains(t.as_str()) {
+                            return Ok::<String, String>(texte);
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                })
+                .await
+                .map_err(|_| format!("wait --text : « {t} » non trouvé (timeout 10 s)"))??;
+                Ok(BrowserReply::Text(texte))
+            } else if let Some(n) = ms {
+                tokio::time::sleep(Duration::from_millis(n)).await;
+                Ok(BrowserReply::Ok)
+            } else if settle {
+                let s = sess
+                    .as_ref()
+                    .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+                tokio::time::timeout(Duration::from_secs(30), s.page.wait_for_navigation())
+                    .await
+                    .map_err(|_| "wait --settle : timeout 30 s".to_string())?
+                    .map_err(|e| format!("wait --settle : {e}"))?;
+                Ok(BrowserReply::Ok)
+            } else {
+                Err("wait : fournis --text, --ms ou --settle".into())
+            }
         }
     }
 }
@@ -1501,6 +1542,45 @@ mod tests {
                 .unwrap(),
             BrowserReply::Ok
         ));
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn wait_text_attend_un_contenu_differe() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test wait ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title><p id=r>patiente</p>\
+             <script>setTimeout(()=>{document.getElementById('r').textContent='PRÊT'},300)</script>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        // Apparaît sous ~300ms : doit réussir avant le timeout de 10s.
+        match engine
+            .exec(BrowserCommand::Wait {
+                text: Some("PRÊT".into()),
+                ms: None,
+                settle: false,
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert!(t.contains("PRÊT"), "wait a renvoyé : {t}"),
+            _ => panic!("Text attendu"),
+        }
+        // Un texte jamais présent doit timeouter (erreur).
+        let err = engine
+            .exec(BrowserCommand::Wait {
+                text: Some("JAMAIS".into()),
+                ms: None,
+                settle: false,
+            })
+            .unwrap_err();
+        assert!(
+            err.contains("timeout") || err.contains("non trouvé"),
+            "err : {err}"
+        );
         let _ = engine.exec(BrowserCommand::Close);
     }
 }
