@@ -221,6 +221,11 @@ pub enum BrowserCommand {
     Click {
         ref_: String,
     },
+    /// B2.2 : vide le champ (Ctrl+A) puis saisit `text`.
+    Type {
+        ref_: String,
+        text: String,
+    },
 }
 
 /// Réponse du thread moteur.
@@ -452,6 +457,82 @@ async fn mouse_click_at(page: &chromiumoxide::Page, x: f64, y: f64) -> Result<()
     Ok(())
 }
 
+/// Met le focus clavier sur l'élément.
+async fn focus_backend(page: &chromiumoxide::Page, backend: i64) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, FocusParams};
+    page.execute(FocusParams {
+        node_id: None,
+        backend_node_id: Some(BackendNodeId::new(backend)),
+        object_id: None,
+    })
+    .await
+    .map_err(|e| format!("focus : {e}"))?;
+    Ok(())
+}
+
+/// Un événement clavier bas niveau (KeyDown ou KeyUp). `text` = caractère émis
+/// (ex. "\r" pour Enter) ; `modifiers` = masque CDP (Ctrl=2…).
+async fn dispatch_key(
+    page: &chromiumoxide::Page,
+    kind: chromiumoxide::cdp::browser_protocol::input::DispatchKeyEventType,
+    key: &str,
+    code: &str,
+    vk: i64,
+    text: Option<&str>,
+    modifiers: Option<i64>,
+) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::DispatchKeyEventParams;
+    let mut b = DispatchKeyEventParams::builder()
+        .r#type(kind)
+        .key(key)
+        .code(code)
+        .windows_virtual_key_code(vk);
+    if let Some(t) = text {
+        b = b.text(t);
+    }
+    if let Some(m) = modifiers {
+        b = b.modifiers(m);
+    }
+    let p = b.build()?;
+    page.execute(p).await.map_err(|e| format!("touche : {e}"))?;
+    Ok(())
+}
+
+/// Ctrl+A sur l'élément focalisé (sélectionne tout le contenu éditable).
+async fn select_all(page: &chromiumoxide::Page) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::DispatchKeyEventType;
+    dispatch_key(
+        page,
+        DispatchKeyEventType::KeyDown,
+        "a",
+        "KeyA",
+        65,
+        None,
+        Some(2),
+    )
+    .await?;
+    dispatch_key(
+        page,
+        DispatchKeyEventType::KeyUp,
+        "a",
+        "KeyA",
+        65,
+        None,
+        Some(2),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Insère du texte (remplace la sélection courante ; gère l'unicode). CDP natif.
+async fn insert_text(page: &chromiumoxide::Page, text: &str) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
+    page.execute(InsertTextParams::new(text.to_string()))
+        .await
+        .map_err(|e| format!("insertText : {e}"))?;
+    Ok(())
+}
+
 /// Traite une commande. `sess` est l'état mutable de la session (None = non lancé).
 async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<BrowserReply, String> {
     match cmd {
@@ -563,6 +644,16 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
             scroll_into_view(&s.page, bid).await?;
             let (x, y) = element_center(&s.page, bid).await?;
             mouse_click_at(&s.page, x, y).await?;
+            Ok(BrowserReply::Ok)
+        }
+        BrowserCommand::Type { ref_, text } => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let bid = backend_id_for(s, &ref_)?;
+            focus_backend(&s.page, bid).await?;
+            select_all(&s.page).await?;
+            insert_text(&s.page, &text).await?;
             Ok(BrowserReply::Ok)
         }
     }
@@ -1175,5 +1266,40 @@ mod tests {
         // La sortie tient sur UNE seule ligne structurelle : le `\n` embarqué
         // n'a pas pu forger de second nœud.
         assert_eq!(out.lines().count(), 1, "une seule ligne : {out:?}");
+    }
+
+    #[test]
+    fn type_ecrit_dans_un_champ() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test type ignoré");
+            return;
+        }
+        // Un miroir reflète la valeur saisie dans un <p> -> visible au snapshot.
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title>\
+             <input aria-label=Nom oninput=\"document.getElementById('m').textContent=this.value\">\
+             <p id=m>vide</p>",
+        );
+        let engine = BrowserEngine::new();
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Nom").expect("ref du champ");
+        assert!(matches!(
+            engine
+                .exec(BrowserCommand::Type {
+                    ref_: r,
+                    text: "Fabrice".into()
+                })
+                .unwrap(),
+            BrowserReply::Ok
+        ));
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => assert!(t.contains("Fabrice"), "après type : {t}"),
+            _ => panic!("Text"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
     }
 }

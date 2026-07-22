@@ -336,6 +336,23 @@ mod browser {
         flag(args, "--ref")
             .ok_or_else(|| io::Error::other("usage : wimux browser click --ref <eN>"))
     }
+
+    #[derive(Debug, PartialEq)]
+    pub struct TypeArgs {
+        pub ref_: String,
+        pub text: String,
+    }
+
+    /// `--ref <eN> --text <texte>` (les deux obligatoires ; texte vide autorisé).
+    pub fn parse_type(args: &[String]) -> io::Result<TypeArgs> {
+        let ref_ = flag(args, "--ref").ok_or_else(|| {
+            io::Error::other("usage : wimux browser type --ref <eN> --text <texte>")
+        })?;
+        let text = flag(args, "--text").ok_or_else(|| {
+            io::Error::other("usage : wimux browser type --ref <eN> --text <texte>")
+        })?;
+        Ok(TypeArgs { ref_, text })
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1192,6 +1209,13 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
         Some("click") => browser_simple(ClientMessage::BrowserClick {
             ref_: browser::parse_ref(&args[1..])?,
         }),
+        Some("type") => {
+            let a = browser::parse_type(&args[1..])?;
+            browser_simple(ClientMessage::BrowserType {
+                ref_: a.ref_,
+                text: a.text,
+            })
+        }
         _ => Err(io::Error::other(
             "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait> …",
         )),
@@ -1547,6 +1571,20 @@ mod browser_tests {
         assert!(parse_open(&[]).is_err(), "sans --url c'est une erreur");
         let a = parse_open(&["--url".into(), "http://a/".into()]).unwrap();
         assert!(matches!(a.dir, SplitDir::LeftRight), "défaut : côte à côte");
+    }
+
+    #[test]
+    fn parse_type_lit_ref_et_texte() {
+        let a = parse_type(&[
+            "--ref".into(),
+            "e2".into(),
+            "--text".into(),
+            "Bonjour".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.ref_, "e2");
+        assert_eq!(a.text, "Bonjour");
+        assert!(parse_type(&["--ref".into(), "e2".into()]).is_err()); // --text manquant
     }
 }
 

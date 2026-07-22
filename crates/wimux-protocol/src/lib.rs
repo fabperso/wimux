@@ -484,6 +484,11 @@ pub enum ClientMessage {
     BrowserClick {
         ref_: String,
     },
+    /// B2.2 : vide le champ puis saisit du texte.
+    BrowserType {
+        ref_: String,
+        text: String,
+    },
 }
 
 /// Messages serveur -> client.
