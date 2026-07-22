@@ -34,6 +34,8 @@ pub struct Server {
     config: Config,
     /// Session actuellement affichée par la connexion GUI persistante (G4).
     gui_viewed: Mutex<Option<String>>,
+    /// Moteur navigateur pilotable (B2.1), unique au daemon, lancé paresseusement.
+    browser: crate::browser::BrowserEngine,
 }
 
 impl Server {
@@ -48,6 +50,7 @@ impl Server {
             sessions: Mutex::new(HashMap::new()),
             config,
             gui_viewed: Mutex::new(None),
+            browser: crate::browser::BrowserEngine::new(),
         })
     }
 
@@ -851,6 +854,18 @@ fn push_layout_if_gui(
     Ok(())
 }
 
+/// Traduit une réponse du moteur navigateur (B2.1) en message serveur.
+fn browser_reply(res: Result<crate::browser::BrowserReply, String>) -> ServerMessage {
+    use crate::browser::BrowserReply;
+    match res {
+        Ok(BrowserReply::Ok) => ServerMessage::Ok,
+        Ok(BrowserReply::Status { running, url }) => ServerMessage::BrowserState { running, url },
+        Ok(BrowserReply::Text(t)) => ServerMessage::BrowserText(t),
+        Ok(BrowserReply::Shot(path)) => ServerMessage::BrowserShot { path },
+        Err(e) => ServerMessage::Error(e),
+    }
+}
+
 /// État du décodage du préfixe pour un client.
 #[derive(Default)]
 struct PrefixState {
@@ -1315,19 +1330,56 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                 // `gui_write` lui-même, et un `Mutex` std n'est pas réentrant.
                 push_layout_if_gui(&gui_attach, &conn, &gui_write)?;
             }
-            // B2.1 (intérim) : handlers réels en Task 6.
-            ClientMessage::BrowserLaunch
-            | ClientMessage::BrowserClose
-            | ClientMessage::BrowserStatus
-            | ClientMessage::BrowserNavigate { .. }
-            | ClientMessage::BrowserUrl
-            | ClientMessage::BrowserSnapshot
-            | ClientMessage::BrowserScreenshot => {
+            // B2.1 : handlers du moteur navigateur (Task 6).
+            ClientMessage::BrowserLaunch => {
+                let reply =
+                    browser_reply(server.browser.exec(crate::browser::BrowserCommand::Launch));
                 let mut wr: &PipeConn = &conn;
-                send(
-                    &mut wr,
-                    &ServerMessage::Error("navigateur : pas encore implémenté (Task 6)".into()),
-                )?;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserClose => {
+                let reply =
+                    browser_reply(server.browser.exec(crate::browser::BrowserCommand::Close));
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserStatus => {
+                let reply =
+                    browser_reply(server.browser.exec(crate::browser::BrowserCommand::Status));
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserNavigate { url } => {
+                let reply = browser_reply(
+                    server
+                        .browser
+                        .exec(crate::browser::BrowserCommand::Navigate(url)),
+                );
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserUrl => {
+                let reply = browser_reply(server.browser.exec(crate::browser::BrowserCommand::Url));
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserSnapshot => {
+                let reply = browser_reply(
+                    server
+                        .browser
+                        .exec(crate::browser::BrowserCommand::Snapshot),
+                );
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserScreenshot => {
+                let reply = browser_reply(
+                    server
+                        .browser
+                        .exec(crate::browser::BrowserCommand::Screenshot),
+                );
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
             }
             ClientMessage::Input(bytes) => {
                 if let Some(a) = &attachment {
@@ -1771,5 +1823,20 @@ mod tests {
             "le volet créé est bien un navigateur"
         );
         server.kill("wb");
+    }
+
+    /// B2.1 : le statut du moteur navigateur répond « non lancé » sans lancer
+    /// de fenêtre — test pur, aucun effet de bord.
+    #[test]
+    fn browser_status_sans_lancement() {
+        let server = Server::new();
+        match server
+            .browser
+            .exec(crate::browser::BrowserCommand::Status)
+            .unwrap()
+        {
+            crate::browser::BrowserReply::Status { running, .. } => assert!(!running),
+            _ => panic!("Status attendu"),
+        }
     }
 }
