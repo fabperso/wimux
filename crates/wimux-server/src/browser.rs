@@ -48,6 +48,9 @@ pub struct AxSnapshotNode {
     pub name: Option<String>,
     pub states: Vec<String>,
     pub child_ids: Vec<String>,
+    /// Identifiant DOM backend (CDP) pour cibler ce nœud dans les actions (B2.2).
+    /// `None` si le nœud AX n'est pas adossé à un nœud DOM (non ciblable).
+    pub backend_node_id: Option<i64>,
 }
 
 impl AxSnapshotNode {
@@ -86,10 +89,10 @@ const PROFONDEUR_MAX: usize = 1000;
 /// Rend l'arbre d'accessibilité en texte indenté : `rôle "nom" [états]`, un nœud
 /// par ligne, profondeur = indentation de 2 espaces. Les nœuds décoratifs sont
 /// élagués. La racine est le premier nœud (CDP renvoie la racine en tête).
-pub fn render_ax_tree(nodes: &[AxSnapshotNode]) -> String {
+pub fn render_ax_tree(nodes: &[AxSnapshotNode]) -> (String, Vec<(String, i64)>) {
     use std::collections::{HashMap, HashSet};
     if nodes.is_empty() {
-        return String::new();
+        return (String::new(), Vec::new());
     }
     let index: HashMap<&str, &AxSnapshotNode> =
         nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
@@ -98,8 +101,19 @@ pub fn render_ax_tree(nodes: &[AxSnapshotNode]) -> String {
     // Task 5), donc non fiables. Un `child_ids` cyclique (A -> B -> A) sans
     // cette garde ferait déborder la pile et planterait le daemon entier.
     let mut visites: HashSet<&str> = HashSet::new();
-    render_node(&nodes[0], &index, 0, 0, &mut out, &mut visites);
-    out.trim_end().to_string()
+    let mut compteur: usize = 0;
+    let mut refs: Vec<(String, i64)> = Vec::new();
+    render_node(
+        &nodes[0],
+        &index,
+        0,
+        0,
+        &mut out,
+        &mut visites,
+        &mut compteur,
+        &mut refs,
+    );
+    (out.trim_end().to_string(), refs)
 }
 
 /// Neutralise une chaîne DÉRIVÉE DE LA PAGE (rôle, nom, état) avant de l'inclure
@@ -116,6 +130,7 @@ fn nettoyer(s: &str) -> String {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_node<'a>(
     node: &'a AxSnapshotNode,
     index: &std::collections::HashMap<&'a str, &'a AxSnapshotNode>,
@@ -123,6 +138,8 @@ fn render_node<'a>(
     recursion: usize,
     out: &mut String,
     visites: &mut std::collections::HashSet<&'a str>,
+    compteur: &mut usize,
+    refs: &mut Vec<(String, i64)>,
 ) {
     // Marqué visité avant de descendre : chaque nœud est traité au plus une
     // fois, ce qui garantit la terminaison même en présence d'un cycle.
@@ -141,6 +158,14 @@ fn render_node<'a>(
     if !node.est_decoratif() {
         for _ in 0..depth {
             out.push_str("  ");
+        }
+        // Ref : uniquement pour un nœud AFFICHÉ adossé à un vrai nœud DOM.
+        // « Ce que Claude voit numéroté = ce qu'il peut cibler. »
+        if let Some(bid) = node.backend_node_id {
+            *compteur += 1;
+            let r = format!("e{compteur}");
+            out.push_str(&format!("[ref={r}] "));
+            refs.push((r, bid));
         }
         out.push_str(&nettoyer(&node.role));
         if let Some(name) = &node.name {
@@ -164,7 +189,16 @@ fn render_node<'a>(
             // `render_node` re-vérifie et ignore silencieusement si déjà visité.
             // `recursion + 1` sur CHAQUE appel (indépendamment de est_decoratif),
             // pour que le cap suive la profondeur de pile réelle.
-            render_node(child, index, child_depth, recursion + 1, out, visites);
+            render_node(
+                child,
+                index,
+                child_depth,
+                recursion + 1,
+                out,
+                visites,
+                compteur,
+                refs,
+            );
         }
     }
 }
@@ -251,6 +285,9 @@ struct Session {
     browser: Browser,
     page: chromiumoxide::Page,
     _handler: tokio::task::JoinHandle<()>,
+    /// Table `ref (eN) -> backend_node_id`, reconstruite à chaque `Snapshot`,
+    /// vidée à chaque `Navigate` (les refs pointent le DOM de l'ancienne page).
+    refs: std::collections::HashMap<String, i64>,
 }
 
 /// Corps du thread moteur : un runtime tokio qui traite les commandes en série.
@@ -320,6 +357,7 @@ async fn launch_session() -> Result<Session, String> {
         browser,
         page,
         _handler: handler_task,
+        refs: std::collections::HashMap::new(),
     })
 }
 
@@ -385,7 +423,10 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
             })
             .await
             .map_err(|_| "navigation : délai dépassé (30 s)".to_string())??;
-            let finale = page.url().await.ok().flatten().unwrap_or_default();
+            // Les refs du snapshot précédent ne valent plus rien après navigation.
+            let s = sess.as_mut().unwrap();
+            s.refs.clear();
+            let finale = s.page.url().await.ok().flatten().unwrap_or_default();
             Ok(BrowserReply::Text(finale))
         }
         BrowserCommand::Url => {
@@ -397,17 +438,12 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
         }
         BrowserCommand::Snapshot => {
             let s = sess
-                .as_ref()
+                .as_mut()
                 .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
-            use chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams;
-            let resp = s
-                .page
-                .execute(GetFullAxTreeParams::default())
-                .await
-                .map_err(|e| format!("arbre d'accessibilité : {e}"))?;
-            // Mappe les AxNode CDP vers notre type découplé, puis rend.
-            let nodes: Vec<AxSnapshotNode> = resp.result.nodes.iter().map(map_ax_node).collect();
-            Ok(BrowserReply::Text(render_ax_tree(&nodes)))
+            let nodes = snapshot_nodes(&s.page).await?;
+            let (texte, refs) = render_ax_tree(&nodes);
+            s.refs = refs.into_iter().collect();
+            Ok(BrowserReply::Text(texte))
         }
         BrowserCommand::Screenshot => {
             let s = sess
@@ -478,7 +514,18 @@ fn map_ax_node(n: &chromiumoxide::cdp::browser_protocol::accessibility::AxNode) 
             .flatten()
             .map(|c| c.inner().clone())
             .collect(),
+        backend_node_id: n.backend_dom_node_id.as_ref().map(|b| *b.inner()),
     }
+}
+
+/// Lit l'arbre d'accessibilité complet et le mappe vers nos `AxSnapshotNode`.
+async fn snapshot_nodes(page: &chromiumoxide::Page) -> Result<Vec<AxSnapshotNode>, String> {
+    use chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams;
+    let resp = page
+        .execute(GetFullAxTreeParams::default())
+        .await
+        .map_err(|e| format!("arbre d'accessibilité : {e}"))?;
+    Ok(resp.result.nodes.iter().map(map_ax_node).collect())
 }
 
 /// Dossier de profil navigateur DÉDIÉ, sous
@@ -658,6 +705,60 @@ mod tests {
     }
 
     #[test]
+    fn render_numerote_les_noeuds_affiches_avec_backend_id() {
+        // bouton (backend 100) + lien (backend 200), sous une racine décorative.
+        let nodes = vec![
+            AxSnapshotNode {
+                node_id: "1".into(),
+                role: "none".into(),
+                name: None,
+                states: vec![],
+                child_ids: vec!["2".into(), "3".into()],
+                backend_node_id: None,
+            },
+            AxSnapshotNode {
+                node_id: "2".into(),
+                role: "button".into(),
+                name: Some("Continuer".into()),
+                states: vec!["focusable".into()],
+                child_ids: vec![],
+                backend_node_id: Some(100),
+            },
+            AxSnapshotNode {
+                node_id: "3".into(),
+                role: "link".into(),
+                name: Some("Aide".into()),
+                states: vec![],
+                child_ids: vec![],
+                backend_node_id: Some(200),
+            },
+        ];
+        let (texte, refs) = render_ax_tree(&nodes);
+        assert!(
+            texte.contains("[ref=e1] button \"Continuer\" [focusable]"),
+            "texte : {texte}"
+        );
+        assert!(texte.contains("[ref=e2] link \"Aide\""), "texte : {texte}");
+        // Numérotation en ordre d'affichage ; racine décorative non numérotée.
+        assert_eq!(refs, vec![("e1".to_string(), 100), ("e2".to_string(), 200)]);
+    }
+
+    #[test]
+    fn render_noeud_affiche_sans_backend_id_na_pas_de_ref() {
+        let nodes = vec![AxSnapshotNode {
+            node_id: "1".into(),
+            role: "heading".into(),
+            name: Some("Titre".into()),
+            states: vec![],
+            child_ids: vec![],
+            backend_node_id: None,
+        }];
+        let (texte, refs) = render_ax_tree(&nodes);
+        assert_eq!(texte, "heading \"Titre\"");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
     fn render_ax_tree_indente_role_nom_etats_et_elague() {
         let nodes = vec![
             AxSnapshotNode {
@@ -666,6 +767,7 @@ mod tests {
                 name: Some("Page de test".into()),
                 states: vec![],
                 child_ids: vec!["2".into(), "3".into()],
+                backend_node_id: None,
             },
             AxSnapshotNode {
                 node_id: "2".into(),
@@ -673,6 +775,7 @@ mod tests {
                 name: Some("Continuer".into()),
                 states: vec!["focusable".into()],
                 child_ids: vec![],
+                backend_node_id: None,
             },
             // Nœud décoratif : role "none", sans nom, sans enfant -> élagué.
             AxSnapshotNode {
@@ -681,9 +784,10 @@ mod tests {
                 name: None,
                 states: vec![],
                 child_ids: vec![],
+                backend_node_id: None,
             },
         ];
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         assert!(
             out.contains("RootWebArea \"Page de test\""),
             "racine : {out}"
@@ -700,7 +804,9 @@ mod tests {
 
     #[test]
     fn render_ax_tree_vide_donne_chaine_vide() {
-        assert_eq!(render_ax_tree(&[]), "");
+        let (out, refs) = render_ax_tree(&[]);
+        assert_eq!(out, "");
+        assert!(refs.is_empty());
     }
 
     #[test]
@@ -712,6 +818,7 @@ mod tests {
                 name: Some("Page".into()),
                 states: vec![],
                 child_ids: vec!["2".into()],
+                backend_node_id: None,
             },
             // Nœud générique (wrapper), sans nom, mais AVEC de vrais enfants :
             // doit rester décoratif et promouvoir ses enfants d'un cran.
@@ -721,6 +828,7 @@ mod tests {
                 name: None,
                 states: vec![],
                 child_ids: vec!["3".into(), "4".into()],
+                backend_node_id: None,
             },
             AxSnapshotNode {
                 node_id: "3".into(),
@@ -728,6 +836,7 @@ mod tests {
                 name: Some("A".into()),
                 states: vec![],
                 child_ids: vec![],
+                backend_node_id: None,
             },
             AxSnapshotNode {
                 node_id: "4".into(),
@@ -735,9 +844,10 @@ mod tests {
                 name: Some("B".into()),
                 states: vec![],
                 child_ids: vec![],
+                backend_node_id: None,
             },
         ];
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         assert!(!out.contains("none"), "le wrapper élagué : {out}");
         // Le wrapper "none" n'a pas consommé de profondeur : button/link sont
         // au même niveau d'indentation que si "none" n'avait jamais existé,
@@ -797,6 +907,26 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_expose_des_refs_pour_les_elements() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test snapshot_refs ignoré");
+            return;
+        }
+        let (url, _srv) =
+            servir_page_locale("<!doctype html><title>T</title><button>Continuer</button>");
+        let engine = BrowserEngine::new();
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => {
+                assert!(t.contains("[ref=e"), "snapshot sans ref : {t}");
+                assert!(t.contains("button \"Continuer\""), "snapshot : {t}");
+            }
+            _ => panic!("Text attendu"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
     fn render_ax_tree_cycle_termine_sans_deborder_la_pile() {
         // A et B se pointent mutuellement : sans garde anti-cycle, récursion
         // infinie -> débordement de pile -> crash du binaire de test.
@@ -807,6 +937,7 @@ mod tests {
                 name: Some("A".into()),
                 states: vec![],
                 child_ids: vec!["b".into()],
+                backend_node_id: None,
             },
             AxSnapshotNode {
                 node_id: "b".into(),
@@ -814,9 +945,10 @@ mod tests {
                 name: Some("B".into()),
                 states: vec![],
                 child_ids: vec!["a".into()],
+                backend_node_id: None,
             },
         ];
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         // La fonction doit retourner (pas de panic/débordement) et chaque
         // nœud n'apparaît qu'une seule fois.
         assert_eq!(out.matches("generic \"A\"").count(), 1, "sortie : {out}");
@@ -841,9 +973,10 @@ mod tests {
                 } else {
                     vec![]
                 },
+                backend_node_id: None,
             })
             .collect();
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         let lignes = out.lines().count();
         assert!(
             lignes <= PROFONDEUR_MAX,
@@ -874,10 +1007,11 @@ mod tests {
                 } else {
                     vec![]
                 },
+                backend_node_id: None,
             })
             .collect();
         // Tous décoratifs -> aucune ligne émise ; l'essentiel est le RETOUR.
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         assert!(
             out.is_empty(),
             "chaîne décorative -> rien à rendre : {out:?}"
@@ -894,8 +1028,9 @@ mod tests {
             name: Some("\x1b]0;evil\x07\nbutton \"Delete all\"".into()),
             states: vec![],
             child_ids: vec![],
+            backend_node_id: None,
         }];
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         assert!(!out.contains('\x1b'), "pas d'ESC dans la sortie : {out:?}");
         assert!(!out.contains('\x07'), "pas de BEL dans la sortie : {out:?}");
         // La sortie tient sur UNE seule ligne structurelle : le `\n` embarqué
