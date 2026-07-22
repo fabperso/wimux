@@ -480,6 +480,31 @@ pub enum ClientMessage {
     BrowserSnapshot,
     /// B2.1 : capture PNG écrite sur disque, renvoie le chemin (erreur si non lancé).
     BrowserScreenshot,
+    /// B2.2 : clic gauche sur l'élément désigné par une ref de snapshot.
+    BrowserClick {
+        ref_: String,
+    },
+    /// B2.2 : vide le champ puis saisit du texte.
+    BrowserType {
+        ref_: String,
+        text: String,
+    },
+    /// B2.2 : appuie une touche nommée (focus optionnel sur une ref).
+    BrowserPress {
+        key: String,
+        ref_: Option<String>,
+    },
+    /// B2.2 : défile vers une ref ou d'un delta molette.
+    BrowserScroll {
+        ref_: Option<String>,
+        dy: Option<i64>,
+    },
+    /// B2.2 : attend un texte, un délai, ou la stabilisation du chargement.
+    BrowserWait {
+        text: Option<String>,
+        ms: Option<u64>,
+        settle: bool,
+    },
 }
 
 /// Messages serveur -> client.

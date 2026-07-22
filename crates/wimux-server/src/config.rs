@@ -55,6 +55,11 @@ pub struct Config {
     pub agent_templates: Vec<AgentTemplate>,
     /// Racine des worktrees de lots (M3), directive `set agent-worktree-root`.
     pub agent_worktree_root: PathBuf,
+    /// Navigateur d'automatisation (B2.2) sans fenêtre visible par défaut —
+    /// fiable pour le clavier (`Input.dispatchKeyEvent` n'atteint pas toujours
+    /// les gestionnaires JS en mode « tête » lorsque le processus tourne en
+    /// arrière-plan). Directive `set browser-headless off` pour la « vitrine ».
+    pub browser_headless: bool,
 }
 
 impl Default for Config {
@@ -88,6 +93,7 @@ impl Default for Config {
             agent_idle_seconds: 4,
             agent_templates: Vec::new(),
             agent_worktree_root: default_worktree_root(),
+            browser_headless: true,
         }
     }
 }
@@ -120,6 +126,9 @@ impl Config {
                 }
                 ["set", "default-shell", shell] => self.default_shell = shell.to_string(),
                 ["set", "mouse", value] => self.mouse = matches!(*value, "on" | "true" | "1"),
+                ["set", "browser-headless", value] => {
+                    self.browser_headless = matches!(*value, "on" | "true" | "1")
+                }
                 ["set", "agent-idle-seconds", n] => {
                     if let Ok(v) = n.parse::<u64>() {
                         self.agent_idle_seconds = v;
@@ -331,5 +340,15 @@ mod tests {
         let mut c = Config::default();
         c.apply("set agent-worktree-root C:\\x\\y\n");
         assert_eq!(c.agent_worktree_root, std::path::PathBuf::from("C:\\x\\y"));
+    }
+
+    #[test]
+    fn directive_browser_headless() {
+        let mut c = Config::default();
+        assert!(c.browser_headless); // défaut = headless
+        c.apply("set browser-headless off\n");
+        assert!(!c.browser_headless);
+        c.apply("set browser-headless on\n");
+        assert!(c.browser_headless);
     }
 }

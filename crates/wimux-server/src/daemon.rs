@@ -46,11 +46,12 @@ impl Server {
     /// Construit un serveur avec une config donnée (utile aux tests qui doivent
     /// injecter des modèles d'agents sans toucher au fichier utilisateur).
     fn with_config(config: Config) -> Arc<Server> {
+        let browser = crate::browser::BrowserEngine::new(config.browser_headless);
         Arc::new(Server {
             sessions: Mutex::new(HashMap::new()),
             config,
             gui_viewed: Mutex::new(None),
-            browser: crate::browser::BrowserEngine::new(),
+            browser,
         })
     }
 
@@ -1378,6 +1379,52 @@ fn handle_client(server: Arc<Server>, conn: PipeConn) -> Result<()> {
                         .browser
                         .exec(crate::browser::BrowserCommand::Screenshot),
                 );
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserClick { ref_ } => {
+                let reply = browser_reply(
+                    server
+                        .browser
+                        .exec(crate::browser::BrowserCommand::Click { ref_ }),
+                );
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserType { ref_, text } => {
+                let reply = browser_reply(
+                    server
+                        .browser
+                        .exec(crate::browser::BrowserCommand::Type { ref_, text }),
+                );
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserPress { key, ref_ } => {
+                let reply = browser_reply(
+                    server
+                        .browser
+                        .exec(crate::browser::BrowserCommand::Press { key, ref_ }),
+                );
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserScroll { ref_, dy } => {
+                let reply = browser_reply(
+                    server
+                        .browser
+                        .exec(crate::browser::BrowserCommand::Scroll { ref_, dy }),
+                );
+                let mut wr: &PipeConn = &conn;
+                send(&mut wr, &reply)?;
+            }
+            ClientMessage::BrowserWait { text, ms, settle } => {
+                let reply =
+                    browser_reply(server.browser.exec(crate::browser::BrowserCommand::Wait {
+                        text,
+                        ms,
+                        settle,
+                    }));
                 let mut wr: &PipeConn = &conn;
                 send(&mut wr, &reply)?;
             }

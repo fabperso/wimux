@@ -48,6 +48,9 @@ pub struct AxSnapshotNode {
     pub name: Option<String>,
     pub states: Vec<String>,
     pub child_ids: Vec<String>,
+    /// Identifiant DOM backend (CDP) pour cibler ce nœud dans les actions (B2.2).
+    /// `None` si le nœud AX n'est pas adossé à un nœud DOM (non ciblable).
+    pub backend_node_id: Option<i64>,
 }
 
 impl AxSnapshotNode {
@@ -86,10 +89,10 @@ const PROFONDEUR_MAX: usize = 1000;
 /// Rend l'arbre d'accessibilité en texte indenté : `rôle "nom" [états]`, un nœud
 /// par ligne, profondeur = indentation de 2 espaces. Les nœuds décoratifs sont
 /// élagués. La racine est le premier nœud (CDP renvoie la racine en tête).
-pub fn render_ax_tree(nodes: &[AxSnapshotNode]) -> String {
+pub fn render_ax_tree(nodes: &[AxSnapshotNode]) -> (String, Vec<(String, i64)>) {
     use std::collections::{HashMap, HashSet};
     if nodes.is_empty() {
-        return String::new();
+        return (String::new(), Vec::new());
     }
     let index: HashMap<&str, &AxSnapshotNode> =
         nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
@@ -98,8 +101,19 @@ pub fn render_ax_tree(nodes: &[AxSnapshotNode]) -> String {
     // Task 5), donc non fiables. Un `child_ids` cyclique (A -> B -> A) sans
     // cette garde ferait déborder la pile et planterait le daemon entier.
     let mut visites: HashSet<&str> = HashSet::new();
-    render_node(&nodes[0], &index, 0, 0, &mut out, &mut visites);
-    out.trim_end().to_string()
+    let mut compteur: usize = 0;
+    let mut refs: Vec<(String, i64)> = Vec::new();
+    render_node(
+        &nodes[0],
+        &index,
+        0,
+        0,
+        &mut out,
+        &mut visites,
+        &mut compteur,
+        &mut refs,
+    );
+    (out.trim_end().to_string(), refs)
 }
 
 /// Neutralise une chaîne DÉRIVÉE DE LA PAGE (rôle, nom, état) avant de l'inclure
@@ -116,6 +130,7 @@ fn nettoyer(s: &str) -> String {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_node<'a>(
     node: &'a AxSnapshotNode,
     index: &std::collections::HashMap<&'a str, &'a AxSnapshotNode>,
@@ -123,6 +138,8 @@ fn render_node<'a>(
     recursion: usize,
     out: &mut String,
     visites: &mut std::collections::HashSet<&'a str>,
+    compteur: &mut usize,
+    refs: &mut Vec<(String, i64)>,
 ) {
     // Marqué visité avant de descendre : chaque nœud est traité au plus une
     // fois, ce qui garantit la terminaison même en présence d'un cycle.
@@ -141,6 +158,14 @@ fn render_node<'a>(
     if !node.est_decoratif() {
         for _ in 0..depth {
             out.push_str("  ");
+        }
+        // Ref : uniquement pour un nœud AFFICHÉ adossé à un vrai nœud DOM.
+        // « Ce que Claude voit numéroté = ce qu'il peut cibler. »
+        if let Some(bid) = node.backend_node_id {
+            *compteur += 1;
+            let r = format!("e{compteur}");
+            out.push_str(&format!("[ref={r}] "));
+            refs.push((r, bid));
         }
         out.push_str(&nettoyer(&node.role));
         if let Some(name) = &node.name {
@@ -164,7 +189,16 @@ fn render_node<'a>(
             // `render_node` re-vérifie et ignore silencieusement si déjà visité.
             // `recursion + 1` sur CHAQUE appel (indépendamment de est_decoratif),
             // pour que le cap suive la profondeur de pile réelle.
-            render_node(child, index, child_depth, recursion + 1, out, visites);
+            render_node(
+                child,
+                index,
+                child_depth,
+                recursion + 1,
+                out,
+                visites,
+                compteur,
+                refs,
+            );
         }
     }
 }
@@ -183,6 +217,52 @@ pub enum BrowserCommand {
     Url,
     Snapshot,
     Screenshot,
+    /// B2.2 : clic gauche sur l'élément désigné par une ref de snapshot.
+    Click {
+        ref_: String,
+    },
+    /// B2.2 : vide le champ (Ctrl+A) puis saisit `text`.
+    Type {
+        ref_: String,
+        text: String,
+    },
+    /// B2.2 : appuie une touche nommée (optionnellement après focus sur une ref).
+    Press {
+        key: String,
+        ref_: Option<String>,
+    },
+    /// B2.2 : défile vers une ref (dans le viewport) OU d'un delta molette (px).
+    Scroll {
+        ref_: Option<String>,
+        dy: Option<i64>,
+    },
+    /// B2.2 : attend qu'un texte apparaisse, un délai fixe, ou la stabilisation.
+    Wait {
+        text: Option<String>,
+        ms: Option<u64>,
+        settle: bool,
+    },
+}
+
+/// Nom de touche → (key, code, windows_virtual_key_code) pour CDP. `None` si
+/// non gérée. Ensemble volontairement restreint (navigation/édition usuelles).
+fn touche_cdp(nom: &str) -> Option<(&'static str, &'static str, i64)> {
+    Some(match nom {
+        "Enter" => ("Enter", "Enter", 13),
+        "Tab" => ("Tab", "Tab", 9),
+        "Escape" => ("Escape", "Escape", 27),
+        "Backspace" => ("Backspace", "Backspace", 8),
+        "Delete" => ("Delete", "Delete", 46),
+        "ArrowUp" => ("ArrowUp", "ArrowUp", 38),
+        "ArrowDown" => ("ArrowDown", "ArrowDown", 40),
+        "ArrowLeft" => ("ArrowLeft", "ArrowLeft", 37),
+        "ArrowRight" => ("ArrowRight", "ArrowRight", 39),
+        "Home" => ("Home", "Home", 36),
+        "End" => ("End", "End", 35),
+        "PageUp" => ("PageUp", "PageUp", 33),
+        "PageDown" => ("PageDown", "PageDown", 34),
+        _ => return None,
+    })
 }
 
 /// Réponse du thread moteur.
@@ -203,18 +283,22 @@ struct Job {
 /// Pont synchrone → thread moteur asynchrone. Démarre le thread au premier appel.
 pub struct BrowserEngine {
     tx: Mutex<Option<tokio::sync::mpsc::Sender<Job>>>,
+    /// Sans fenêtre visible par défaut (fiabilité clavier — voir le commentaire
+    /// sur `Config::browser_headless`). `false` = fenêtre visible (« vitrine »).
+    headless: bool,
 }
 
 impl Default for BrowserEngine {
     fn default() -> Self {
-        Self::new()
+        Self::new(true)
     }
 }
 
 impl BrowserEngine {
-    pub fn new() -> BrowserEngine {
+    pub fn new(headless: bool) -> BrowserEngine {
         BrowserEngine {
             tx: Mutex::new(None),
+            headless,
         }
     }
 
@@ -237,9 +321,10 @@ impl BrowserEngine {
             return tx.clone();
         }
         let (tx, rx) = tokio::sync::mpsc::channel::<Job>(32);
+        let headless = self.headless;
         std::thread::Builder::new()
             .name("wimux-browser".into())
-            .spawn(move || worker(rx))
+            .spawn(move || worker(rx, headless))
             .expect("thread moteur navigateur");
         *g = Some(tx.clone());
         tx
@@ -251,10 +336,13 @@ struct Session {
     browser: Browser,
     page: chromiumoxide::Page,
     _handler: tokio::task::JoinHandle<()>,
+    /// Table `ref (eN) -> backend_node_id`, reconstruite à chaque `Snapshot`,
+    /// vidée à chaque `Navigate` (les refs pointent le DOM de l'ancienne page).
+    refs: std::collections::HashMap<String, i64>,
 }
 
 /// Corps du thread moteur : un runtime tokio qui traite les commandes en série.
-fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>) {
+fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>, headless: bool) {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -272,7 +360,7 @@ fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>) {
     rt.block_on(async move {
         let mut sess: Option<Session> = None;
         while let Some(job) = rx.recv().await {
-            let res = dispatch(&mut sess, job.cmd).await;
+            let res = dispatch(&mut sess, job.cmd, headless).await;
             let _ = job.reply.send(res);
         }
         // Canal fermé (BrowserEngine droppé) : `sess` est droppé -> Chrome fermé.
@@ -280,7 +368,8 @@ fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>) {
 }
 
 /// Lance le navigateur (découverte Chrome→Edge) et ouvre une page vierge.
-async fn launch_session() -> Result<Session, String> {
+/// `headless` : sans fenêtre visible (par défaut) ou « vitrine » (`with_head`).
+async fn launch_session(headless: bool) -> Result<Session, String> {
     let bin = find_browser_binary(&default_candidates())
         .ok_or_else(|| "aucun navigateur Chrome/Edge trouvé sur cette machine".to_string())?;
     // Profil (`user-data-dir`) DÉDIÉ et JETABLE, unique par navigateur lancé :
@@ -296,8 +385,11 @@ async fn launch_session() -> Result<Session, String> {
     //   celle-ci. Le dossier peut rester sur disque après fermeture
     //   (best-effort, pas de nettoyage fragile).
     let profile_dir = browser_profile_dir()?;
-    let config = BrowserConfig::builder()
-        .with_head()
+    let mut builder = BrowserConfig::builder();
+    if !headless {
+        builder = builder.with_head();
+    }
+    let config = builder
         .chrome_executable(bin)
         .user_data_dir(&profile_dir)
         .build()
@@ -320,15 +412,209 @@ async fn launch_session() -> Result<Session, String> {
         browser,
         page,
         _handler: handler_task,
+        refs: std::collections::HashMap::new(),
     })
 }
 
+/// Traduit une ref de snapshot en `backend_node_id` mémorisé. Erreur explicite
+/// si la ref est inconnue (jamais vue ou périmée depuis la dernière navigation).
+fn backend_id_for(sess: &Session, r: &str) -> Result<i64, String> {
+    sess.refs
+        .get(r)
+        .copied()
+        .ok_or_else(|| format!("ref inconnue ({r}) — refais un snapshot"))
+}
+
+/// Amène l'élément dans le viewport (préalable à un clic fiable).
+async fn scroll_into_view(page: &chromiumoxide::Page, backend: i64) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ScrollIntoViewIfNeededParams};
+    page.execute(ScrollIntoViewIfNeededParams {
+        node_id: None,
+        backend_node_id: Some(BackendNodeId::new(backend)),
+        object_id: None,
+        rect: None,
+    })
+    .await
+    .map_err(|e| format!("scrollIntoView : {e}"))?;
+    Ok(())
+}
+
+/// Centre géométrique de l'élément (moyenne des 4 coins du quad `content`).
+///
+/// Vérifié empiriquement (revue B2.2, voir
+/// `click_sous_la_ligne_de_flottaison`) : `DOM.getBoxModel` rend déjà des
+/// coordonnées VIEWPORT (pas document) sur cet environnement — cohérent avec
+/// le traitement fait par Puppeteer de `getContentQuads`/`getBoxModel`. Une
+/// soustraction du décalage de défilement (`Page.getLayoutMetrics`) a été
+/// testée et cassait le clic après scroll (coordonnée négative, hors écran) :
+/// pas de conversion supplémentaire ici.
+async fn element_center(page: &chromiumoxide::Page, backend: i64) -> Result<(f64, f64), String> {
+    use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, GetBoxModelParams};
+    let resp = page
+        .execute(GetBoxModelParams {
+            node_id: None,
+            backend_node_id: Some(BackendNodeId::new(backend)),
+            object_id: None,
+        })
+        .await
+        .map_err(|e| format!("box model : {e}"))?;
+    let q = resp.result.model.content.inner();
+    if q.len() < 8 {
+        return Err("élément sans géométrie visible".into());
+    }
+    let cx = (q[0] + q[2] + q[4] + q[6]) / 4.0;
+    let cy = (q[1] + q[3] + q[5] + q[7]) / 4.0;
+    Ok((cx, cy))
+}
+
+/// Clic gauche natif (move + press + release) aux coordonnées viewport données.
+/// Le `MouseMoved` préalable (avant press/release) n'est pas dans la spec CDP
+/// minimale mais reproduit le comportement de `chromiumoxide::Page::click` /
+/// `HandlerPage::click` (0.9.1) : sans lui, un press+release immédiat après un
+/// `Snapshot` s'est montré intermittent en pratique (le clic est bien envoyé,
+/// mais l'AX tree relu juste après ne reflète pas toujours la mutation DOM
+/// synchrone du gestionnaire `onclick` — ~40% d'échecs mesurés sur ce poste
+/// sans le `MouseMoved`, ~0/26 avec). Toujours zéro JS de page, uniquement des
+/// événements `Input.dispatchMouseEvent` natifs.
+async fn mouse_click_at(page: &chromiumoxide::Page, x: f64, y: f64) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::{
+        DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+    };
+    let moved = DispatchMouseEventParams::builder()
+        .r#type(DispatchMouseEventType::MouseMoved)
+        .x(x)
+        .y(y)
+        .build()?;
+    page.execute(moved)
+        .await
+        .map_err(|e| format!("clic (move) : {e}"))?;
+    let down = DispatchMouseEventParams::builder()
+        .r#type(DispatchMouseEventType::MousePressed)
+        .x(x)
+        .y(y)
+        .button(MouseButton::Left)
+        .click_count(1)
+        .build()?;
+    page.execute(down)
+        .await
+        .map_err(|e| format!("clic (down) : {e}"))?;
+    let up = DispatchMouseEventParams::builder()
+        .r#type(DispatchMouseEventType::MouseReleased)
+        .x(x)
+        .y(y)
+        .button(MouseButton::Left)
+        .click_count(1)
+        .build()?;
+    page.execute(up)
+        .await
+        .map_err(|e| format!("clic (up) : {e}"))?;
+    Ok(())
+}
+
+/// Molette verticale au point (0,0) du viewport (défilement du document).
+async fn mouse_wheel(page: &chromiumoxide::Page, dy: f64) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::{
+        DispatchMouseEventParams, DispatchMouseEventType,
+    };
+    let p = DispatchMouseEventParams::builder()
+        .r#type(DispatchMouseEventType::MouseWheel)
+        .x(0.0)
+        .y(0.0)
+        .delta_x(0.0)
+        .delta_y(dy)
+        .build()?;
+    page.execute(p)
+        .await
+        .map_err(|e| format!("molette : {e}"))?;
+    Ok(())
+}
+
+/// Met le focus clavier sur l'élément.
+async fn focus_backend(page: &chromiumoxide::Page, backend: i64) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, FocusParams};
+    page.execute(FocusParams {
+        node_id: None,
+        backend_node_id: Some(BackendNodeId::new(backend)),
+        object_id: None,
+    })
+    .await
+    .map_err(|e| format!("focus : {e}"))?;
+    Ok(())
+}
+
+/// Un événement clavier bas niveau (KeyDown ou KeyUp). `text` = caractère émis
+/// (ex. "\r" pour Enter) ; `modifiers` = masque CDP (Ctrl=2…).
+async fn dispatch_key(
+    page: &chromiumoxide::Page,
+    kind: chromiumoxide::cdp::browser_protocol::input::DispatchKeyEventType,
+    key: &str,
+    code: &str,
+    vk: i64,
+    text: Option<&str>,
+    modifiers: Option<i64>,
+) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::DispatchKeyEventParams;
+    let mut b = DispatchKeyEventParams::builder()
+        .r#type(kind)
+        .key(key)
+        .code(code)
+        .windows_virtual_key_code(vk);
+    if let Some(t) = text {
+        b = b.text(t);
+    }
+    if let Some(m) = modifiers {
+        b = b.modifiers(m);
+    }
+    let p = b.build()?;
+    page.execute(p).await.map_err(|e| format!("touche : {e}"))?;
+    Ok(())
+}
+
+/// Ctrl+A sur l'élément focalisé (sélectionne tout le contenu éditable).
+async fn select_all(page: &chromiumoxide::Page) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::DispatchKeyEventType;
+    dispatch_key(
+        page,
+        DispatchKeyEventType::KeyDown,
+        "a",
+        "KeyA",
+        65,
+        None,
+        Some(2),
+    )
+    .await?;
+    dispatch_key(
+        page,
+        DispatchKeyEventType::KeyUp,
+        "a",
+        "KeyA",
+        65,
+        None,
+        Some(2),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Insère du texte (remplace la sélection courante ; gère l'unicode). CDP natif.
+async fn insert_text(page: &chromiumoxide::Page, text: &str) -> Result<(), String> {
+    use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
+    page.execute(InsertTextParams::new(text.to_string()))
+        .await
+        .map_err(|e| format!("insertText : {e}"))?;
+    Ok(())
+}
+
 /// Traite une commande. `sess` est l'état mutable de la session (None = non lancé).
-async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<BrowserReply, String> {
+async fn dispatch(
+    sess: &mut Option<Session>,
+    cmd: BrowserCommand,
+    headless: bool,
+) -> Result<BrowserReply, String> {
     match cmd {
         BrowserCommand::Launch => {
             if sess.is_none() {
-                *sess = Some(launch_session().await?);
+                *sess = Some(launch_session(headless).await?);
             }
             Ok(BrowserReply::Ok)
         }
@@ -366,8 +652,13 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
             }
             // Lancement paresseux.
             if sess.is_none() {
-                *sess = Some(launch_session().await?);
+                *sess = Some(launch_session(headless).await?);
             }
+            // Vidées AVANT la navigation (pas après) : les refs pointent le DOM
+            // de l'ancienne page. Si `goto`/`wait_for_navigation` échoue ou
+            // timeout ci-dessous, on ne veut PAS laisser des refs de l'ancienne
+            // page survivre comme si elles étaient encore valides.
+            sess.as_mut().unwrap().refs.clear();
             let page = &sess.as_ref().unwrap().page;
             // Borne de temps : le worker est strictement sériel. Une page qui ne
             // déclenche jamais `load` bloquerait TOUTES les commandes suivantes
@@ -385,7 +676,15 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
             })
             .await
             .map_err(|_| "navigation : délai dépassé (30 s)".to_string())??;
-            let finale = page.url().await.ok().flatten().unwrap_or_default();
+            let finale = sess
+                .as_ref()
+                .unwrap()
+                .page
+                .url()
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             Ok(BrowserReply::Text(finale))
         }
         BrowserCommand::Url => {
@@ -397,17 +696,12 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
         }
         BrowserCommand::Snapshot => {
             let s = sess
-                .as_ref()
+                .as_mut()
                 .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
-            use chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams;
-            let resp = s
-                .page
-                .execute(GetFullAxTreeParams::default())
-                .await
-                .map_err(|e| format!("arbre d'accessibilité : {e}"))?;
-            // Mappe les AxNode CDP vers notre type découplé, puis rend.
-            let nodes: Vec<AxSnapshotNode> = resp.result.nodes.iter().map(map_ax_node).collect();
-            Ok(BrowserReply::Text(render_ax_tree(&nodes)))
+            let nodes = snapshot_nodes(&s.page).await?;
+            let (texte, refs) = render_ax_tree(&nodes);
+            s.refs = refs.into_iter().collect();
+            Ok(BrowserReply::Text(texte))
         }
         BrowserCommand::Screenshot => {
             let s = sess
@@ -427,6 +721,124 @@ async fn dispatch(sess: &mut Option<Session>, cmd: BrowserCommand) -> Result<Bro
             let path = screenshot_path()?;
             std::fs::write(&path, &png).map_err(|e| format!("écriture PNG : {e}"))?;
             Ok(BrowserReply::Shot(path))
+        }
+        BrowserCommand::Click { ref_ } => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let bid = backend_id_for(s, &ref_)?;
+            scroll_into_view(&s.page, bid).await?;
+            let (x, y) = element_center(&s.page, bid).await?;
+            mouse_click_at(&s.page, x, y).await?;
+            Ok(BrowserReply::Ok)
+        }
+        BrowserCommand::Type { ref_, text } => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let bid = backend_id_for(s, &ref_)?;
+            focus_backend(&s.page, bid).await?;
+            select_all(&s.page).await?;
+            insert_text(&s.page, &text).await?;
+            Ok(BrowserReply::Ok)
+        }
+        BrowserCommand::Press { key, ref_ } => {
+            use chromiumoxide::cdp::browser_protocol::input::DispatchKeyEventType;
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            if let Some(r) = &ref_ {
+                let bid = backend_id_for(s, r)?;
+                focus_backend(&s.page, bid).await?;
+            }
+            let (k, code, vk) = touche_cdp(&key).ok_or_else(|| {
+                format!(
+                    "touche inconnue : {key} (gérées : Enter, Tab, Escape, Backspace, \
+                     Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown)"
+                )
+            })?;
+            // Enter émet aussi le caractère de retour ; les touches d'édition non.
+            let text = if key == "Enter" { Some("\r") } else { None };
+            dispatch_key(
+                &s.page,
+                DispatchKeyEventType::KeyDown,
+                k,
+                code,
+                vk,
+                text,
+                None,
+            )
+            .await?;
+            dispatch_key(
+                &s.page,
+                DispatchKeyEventType::KeyUp,
+                k,
+                code,
+                vk,
+                text,
+                None,
+            )
+            .await?;
+            Ok(BrowserReply::Ok)
+        }
+        BrowserCommand::Scroll { ref_, dy } => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            match (ref_, dy) {
+                (Some(r), None) => {
+                    let bid = backend_id_for(s, &r)?;
+                    scroll_into_view(&s.page, bid).await?;
+                }
+                (None, Some(d)) => {
+                    mouse_wheel(&s.page, d as f64).await?;
+                }
+                _ => return Err("scroll : fournis --ref OU --dy (exactement un)".into()),
+            }
+            Ok(BrowserReply::Ok)
+        }
+        BrowserCommand::Wait { text, ms, settle } => {
+            use std::time::Duration;
+            if let Some(t) = text {
+                let s = sess
+                    .as_mut()
+                    .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+                let nodes = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let nodes = snapshot_nodes(&s.page).await?;
+                        let (texte, _) = render_ax_tree(&nodes);
+                        if texte.contains(t.as_str()) {
+                            return Ok::<Vec<AxSnapshotNode>, String>(nodes);
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                })
+                .await
+                .map_err(|_| format!("wait --text : « {t} » non trouvé (timeout 10 s)"))??;
+                // Le texte affiché par `wait --text` contient des `[ref=eN]` : il
+                // faut les enregistrer (comme `Snapshot`), sinon une ref montrée
+                // ici est périmée/inconnue pour un `click --ref` qui suit.
+                let (texte, refs) = render_ax_tree(&nodes);
+                s.refs = refs.into_iter().collect();
+                Ok(BrowserReply::Text(texte))
+            } else if let Some(n) = ms {
+                // Borne : le worker est sériel — un délai énorme figerait toutes les
+                // commandes navigateur (de tous les clients) sans reprise. Plafond 60 s.
+                let n = n.min(60_000);
+                tokio::time::sleep(Duration::from_millis(n)).await;
+                Ok(BrowserReply::Ok)
+            } else if settle {
+                let s = sess
+                    .as_ref()
+                    .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+                tokio::time::timeout(Duration::from_secs(30), s.page.wait_for_navigation())
+                    .await
+                    .map_err(|_| "wait --settle : timeout 30 s".to_string())?
+                    .map_err(|e| format!("wait --settle : {e}"))?;
+                Ok(BrowserReply::Ok)
+            } else {
+                Err("wait : fournis --text, --ms ou --settle".into())
+            }
         }
     }
 }
@@ -478,7 +890,18 @@ fn map_ax_node(n: &chromiumoxide::cdp::browser_protocol::accessibility::AxNode) 
             .flatten()
             .map(|c| c.inner().clone())
             .collect(),
+        backend_node_id: n.backend_dom_node_id.as_ref().map(|b| *b.inner()),
     }
+}
+
+/// Lit l'arbre d'accessibilité complet et le mappe vers nos `AxSnapshotNode`.
+async fn snapshot_nodes(page: &chromiumoxide::Page) -> Result<Vec<AxSnapshotNode>, String> {
+    use chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams;
+    let resp = page
+        .execute(GetFullAxTreeParams::default())
+        .await
+        .map_err(|e| format!("arbre d'accessibilité : {e}"))?;
+    Ok(resp.result.nodes.iter().map(map_ax_node).collect())
 }
 
 /// Dossier de profil navigateur DÉDIÉ, sous
@@ -567,13 +990,51 @@ mod tests {
         (format!("http://127.0.0.1:{port}/"), handle)
     }
 
+    /// Extrait le jeton `eN` de la première ligne du snapshot contenant `besoin`.
+    fn ref_pour(snapshot: &str, besoin: &str) -> Option<String> {
+        let ligne = snapshot.lines().find(|l| l.contains(besoin))?;
+        let deb = ligne.find("[ref=")? + 5;
+        let fin = ligne[deb..].find(']')? + deb;
+        Some(ligne[deb..fin].to_string())
+    }
+
+    #[test]
+    fn click_declenche_le_gestionnaire_de_la_page() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test click ignoré");
+            return;
+        }
+        // Un clic sur le bouton change le texte d'un paragraphe -> visible au snapshot.
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title>\
+             <button onclick=\"document.getElementById('r').textContent='clické'\">Go</button>\
+             <p id=r>vide</p>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Go").expect("ref du bouton Go");
+        assert!(matches!(
+            engine.exec(BrowserCommand::Click { ref_: r }).unwrap(),
+            BrowserReply::Ok
+        ));
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => assert!(t.contains("clické"), "après clic : {t}"),
+            _ => panic!("Text"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
     #[test]
     fn navigate_refuse_les_schemas_non_http() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test navigate_refuse ignoré");
             return;
         }
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         let err = engine
             .exec(BrowserCommand::Navigate("file:///C:/x".into()))
             .unwrap_err();
@@ -588,7 +1049,7 @@ mod tests {
             return;
         }
         let (url, _srv) = servir_page_locale("<!doctype html><title>T</title><h1>Bonjour</h1>");
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         match engine.exec(BrowserCommand::Navigate(url.clone())).unwrap() {
             BrowserReply::Text(finale) => assert!(finale.starts_with("http://127.0.0.1:")),
             _ => panic!("Text attendu"),
@@ -606,7 +1067,7 @@ mod tests {
             eprintln!("aucun Chrome/Edge : test launch_status_close ignoré");
             return;
         }
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         // Avant lancement : pas en cours.
         match engine.exec(BrowserCommand::Status).unwrap() {
             BrowserReply::Status { running, .. } => assert!(!running),
@@ -658,6 +1119,60 @@ mod tests {
     }
 
     #[test]
+    fn render_numerote_les_noeuds_affiches_avec_backend_id() {
+        // bouton (backend 100) + lien (backend 200), sous une racine décorative.
+        let nodes = vec![
+            AxSnapshotNode {
+                node_id: "1".into(),
+                role: "none".into(),
+                name: None,
+                states: vec![],
+                child_ids: vec!["2".into(), "3".into()],
+                backend_node_id: None,
+            },
+            AxSnapshotNode {
+                node_id: "2".into(),
+                role: "button".into(),
+                name: Some("Continuer".into()),
+                states: vec!["focusable".into()],
+                child_ids: vec![],
+                backend_node_id: Some(100),
+            },
+            AxSnapshotNode {
+                node_id: "3".into(),
+                role: "link".into(),
+                name: Some("Aide".into()),
+                states: vec![],
+                child_ids: vec![],
+                backend_node_id: Some(200),
+            },
+        ];
+        let (texte, refs) = render_ax_tree(&nodes);
+        assert!(
+            texte.contains("[ref=e1] button \"Continuer\" [focusable]"),
+            "texte : {texte}"
+        );
+        assert!(texte.contains("[ref=e2] link \"Aide\""), "texte : {texte}");
+        // Numérotation en ordre d'affichage ; racine décorative non numérotée.
+        assert_eq!(refs, vec![("e1".to_string(), 100), ("e2".to_string(), 200)]);
+    }
+
+    #[test]
+    fn render_noeud_affiche_sans_backend_id_na_pas_de_ref() {
+        let nodes = vec![AxSnapshotNode {
+            node_id: "1".into(),
+            role: "heading".into(),
+            name: Some("Titre".into()),
+            states: vec![],
+            child_ids: vec![],
+            backend_node_id: None,
+        }];
+        let (texte, refs) = render_ax_tree(&nodes);
+        assert_eq!(texte, "heading \"Titre\"");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
     fn render_ax_tree_indente_role_nom_etats_et_elague() {
         let nodes = vec![
             AxSnapshotNode {
@@ -666,6 +1181,7 @@ mod tests {
                 name: Some("Page de test".into()),
                 states: vec![],
                 child_ids: vec!["2".into(), "3".into()],
+                backend_node_id: None,
             },
             AxSnapshotNode {
                 node_id: "2".into(),
@@ -673,6 +1189,7 @@ mod tests {
                 name: Some("Continuer".into()),
                 states: vec!["focusable".into()],
                 child_ids: vec![],
+                backend_node_id: None,
             },
             // Nœud décoratif : role "none", sans nom, sans enfant -> élagué.
             AxSnapshotNode {
@@ -681,9 +1198,10 @@ mod tests {
                 name: None,
                 states: vec![],
                 child_ids: vec![],
+                backend_node_id: None,
             },
         ];
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         assert!(
             out.contains("RootWebArea \"Page de test\""),
             "racine : {out}"
@@ -700,7 +1218,9 @@ mod tests {
 
     #[test]
     fn render_ax_tree_vide_donne_chaine_vide() {
-        assert_eq!(render_ax_tree(&[]), "");
+        let (out, refs) = render_ax_tree(&[]);
+        assert_eq!(out, "");
+        assert!(refs.is_empty());
     }
 
     #[test]
@@ -712,6 +1232,7 @@ mod tests {
                 name: Some("Page".into()),
                 states: vec![],
                 child_ids: vec!["2".into()],
+                backend_node_id: None,
             },
             // Nœud générique (wrapper), sans nom, mais AVEC de vrais enfants :
             // doit rester décoratif et promouvoir ses enfants d'un cran.
@@ -721,6 +1242,7 @@ mod tests {
                 name: None,
                 states: vec![],
                 child_ids: vec!["3".into(), "4".into()],
+                backend_node_id: None,
             },
             AxSnapshotNode {
                 node_id: "3".into(),
@@ -728,6 +1250,7 @@ mod tests {
                 name: Some("A".into()),
                 states: vec![],
                 child_ids: vec![],
+                backend_node_id: None,
             },
             AxSnapshotNode {
                 node_id: "4".into(),
@@ -735,9 +1258,10 @@ mod tests {
                 name: Some("B".into()),
                 states: vec![],
                 child_ids: vec![],
+                backend_node_id: None,
             },
         ];
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         assert!(!out.contains("none"), "le wrapper élagué : {out}");
         // Le wrapper "none" n'a pas consommé de profondeur : button/link sont
         // au même niveau d'indentation que si "none" n'avait jamais existé,
@@ -764,7 +1288,7 @@ mod tests {
         }
         let (url, _srv) =
             servir_page_locale("<!doctype html><title>T</title><button>Continuer</button>");
-        let engine = BrowserEngine::new();
+        let engine = BrowserEngine::new(true);
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
 
         match engine.exec(BrowserCommand::Snapshot).unwrap() {
@@ -797,6 +1321,26 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_expose_des_refs_pour_les_elements() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test snapshot_refs ignoré");
+            return;
+        }
+        let (url, _srv) =
+            servir_page_locale("<!doctype html><title>T</title><button>Continuer</button>");
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => {
+                assert!(t.contains("[ref=e"), "snapshot sans ref : {t}");
+                assert!(t.contains("button \"Continuer\""), "snapshot : {t}");
+            }
+            _ => panic!("Text attendu"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
     fn render_ax_tree_cycle_termine_sans_deborder_la_pile() {
         // A et B se pointent mutuellement : sans garde anti-cycle, récursion
         // infinie -> débordement de pile -> crash du binaire de test.
@@ -807,6 +1351,7 @@ mod tests {
                 name: Some("A".into()),
                 states: vec![],
                 child_ids: vec!["b".into()],
+                backend_node_id: None,
             },
             AxSnapshotNode {
                 node_id: "b".into(),
@@ -814,9 +1359,10 @@ mod tests {
                 name: Some("B".into()),
                 states: vec![],
                 child_ids: vec!["a".into()],
+                backend_node_id: None,
             },
         ];
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         // La fonction doit retourner (pas de panic/débordement) et chaque
         // nœud n'apparaît qu'une seule fois.
         assert_eq!(out.matches("generic \"A\"").count(), 1, "sortie : {out}");
@@ -841,9 +1387,10 @@ mod tests {
                 } else {
                     vec![]
                 },
+                backend_node_id: None,
             })
             .collect();
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         let lignes = out.lines().count();
         assert!(
             lignes <= PROFONDEUR_MAX,
@@ -874,10 +1421,11 @@ mod tests {
                 } else {
                     vec![]
                 },
+                backend_node_id: None,
             })
             .collect();
         // Tous décoratifs -> aucune ligne émise ; l'essentiel est le RETOUR.
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         assert!(
             out.is_empty(),
             "chaîne décorative -> rien à rendre : {out:?}"
@@ -894,12 +1442,199 @@ mod tests {
             name: Some("\x1b]0;evil\x07\nbutton \"Delete all\"".into()),
             states: vec![],
             child_ids: vec![],
+            backend_node_id: None,
         }];
-        let out = render_ax_tree(&nodes);
+        let (out, _) = render_ax_tree(&nodes);
         assert!(!out.contains('\x1b'), "pas d'ESC dans la sortie : {out:?}");
         assert!(!out.contains('\x07'), "pas de BEL dans la sortie : {out:?}");
         // La sortie tient sur UNE seule ligne structurelle : le `\n` embarqué
         // n'a pas pu forger de second nœud.
         assert_eq!(out.lines().count(), 1, "une seule ligne : {out:?}");
+    }
+
+    #[test]
+    fn type_ecrit_dans_un_champ() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test type ignoré");
+            return;
+        }
+        // Un miroir reflète la valeur saisie dans un <p> -> visible au snapshot.
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title>\
+             <input aria-label=Nom oninput=\"document.getElementById('m').textContent=this.value\">\
+             <p id=m>vide</p>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Nom").expect("ref du champ");
+        assert!(matches!(
+            engine
+                .exec(BrowserCommand::Type {
+                    ref_: r,
+                    text: "Fabrice".into()
+                })
+                .unwrap(),
+            BrowserReply::Ok
+        ));
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => assert!(t.contains("Fabrice"), "après type : {t}"),
+            _ => panic!("Text"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn touche_cdp_connait_les_touches_usuelles() {
+        assert_eq!(touche_cdp("Enter"), Some(("Enter", "Enter", 13)));
+        assert_eq!(
+            touche_cdp("ArrowDown"),
+            Some(("ArrowDown", "ArrowDown", 40))
+        );
+        assert_eq!(touche_cdp("PageUp"), Some(("PageUp", "PageUp", 33)));
+        assert_eq!(touche_cdp("Grokk"), None);
+    }
+
+    #[test]
+    fn press_envoie_la_touche_a_lelement_focalise() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test press ignoré");
+            return;
+        }
+        // onkeydown écrit le nom de la touche dans location.hash : lisible via `Url`
+        // (URL du document en direct, insensible au cache de l'arbre d'accessibilité).
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title>\
+             <input aria-label=Q onkeydown=\"location.hash=event.key\">",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Q").expect("ref du champ");
+        engine
+            .exec(BrowserCommand::Press {
+                key: "ArrowDown".into(),
+                ref_: Some(r),
+            })
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        match engine.exec(BrowserCommand::Url).unwrap() {
+            BrowserReply::Text(u) => assert!(u.contains("ArrowDown"), "url après press : {u}"),
+            _ => panic!("Text attendu"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn scroll_vers_une_ref_reussit() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test scroll ignoré");
+            return;
+        }
+        // Élément tout en bas d'une page haute.
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title><div style=height:3000px></div>\
+             <button>EnBas</button>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "EnBas").expect("ref du bouton bas");
+        assert!(matches!(
+            engine
+                .exec(BrowserCommand::Scroll {
+                    ref_: Some(r),
+                    dy: None
+                })
+                .unwrap(),
+            BrowserReply::Ok
+        ));
+        // Delta molette : ne doit pas échouer non plus.
+        assert!(matches!(
+            engine
+                .exec(BrowserCommand::Scroll {
+                    ref_: None,
+                    dy: Some(-500)
+                })
+                .unwrap(),
+            BrowserReply::Ok
+        ));
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn wait_text_attend_un_contenu_differe() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test wait ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title><p id=r>patiente</p>\
+             <script>setTimeout(()=>{document.getElementById('r').textContent='PRÊT'},300)</script>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        // Apparaît sous ~300ms : doit réussir avant le timeout de 10s.
+        match engine
+            .exec(BrowserCommand::Wait {
+                text: Some("PRÊT".into()),
+                ms: None,
+                settle: false,
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert!(t.contains("PRÊT"), "wait a renvoyé : {t}"),
+            _ => panic!("Text attendu"),
+        }
+        // Un texte jamais présent doit timeouter (erreur).
+        let err = engine
+            .exec(BrowserCommand::Wait {
+                text: Some("JAMAIS".into()),
+                ms: None,
+                settle: false,
+            })
+            .unwrap_err();
+        assert!(
+            err.contains("timeout") || err.contains("non trouvé"),
+            "err : {err}"
+        );
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    // Prouve que getBoxModel rend des coordonnées viewport : le clic après
+    // scroll atteint sa cible sans conversion.
+    #[test]
+    fn click_sous_la_ligne_de_flottaison() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test click sous la ligne ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title><div style=height:2000px></div>\
+             <button onclick=\"document.getElementById('r').textContent='clické'\">Bas</button>\
+             <p id=r>vide</p>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Bas").expect("ref du bouton bas");
+        engine.exec(BrowserCommand::Click { ref_: r }).unwrap();
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => assert!(t.contains("clické"), "après clic bas : {t}"),
+            _ => panic!("Text"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
     }
 }

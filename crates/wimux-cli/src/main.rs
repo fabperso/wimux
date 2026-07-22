@@ -323,6 +323,115 @@ mod browser {
             "usage : wimux browser navigate --url <url>",
         ))
     }
+
+    /// Valeur suivant `--<nom>` dans `args`, si présente.
+    pub fn flag(args: &[String], nom: &str) -> Option<String> {
+        args.iter()
+            .position(|a| a == nom)
+            .and_then(|i| args.get(i + 1).cloned())
+    }
+
+    /// `--ref <eN>` obligatoire.
+    pub fn parse_ref(args: &[String]) -> io::Result<String> {
+        flag(args, "--ref")
+            .ok_or_else(|| io::Error::other("usage : wimux browser click --ref <eN>"))
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct TypeArgs {
+        pub ref_: String,
+        pub text: String,
+    }
+
+    /// `--ref <eN> --text <texte>` (les deux obligatoires ; texte vide autorisé).
+    pub fn parse_type(args: &[String]) -> io::Result<TypeArgs> {
+        let ref_ = flag(args, "--ref").ok_or_else(|| {
+            io::Error::other("usage : wimux browser type --ref <eN> --text <texte>")
+        })?;
+        let text = flag(args, "--text").ok_or_else(|| {
+            io::Error::other("usage : wimux browser type --ref <eN> --text <texte>")
+        })?;
+        Ok(TypeArgs { ref_, text })
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct PressArgs {
+        pub key: String,
+        pub ref_: Option<String>,
+    }
+
+    /// `<touche> [--ref <eN>]` : la touche est le premier argument positionnel,
+    /// `--ref <eN>` pouvant précéder ou suivre.
+    pub fn parse_press(args: &[String]) -> io::Result<PressArgs> {
+        let ref_ = flag(args, "--ref");
+        // La touche = premier argument positionnel, en sautant `--ref <valeur>`.
+        let mut key = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--ref" => i += 2, // saute le flag ET sa valeur
+                s if s.starts_with("--") => i += 1,
+                s => {
+                    key = Some(s.to_string());
+                    break;
+                }
+            }
+        }
+        let key = key
+            .ok_or_else(|| io::Error::other("usage : wimux browser press <touche> [--ref <eN>]"))?;
+        Ok(PressArgs { key, ref_ })
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct ScrollArgs {
+        pub ref_: Option<String>,
+        pub dy: Option<i64>,
+    }
+
+    /// `--ref <eN>` XOR `--dy <entier>` (exactement un).
+    pub fn parse_scroll(args: &[String]) -> io::Result<ScrollArgs> {
+        let ref_ = flag(args, "--ref");
+        let dy = match flag(args, "--dy") {
+            Some(v) => Some(
+                v.parse::<i64>()
+                    .map_err(|_| io::Error::other("--dy attend un entier"))?,
+            ),
+            None => None,
+        };
+        match (&ref_, dy) {
+            (Some(_), None) | (None, Some(_)) => Ok(ScrollArgs { ref_, dy }),
+            _ => Err(io::Error::other(
+                "usage : wimux browser scroll --ref <eN> | --dy <entier>",
+            )),
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct WaitArgs {
+        pub text: Option<String>,
+        pub ms: Option<u64>,
+        pub settle: bool,
+    }
+
+    /// Exactement un mode : `--text <s>` | `--ms <n>` | `--settle`.
+    pub fn parse_wait(args: &[String]) -> io::Result<WaitArgs> {
+        let text = flag(args, "--text");
+        let ms = match flag(args, "--ms") {
+            Some(v) => Some(
+                v.parse::<u64>()
+                    .map_err(|_| io::Error::other("--ms attend un entier"))?,
+            ),
+            None => None,
+        };
+        let settle = args.iter().any(|a| a == "--settle");
+        let n = text.is_some() as u8 + ms.is_some() as u8 + settle as u8;
+        if n != 1 {
+            return Err(io::Error::other(
+                "usage : wimux browser wait --text <s> | --ms <n> | --settle",
+            ));
+        }
+        Ok(WaitArgs { text, ms, settle })
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1176,8 +1285,40 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
         Some("url") => browser_text(ClientMessage::BrowserUrl),
         Some("snapshot") => browser_text(ClientMessage::BrowserSnapshot),
         Some("screenshot") => browser_screenshot(),
+        Some("click") => browser_simple(ClientMessage::BrowserClick {
+            ref_: browser::parse_ref(&args[1..])?,
+        }),
+        Some("type") => {
+            let a = browser::parse_type(&args[1..])?;
+            browser_simple(ClientMessage::BrowserType {
+                ref_: a.ref_,
+                text: a.text,
+            })
+        }
+        Some("press") => {
+            let a = browser::parse_press(&args[1..])?;
+            browser_simple(ClientMessage::BrowserPress {
+                key: a.key,
+                ref_: a.ref_,
+            })
+        }
+        Some("scroll") => {
+            let a = browser::parse_scroll(&args[1..])?;
+            browser_simple(ClientMessage::BrowserScroll {
+                ref_: a.ref_,
+                dy: a.dy,
+            })
+        }
+        Some("wait") => {
+            let a = browser::parse_wait(&args[1..])?;
+            browser_wait(ClientMessage::BrowserWait {
+                text: a.text,
+                ms: a.ms,
+                settle: a.settle,
+            })
+        }
         _ => Err(io::Error::other(
-            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot> …",
+            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait> …",
         )),
     }
 }
@@ -1225,6 +1366,23 @@ fn browser_text(msg: ClientMessage) -> io::Result<()> {
     send(&mut w, &msg)?;
     let mut r: &PipeConn = &conn;
     match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::BrowserText(t) => {
+            println!("{t}");
+            Ok(())
+        }
+        ServerMessage::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::other("réponse inattendue du serveur")),
+    }
+}
+
+/// Attente : `Ok` (délai/settle) ou un texte (mode --text).
+fn browser_wait(msg: ClientMessage) -> io::Result<()> {
+    let conn = connected()?;
+    let mut w: &PipeConn = &conn;
+    send(&mut w, &msg)?;
+    let mut r: &PipeConn = &conn;
+    match recv::<_, ServerMessage>(&mut r)? {
+        ServerMessage::Ok => Ok(()),
         ServerMessage::BrowserText(t) => {
             println!("{t}");
             Ok(())
@@ -1353,7 +1511,7 @@ fn print_help() {
              send-keys -t <nom> <touches...>  Injecte des frappes (scriptable)\n    \
              agent <sous-cmd>    Orchestration d'agents (spawn/list/logs/capture/send/kill/whoami)\n    \
              batch <sous-cmd>    Lots d'agents (create/list/review/diff/pr)\n    \
-             browser <sous-cmd>  Navigateur : open (volet) | launch/close/status/navigate/url/snapshot/screenshot (pilotable)\n    \
+             browser <sous-cmd>  Navigateur : open (volet B1) | launch/close/status/navigate/url/snapshot/screenshot (moteur pilotable) | click/type/press/scroll/wait (actions B2.2)\n    \
              kill-session <nom>  Termine une session\n    \
              kill-server         Arrête le serveur et toutes les sessions\n\
          \n\
@@ -1531,6 +1689,69 @@ mod browser_tests {
         assert!(parse_open(&[]).is_err(), "sans --url c'est une erreur");
         let a = parse_open(&["--url".into(), "http://a/".into()]).unwrap();
         assert!(matches!(a.dir, SplitDir::LeftRight), "défaut : côte à côte");
+    }
+
+    #[test]
+    fn parse_type_lit_ref_et_texte() {
+        let a = parse_type(&[
+            "--ref".into(),
+            "e2".into(),
+            "--text".into(),
+            "Bonjour".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.ref_, "e2");
+        assert_eq!(a.text, "Bonjour");
+        assert!(parse_type(&["--ref".into(), "e2".into()]).is_err()); // --text manquant
+    }
+
+    #[test]
+    fn parse_press_touche_positionnelle_et_ref_option() {
+        let a = parse_press(&["Enter".into()]).unwrap();
+        assert_eq!(a.key, "Enter");
+        assert_eq!(a.ref_, None);
+        let b = parse_press(&["Tab".into(), "--ref".into(), "e3".into()]).unwrap();
+        assert_eq!(b.key, "Tab");
+        assert_eq!(b.ref_, Some("e3".into()));
+        assert!(parse_press(&[]).is_err()); // touche manquante
+    }
+
+    #[test]
+    fn parse_press_ref_avant_la_touche() {
+        let a = parse_press(&["--ref".into(), "e3".into(), "Tab".into()]).unwrap();
+        assert_eq!(a.key, "Tab");
+        assert_eq!(a.ref_, Some("e3".into()));
+    }
+
+    #[test]
+    fn parse_scroll_exige_ref_xor_dy() {
+        assert_eq!(
+            parse_scroll(&["--ref".into(), "e5".into()]).unwrap().ref_,
+            Some("e5".into())
+        );
+        assert_eq!(
+            parse_scroll(&["--dy".into(), "300".into()]).unwrap().dy,
+            Some(300)
+        );
+        assert!(parse_scroll(&[]).is_err()); // aucun
+        assert!(parse_scroll(&["--ref".into(), "e5".into(), "--dy".into(), "9".into()]).is_err()); // les deux
+        assert!(parse_scroll(&["--dy".into(), "abc".into()]).is_err()); // dy non entier
+    }
+
+    #[test]
+    fn parse_wait_exactement_un_mode() {
+        assert_eq!(
+            parse_wait(&["--text".into(), "Merci".into()]).unwrap().text,
+            Some("Merci".into())
+        );
+        assert_eq!(
+            parse_wait(&["--ms".into(), "500".into()]).unwrap().ms,
+            Some(500)
+        );
+        assert!(parse_wait(&["--settle".into()]).unwrap().settle);
+        assert!(parse_wait(&[]).is_err()); // aucun
+        assert!(parse_wait(&["--text".into(), "x".into(), "--settle".into()]).is_err()); // deux
+        assert!(parse_wait(&["--ms".into(), "abc".into()]).is_err()); // ms non entier
     }
 }
 
