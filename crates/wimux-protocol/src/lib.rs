@@ -505,6 +505,19 @@ pub enum ClientMessage {
         ms: Option<u64>,
         settle: bool,
     },
+    /// B2.3 : évalue une expression JS, renvoie le résultat JSON.
+    BrowserEval {
+        js: String,
+    },
+    /// B2.3 : choisit une option d'un <select> désigné par une ref.
+    BrowserSelect {
+        ref_: String,
+        value: String,
+    },
+    /// B2.3 : enregistre un script persistant (exécuté au chargement).
+    BrowserAddScript {
+        js: String,
+    },
 }
 
 /// Messages serveur -> client.

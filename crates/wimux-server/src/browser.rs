@@ -242,6 +242,19 @@ pub enum BrowserCommand {
         ms: Option<u64>,
         settle: bool,
     },
+    /// B2.3 : évalue une expression JS dans la page, renvoie le résultat JSON.
+    Eval {
+        js: String,
+    },
+    /// B2.3 : choisit une option d'un <select> désigné par une ref (valeur ou texte).
+    Select {
+        ref_: String,
+        value: String,
+    },
+    /// B2.3 : enregistre un script exécuté au début de chaque futur document.
+    AddScript {
+        js: String,
+    },
 }
 
 /// Nom de touche → (key, code, windows_virtual_key_code) pour CDP. `None` si
@@ -423,6 +436,21 @@ fn backend_id_for(sess: &Session, r: &str) -> Result<i64, String> {
         .get(r)
         .copied()
         .ok_or_else(|| format!("ref inconnue ({r}) — refais un snapshot"))
+}
+
+/// Extrait un message lisible d'une erreur CDP : pour une exception JavaScript,
+/// la `description` de l'exception (ex. « ReferenceError: x is not defined »)
+/// plutôt que le dump Debug complet de `ExceptionDetails`.
+fn message_erreur_js(e: chromiumoxide::error::CdpError) -> String {
+    use chromiumoxide::error::CdpError;
+    match e {
+        CdpError::JavascriptException(ex) => ex
+            .exception
+            .as_ref()
+            .and_then(|o| o.description.clone())
+            .unwrap_or_else(|| ex.text.clone()),
+        autre => autre.to_string(),
+    }
 }
 
 /// Amène l'élément dans le viewport (préalable à un clic fiable).
@@ -839,6 +867,115 @@ async fn dispatch(
             } else {
                 Err("wait : fournis --text, --ms ou --settle".into())
             }
+        }
+        BrowserCommand::Eval { js } => {
+            use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let params = EvaluateParams::builder()
+                .expression(js)
+                .return_by_value(true)
+                .await_promise(true)
+                .build()
+                .map_err(|e| format!("eval (params) : {e}"))?;
+            let res = s
+                .page
+                .evaluate_expression(params)
+                .await
+                .map_err(|e| format!("eval : {}", message_erreur_js(e)))?;
+            // `value()` -> Option<&serde_json::Value> ; `undefined` -> None -> "null".
+            let out = match res.value() {
+                Some(v) => v.to_string(),
+                None => "null".to_string(),
+            };
+            Ok(BrowserReply::Text(out))
+        }
+        BrowserCommand::Select { ref_, value } => {
+            use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ResolveNodeParams};
+            use chromiumoxide::cdp::js_protocol::runtime::{
+                CallArgument, CallFunctionOnParams, ReleaseObjectParams,
+            };
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let bid = backend_id_for(s, &ref_)?;
+            // Résoudre le nœud DOM en objet JS.
+            let resolved = s
+                .page
+                .execute(ResolveNodeParams {
+                    node_id: None,
+                    backend_node_id: Some(BackendNodeId::new(bid)),
+                    object_group: None,
+                    execution_context_id: None,
+                })
+                .await
+                .map_err(|e| format!("select (resolveNode) : {e}"))?;
+            let oid = resolved
+                .result
+                .object
+                .object_id
+                .ok_or_else(|| "select : élément non résoluble".to_string())?;
+            // Helper JS FIGÉ (le nôtre) : sélectionne par value d'option, sinon par
+            // texte visible, puis émet l'événement `change`. Renvoie {ok, reason}.
+            let f = "function(v){ \
+                if (this.tagName !== 'SELECT') { return {ok:false, reason:'pas un <select>'}; } \
+                for (const o of this.options) { if (o.value === v) { this.value = v; \
+                    this.dispatchEvent(new Event('change',{bubbles:true})); return {ok:true}; } } \
+                for (const o of this.options) { if (o.text === v) { this.value = o.value; \
+                    this.dispatchEvent(new Event('change',{bubbles:true})); return {ok:true}; } } \
+                return {ok:false, reason:'aucune option ne correspond'}; }";
+            let call = CallFunctionOnParams::builder()
+                .function_declaration(f)
+                .object_id(oid.clone())
+                .argument(CallArgument {
+                    value: Some(serde_json::Value::String(value)),
+                    unserializable_value: None,
+                    object_id: None,
+                })
+                .return_by_value(true)
+                .build()
+                .map_err(|e| format!("select (params) : {e}"))?;
+            let r = s.page.execute(call).await;
+            // Libère l'objet distant (best-effort), même si `execute` a échoué.
+            let _ = s.page.execute(ReleaseObjectParams::new(oid)).await;
+            let r = r.map_err(|e| format!("select (callFunctionOn) : {e}"))?;
+            if let Some(ex) = &r.result.exception_details {
+                let msg = ex
+                    .exception
+                    .as_ref()
+                    .and_then(|o| o.description.clone())
+                    .unwrap_or_else(|| ex.text.clone());
+                return Err(format!("select : {msg}"));
+            }
+            let val = r
+                .result
+                .result
+                .value
+                .ok_or_else(|| "select : réponse vide".to_string())?;
+            if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+                Ok(BrowserReply::Ok)
+            } else {
+                let reason = val
+                    .get("reason")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("échec")
+                    .to_string();
+                Err(format!("select : {reason}"))
+            }
+        }
+        // Note : le script reste enregistré pour toute la session du navigateur
+        // (pas de verbe de retrait) ; un `close` (nouveau navigateur) les oublie.
+        BrowserCommand::AddScript { js } => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let id = s
+                .page
+                .evaluate_on_new_document(js)
+                .await
+                .map_err(|e| format!("addscript : {e}"))?;
+            Ok(BrowserReply::Text(id.inner().clone()))
         }
     }
 }
@@ -1633,6 +1770,152 @@ mod tests {
         engine.exec(BrowserCommand::Click { ref_: r }).unwrap();
         match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => assert!(t.contains("clické"), "après clic bas : {t}"),
+            _ => panic!("Text"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn eval_calcule_lit_le_dom_et_attend_les_promesses() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test eval ignoré");
+            return;
+        }
+        let (url, _srv) =
+            servir_page_locale("<!doctype html><title>TitreX</title><h1>Bonjour</h1>");
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        // expression arithmétique
+        match engine
+            .exec(BrowserCommand::Eval { js: "1 + 2".into() })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "3"),
+            _ => panic!("Text"),
+        }
+        // lecture du DOM -> chaîne JSON (avec guillemets)
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "document.title".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "\"TitreX\""),
+            _ => panic!("Text"),
+        }
+        // promesse résolue (prouve await_promise)
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "Promise.resolve(42)".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "42"),
+            _ => panic!("Text"),
+        }
+        // expression fautive -> erreur JS LISIBLE (pas un dump Debug)
+        let err = engine
+            .exec(BrowserCommand::Eval {
+                js: "definitivement.pas.defini".into(),
+            })
+            .unwrap_err();
+        assert!(
+            err.contains("ReferenceError"),
+            "message JS lisible attendu : {err}"
+        );
+        assert!(
+            !err.contains("ExceptionDetails"),
+            "dump Debug non voulu : {err}"
+        );
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn select_choisit_par_valeur_puis_par_texte() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test select ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title>\
+             <select aria-label=Choix>\
+             <option value=a>Alpha</option><option value=b>Bravo</option><option value=c>Charlie</option>\
+             </select>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Choix").expect("ref du select");
+        // par valeur d'option
+        engine
+            .exec(BrowserCommand::Select {
+                ref_: r.clone(),
+                value: "b".into(),
+            })
+            .unwrap();
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "document.querySelector('select').value".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "\"b\""),
+            _ => panic!("Text"),
+        }
+        // par texte visible de l'option
+        engine
+            .exec(BrowserCommand::Select {
+                ref_: r.clone(),
+                value: "Charlie".into(),
+            })
+            .unwrap();
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "document.querySelector('select').value".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "\"c\""),
+            _ => panic!("Text"),
+        }
+        // option inexistante -> erreur
+        let err = engine
+            .exec(BrowserCommand::Select {
+                ref_: r,
+                value: "Zzz".into(),
+            })
+            .unwrap_err();
+        assert!(err.contains("select"), "err : {err}");
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn addscript_sexecute_au_chargement_suivant() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test addscript ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale("<!doctype html><title>T</title><h1>x</h1>");
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url.clone())).unwrap();
+        // Enregistre un script pour les FUTURS chargements.
+        engine
+            .exec(BrowserCommand::AddScript {
+                js: "window.__wimux = 7".into(),
+            })
+            .unwrap();
+        // Re-navigue : le script s'exécute au début du nouveau document.
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "window.__wimux".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "7"),
             _ => panic!("Text"),
         }
         let _ = engine.exec(BrowserCommand::Close);

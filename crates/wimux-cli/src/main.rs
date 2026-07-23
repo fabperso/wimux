@@ -432,6 +432,28 @@ mod browser {
         }
         Ok(WaitArgs { text, ms, settle })
     }
+
+    /// Premier argument non-`--` (l'expression JS de `eval`/`addscript`).
+    pub fn parse_js(args: &[String], usage: &'static str) -> io::Result<String> {
+        args.iter()
+            .find(|a| !a.starts_with("--"))
+            .cloned()
+            .ok_or_else(|| io::Error::other(usage))
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct SelectArgs {
+        pub ref_: String,
+        pub value: String,
+    }
+
+    /// `--ref <eN> --value <valeur>` (les deux obligatoires).
+    pub fn parse_select(args: &[String]) -> io::Result<SelectArgs> {
+        let usage = "usage : wimux browser select --ref <eN> --value <valeur>";
+        let ref_ = flag(args, "--ref").ok_or_else(|| io::Error::other(usage))?;
+        let value = flag(args, "--value").ok_or_else(|| io::Error::other(usage))?;
+        Ok(SelectArgs { ref_, value })
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1317,8 +1339,21 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
                 settle: a.settle,
             })
         }
+        Some("eval") => browser_text(ClientMessage::BrowserEval {
+            js: browser::parse_js(&args[1..], "usage : wimux browser eval \"<expression js>\"")?,
+        }),
+        Some("select") => {
+            let a = browser::parse_select(&args[1..])?;
+            browser_simple(ClientMessage::BrowserSelect {
+                ref_: a.ref_,
+                value: a.value,
+            })
+        }
+        Some("addscript") => browser_text(ClientMessage::BrowserAddScript {
+            js: browser::parse_js(&args[1..], "usage : wimux browser addscript \"<js>\"")?,
+        }),
         _ => Err(io::Error::other(
-            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait> …",
+            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait|eval|select|addscript> …",
         )),
     }
 }
@@ -1511,7 +1546,7 @@ fn print_help() {
              send-keys -t <nom> <touches...>  Injecte des frappes (scriptable)\n    \
              agent <sous-cmd>    Orchestration d'agents (spawn/list/logs/capture/send/kill/whoami)\n    \
              batch <sous-cmd>    Lots d'agents (create/list/review/diff/pr)\n    \
-             browser <sous-cmd>  Navigateur : open (volet B1) | launch/close/status/navigate/url/snapshot/screenshot (moteur pilotable) | click/type/press/scroll/wait (actions B2.2)\n    \
+             browser <sous-cmd>  Navigateur : open (volet B1) | launch/close/status/navigate/url/snapshot/screenshot (moteur pilotable) | click/type/press/scroll/wait (actions) | eval/select/addscript (scripting B2.3)\n    \
              kill-session <nom>  Termine une session\n    \
              kill-server         Arrête le serveur et toutes les sessions\n\
          \n\
@@ -1752,6 +1787,26 @@ mod browser_tests {
         assert!(parse_wait(&[]).is_err()); // aucun
         assert!(parse_wait(&["--text".into(), "x".into(), "--settle".into()]).is_err()); // deux
         assert!(parse_wait(&["--ms".into(), "abc".into()]).is_err()); // ms non entier
+    }
+
+    #[test]
+    fn parse_select_exige_ref_et_value() {
+        let a = parse_select(&["--ref".into(), "e2".into(), "--value".into(), "b".into()]).unwrap();
+        assert_eq!(a.ref_, "e2");
+        assert_eq!(a.value, "b");
+        assert!(parse_select(&["--ref".into(), "e2".into()]).is_err()); // --value manquant
+        assert!(parse_select(&["--value".into(), "b".into()]).is_err()); // --ref manquant
+    }
+
+    #[test]
+    fn parse_js_prend_le_premier_argument_non_flag() {
+        assert_eq!(parse_js(&["1 + 2".into()], "u").unwrap(), "1 + 2");
+        // saute les flags, prend le premier positionnel
+        assert_eq!(
+            parse_js(&["--x".into(), "document.title".into()], "u").unwrap(),
+            "document.title"
+        );
+        assert!(parse_js(&[], "usage attendu").is_err()); // aucun argument
     }
 }
 
