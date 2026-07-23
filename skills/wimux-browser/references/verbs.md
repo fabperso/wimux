@@ -50,6 +50,9 @@ et le **moteur pilotable** (tout le reste, headless par défaut).
 
 ## Configuration (fichier de config wimux)
 
+Le fichier de config wimux est `%USERPROFILE%\.wimux.conf` (sinon
+`%APPDATA%\wimux\wimux.conf`). Une directive par ligne.
+
 - `set browser-headless off` — affiche la fenêtre du moteur (« vitrine ») ;
   défaut = headless (fiabilité clavier).
 - `set browser-eval off` — **désactive** `eval`/`select`/`addscript` (le moteur

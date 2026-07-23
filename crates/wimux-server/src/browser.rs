@@ -293,6 +293,10 @@ struct Job {
     reply: tokio::sync::oneshot::Sender<Result<BrowserReply, String>>,
 }
 
+/// Message renvoyé quand la valve `browser-eval off` refuse un verbe de scripting.
+/// Contrat verbatim : le skill wimux-browser apprend à Claude à le reconnaître.
+const EVAL_OFF_MSG: &str = "eval désactivé (browser-eval off)";
+
 /// Options de configuration du navigateur, figées au lancement du moteur.
 #[derive(Clone, Copy)]
 pub struct BrowserOpts {
@@ -886,7 +890,7 @@ async fn dispatch(
         }
         BrowserCommand::Eval { js } => {
             if !opts.eval {
-                return Err("eval désactivé (browser-eval off)".into());
+                return Err(EVAL_OFF_MSG.into());
             }
             use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
             let s = sess
@@ -912,7 +916,7 @@ async fn dispatch(
         }
         BrowserCommand::Select { ref_, value } => {
             if !opts.eval {
-                return Err("eval désactivé (browser-eval off)".into());
+                return Err(EVAL_OFF_MSG.into());
             }
             use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ResolveNodeParams};
             use chromiumoxide::cdp::js_protocol::runtime::{
@@ -990,7 +994,7 @@ async fn dispatch(
         // (pas de verbe de retrait) ; un `close` (nouveau navigateur) les oublie.
         BrowserCommand::AddScript { js } => {
             if !opts.eval {
-                return Err("eval désactivé (browser-eval off)".into());
+                return Err(EVAL_OFF_MSG.into());
             }
             let s = sess
                 .as_ref()
@@ -1962,18 +1966,18 @@ mod tests {
         let e = engine
             .exec(BrowserCommand::Eval { js: "1 + 1".into() })
             .unwrap_err();
-        assert!(e.contains("browser-eval off"), "eval : {e}");
+        assert_eq!(e, EVAL_OFF_MSG, "eval : {e}");
         let e = engine
             .exec(BrowserCommand::Select {
                 ref_: "e1".into(),
                 value: "x".into(),
             })
             .unwrap_err();
-        assert!(e.contains("browser-eval off"), "select : {e}");
+        assert_eq!(e, EVAL_OFF_MSG, "select : {e}");
         let e = engine
             .exec(BrowserCommand::AddScript { js: "1".into() })
             .unwrap_err();
-        assert!(e.contains("browser-eval off"), "addscript : {e}");
+        assert_eq!(e, EVAL_OFF_MSG, "addscript : {e}");
         // les autres verbes marchent toujours (la valve ne touche que le scripting)
         match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => assert!(t.contains("button"), "snapshot : {t}"),
