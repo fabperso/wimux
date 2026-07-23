@@ -46,7 +46,10 @@ impl Server {
     /// Construit un serveur avec une config donnée (utile aux tests qui doivent
     /// injecter des modèles d'agents sans toucher au fichier utilisateur).
     fn with_config(config: Config) -> Arc<Server> {
-        let browser = crate::browser::BrowserEngine::new(config.browser_headless);
+        let browser = crate::browser::BrowserEngine::new(crate::browser::BrowserOpts {
+            headless: config.browser_headless,
+            eval: config.browser_eval,
+        });
         Arc::new(Server {
             sessions: Mutex::new(HashMap::new()),
             config,
