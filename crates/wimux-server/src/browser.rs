@@ -438,6 +438,21 @@ fn backend_id_for(sess: &Session, r: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("ref inconnue ({r}) — refais un snapshot"))
 }
 
+/// Extrait un message lisible d'une erreur CDP : pour une exception JavaScript,
+/// la `description` de l'exception (ex. « ReferenceError: x is not defined »)
+/// plutôt que le dump Debug complet de `ExceptionDetails`.
+fn message_erreur_js(e: chromiumoxide::error::CdpError) -> String {
+    use chromiumoxide::error::CdpError;
+    match e {
+        CdpError::JavascriptException(ex) => ex
+            .exception
+            .as_ref()
+            .and_then(|o| o.description.clone())
+            .unwrap_or_else(|| ex.text.clone()),
+        autre => autre.to_string(),
+    }
+}
+
 /// Amène l'élément dans le viewport (préalable à un clic fiable).
 async fn scroll_into_view(page: &chromiumoxide::Page, backend: i64) -> Result<(), String> {
     use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ScrollIntoViewIfNeededParams};
@@ -868,7 +883,7 @@ async fn dispatch(
                 .page
                 .evaluate_expression(params)
                 .await
-                .map_err(|e| format!("eval : {e}"))?;
+                .map_err(|e| format!("eval : {}", message_erreur_js(e)))?;
             // `value()` -> Option<&serde_json::Value> ; `undefined` -> None -> "null".
             let out = match res.value() {
                 Some(v) => v.to_string(),
@@ -921,15 +936,17 @@ async fn dispatch(
                 .return_by_value(true)
                 .build()
                 .map_err(|e| format!("select (params) : {e}"))?;
-            let r = s
-                .page
-                .execute(call)
-                .await
-                .map_err(|e| format!("select (callFunctionOn) : {e}"))?;
-            // Libère l'objet distant (best-effort).
+            let r = s.page.execute(call).await;
+            // Libère l'objet distant (best-effort), même si `execute` a échoué.
             let _ = s.page.execute(ReleaseObjectParams::new(oid)).await;
-            if r.result.exception_details.is_some() {
-                return Err("select : exception JS pendant la sélection".into());
+            let r = r.map_err(|e| format!("select (callFunctionOn) : {e}"))?;
+            if let Some(ex) = &r.result.exception_details {
+                let msg = ex
+                    .exception
+                    .as_ref()
+                    .and_then(|o| o.description.clone())
+                    .unwrap_or_else(|| ex.text.clone());
+                return Err(format!("select : {msg}"));
             }
             let val = r
                 .result
@@ -947,6 +964,8 @@ async fn dispatch(
                 Err(format!("select : {reason}"))
             }
         }
+        // Note : le script reste enregistré pour toute la session du navigateur
+        // (pas de verbe de retrait) ; un `close` (nouveau navigateur) les oublie.
         BrowserCommand::AddScript { js } => {
             let s = sess
                 .as_ref()
@@ -1794,13 +1813,20 @@ mod tests {
             BrowserReply::Text(t) => assert_eq!(t, "42"),
             _ => panic!("Text"),
         }
-        // expression fautive -> erreur
+        // expression fautive -> erreur JS LISIBLE (pas un dump Debug)
         let err = engine
             .exec(BrowserCommand::Eval {
                 js: "definitivement.pas.defini".into(),
             })
             .unwrap_err();
-        assert!(!err.is_empty(), "erreur JS attendue");
+        assert!(
+            err.contains("ReferenceError"),
+            "message JS lisible attendu : {err}"
+        );
+        assert!(
+            !err.contains("ExceptionDetails"),
+            "dump Debug non voulu : {err}"
+        );
         let _ = engine.exec(BrowserCommand::Close);
     }
 
