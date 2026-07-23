@@ -1546,7 +1546,7 @@ fn print_help() {
              send-keys -t <nom> <touches...>  Injecte des frappes (scriptable)\n    \
              agent <sous-cmd>    Orchestration d'agents (spawn/list/logs/capture/send/kill/whoami)\n    \
              batch <sous-cmd>    Lots d'agents (create/list/review/diff/pr)\n    \
-             browser <sous-cmd>  Navigateur : open (volet B1) | launch/close/status/navigate/url/snapshot/screenshot (moteur pilotable) | click/type/press/scroll/wait (actions B2.2)\n    \
+             browser <sous-cmd>  Navigateur : open (volet B1) | launch/close/status/navigate/url/snapshot/screenshot (moteur pilotable) | click/type/press/scroll/wait (actions) | eval/select/addscript (scripting B2.3)\n    \
              kill-session <nom>  Termine une session\n    \
              kill-server         Arrête le serveur et toutes les sessions\n\
          \n\
