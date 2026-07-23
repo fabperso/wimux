@@ -127,11 +127,27 @@ export class PaneManager {
     this.cb = cb;
   }
 
+  // Debounce du resize PTY, par volet. Pendant un split, le layout « churn » :
+  // le volet passe par plusieurs tailles intermédiaires avant de se stabiliser.
+  // Envoyer CHAQUE taille au PTY fait redessiner Claude à chaque fois, et ses
+  // redraws incrémentaux ne nettoient pas — les caractères des tailles
+  // précédentes restent dans la grille (corruption visible côté VT ET xterm).
+  // On n'informe donc le serveur qu'APRÈS stabilisation (taille finale unique).
+  private resizeTimers = new Map<number, number>();
   private emitResize(paneId: number, cols: number, rows: number) {
     const prev = this.lastSizes.get(paneId);
     if (prev && prev.cols === cols && prev.rows === rows) return;
     this.lastSizes.set(paneId, { cols, rows });
-    this.cb.onResize(paneId, cols, rows);
+    const t = this.resizeTimers.get(paneId);
+    if (t !== undefined) clearTimeout(t);
+    this.resizeTimers.set(
+      paneId,
+      window.setTimeout(() => {
+        this.resizeTimers.delete(paneId);
+        const sz = this.lastSizes.get(paneId);
+        if (sz) this.cb.onResize(paneId, sz.cols, sz.rows);
+      }, 120),
+    );
   }
 
   private emitRatio(nodeId: number, ratio: number) {
@@ -165,6 +181,8 @@ export class PaneManager {
     this.views.clear();
     this.webViews.clear();
     this.mount.replaceChildren();
+    for (const t of this.resizeTimers.values()) clearTimeout(t);
+    this.resizeTimers.clear();
     this.lastSizes.clear();
     this.lastSignature = null;
     this.lastPaneIds = null;
