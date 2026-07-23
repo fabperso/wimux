@@ -509,6 +509,11 @@ pub enum ClientMessage {
     BrowserEval {
         js: String,
     },
+    /// B2.3 : choisit une option d'un <select> désigné par une ref.
+    BrowserSelect {
+        ref_: String,
+        value: String,
+    },
 }
 
 /// Messages serveur -> client.

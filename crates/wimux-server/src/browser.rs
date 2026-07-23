@@ -246,6 +246,11 @@ pub enum BrowserCommand {
     Eval {
         js: String,
     },
+    /// B2.3 : choisit une option d'un <select> désigné par une ref (valeur ou texte).
+    Select {
+        ref_: String,
+        value: String,
+    },
 }
 
 /// Nom de touche → (key, code, windows_virtual_key_code) pour CDP. `None` si
@@ -866,6 +871,77 @@ async fn dispatch(
                 None => "null".to_string(),
             };
             Ok(BrowserReply::Text(out))
+        }
+        BrowserCommand::Select { ref_, value } => {
+            use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ResolveNodeParams};
+            use chromiumoxide::cdp::js_protocol::runtime::{
+                CallArgument, CallFunctionOnParams, ReleaseObjectParams,
+            };
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let bid = backend_id_for(s, &ref_)?;
+            // Résoudre le nœud DOM en objet JS.
+            let resolved = s
+                .page
+                .execute(ResolveNodeParams {
+                    node_id: None,
+                    backend_node_id: Some(BackendNodeId::new(bid)),
+                    object_group: None,
+                    execution_context_id: None,
+                })
+                .await
+                .map_err(|e| format!("select (resolveNode) : {e}"))?;
+            let oid = resolved
+                .result
+                .object
+                .object_id
+                .ok_or_else(|| "select : élément non résoluble".to_string())?;
+            // Helper JS FIGÉ (le nôtre) : sélectionne par value d'option, sinon par
+            // texte visible, puis émet l'événement `change`. Renvoie {ok, reason}.
+            let f = "function(v){ \
+                if (this.tagName !== 'SELECT') { return {ok:false, reason:'pas un <select>'}; } \
+                for (const o of this.options) { if (o.value === v) { this.value = v; \
+                    this.dispatchEvent(new Event('change',{bubbles:true})); return {ok:true}; } } \
+                for (const o of this.options) { if (o.text === v) { this.value = o.value; \
+                    this.dispatchEvent(new Event('change',{bubbles:true})); return {ok:true}; } } \
+                return {ok:false, reason:'aucune option ne correspond'}; }";
+            let call = CallFunctionOnParams::builder()
+                .function_declaration(f)
+                .object_id(oid.clone())
+                .argument(CallArgument {
+                    value: Some(serde_json::Value::String(value)),
+                    unserializable_value: None,
+                    object_id: None,
+                })
+                .return_by_value(true)
+                .build()
+                .map_err(|e| format!("select (params) : {e}"))?;
+            let r = s
+                .page
+                .execute(call)
+                .await
+                .map_err(|e| format!("select (callFunctionOn) : {e}"))?;
+            // Libère l'objet distant (best-effort).
+            let _ = s.page.execute(ReleaseObjectParams::new(oid)).await;
+            if r.result.exception_details.is_some() {
+                return Err("select : exception JS pendant la sélection".into());
+            }
+            let val = r
+                .result
+                .result
+                .value
+                .ok_or_else(|| "select : réponse vide".to_string())?;
+            if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+                Ok(BrowserReply::Ok)
+            } else {
+                let reason = val
+                    .get("reason")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("échec")
+                    .to_string();
+                Err(format!("select : {reason}"))
+            }
         }
     }
 }
@@ -1710,6 +1786,68 @@ mod tests {
             })
             .unwrap_err();
         assert!(!err.is_empty(), "erreur JS attendue");
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn select_choisit_par_valeur_puis_par_texte() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test select ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale(
+            "<!doctype html><title>T</title>\
+             <select aria-label=Choix>\
+             <option value=a>Alpha</option><option value=b>Bravo</option><option value=c>Charlie</option>\
+             </select>",
+        );
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => t,
+            _ => panic!("Text"),
+        };
+        let r = ref_pour(&snap, "Choix").expect("ref du select");
+        // par valeur d'option
+        engine
+            .exec(BrowserCommand::Select {
+                ref_: r.clone(),
+                value: "b".into(),
+            })
+            .unwrap();
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "document.querySelector('select').value".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "\"b\""),
+            _ => panic!("Text"),
+        }
+        // par texte visible de l'option
+        engine
+            .exec(BrowserCommand::Select {
+                ref_: r.clone(),
+                value: "Charlie".into(),
+            })
+            .unwrap();
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "document.querySelector('select').value".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "\"c\""),
+            _ => panic!("Text"),
+        }
+        // option inexistante -> erreur
+        let err = engine
+            .exec(BrowserCommand::Select {
+                ref_: r,
+                value: "Zzz".into(),
+            })
+            .unwrap_err();
+        assert!(err.contains("select"), "err : {err}");
         let _ = engine.exec(BrowserCommand::Close);
     }
 }

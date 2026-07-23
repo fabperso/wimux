@@ -440,6 +440,20 @@ mod browser {
             .cloned()
             .ok_or_else(|| io::Error::other(usage))
     }
+
+    #[derive(Debug, PartialEq)]
+    pub struct SelectArgs {
+        pub ref_: String,
+        pub value: String,
+    }
+
+    /// `--ref <eN> --value <valeur>` (les deux obligatoires).
+    pub fn parse_select(args: &[String]) -> io::Result<SelectArgs> {
+        let usage = "usage : wimux browser select --ref <eN> --value <valeur>";
+        let ref_ = flag(args, "--ref").ok_or_else(|| io::Error::other(usage))?;
+        let value = flag(args, "--value").ok_or_else(|| io::Error::other(usage))?;
+        Ok(SelectArgs { ref_, value })
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1328,8 +1342,15 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
         Some("eval") => browser_text(ClientMessage::BrowserEval {
             js: browser::parse_js(&args[1..], "usage : wimux browser eval \"<expression js>\"")?,
         }),
+        Some("select") => {
+            let a = browser::parse_select(&args[1..])?;
+            browser_simple(ClientMessage::BrowserSelect {
+                ref_: a.ref_,
+                value: a.value,
+            })
+        }
         _ => Err(io::Error::other(
-            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait|eval> …",
+            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait|eval|select> …",
         )),
     }
 }
@@ -1763,6 +1784,15 @@ mod browser_tests {
         assert!(parse_wait(&[]).is_err()); // aucun
         assert!(parse_wait(&["--text".into(), "x".into(), "--settle".into()]).is_err()); // deux
         assert!(parse_wait(&["--ms".into(), "abc".into()]).is_err()); // ms non entier
+    }
+
+    #[test]
+    fn parse_select_exige_ref_et_value() {
+        let a = parse_select(&["--ref".into(), "e2".into(), "--value".into(), "b".into()]).unwrap();
+        assert_eq!(a.ref_, "e2");
+        assert_eq!(a.value, "b");
+        assert!(parse_select(&["--ref".into(), "e2".into()]).is_err()); // --value manquant
+        assert!(parse_select(&["--value".into(), "b".into()]).is_err()); // --ref manquant
     }
 }
 
