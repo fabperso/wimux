@@ -1,8 +1,9 @@
 :root { background: #1e1e1e; color: #d4d4d4; font-family: "Segoe UI", sans-serif; }
 body { margin: 0; }
 #app { display: flex; height: 100vh; background: #252526; }
-/* Contrôles fenêtre style Windows (glyphes Segoe), en haut du rail */
-#win-controls { display: flex; align-items: center; }
+/* Contrôles fenêtre style Windows (glyphes Segoe), en haut à DROITE de la fenêtre */
+#win-controls { display: flex; align-items: center; margin-left: auto; }
+#ws-breadcrumb { display: flex; align-items: center; gap: 6px; }
 .win-btn { width: 28px; height: 24px; border: none; background: transparent; color: #ccc; cursor: pointer; font-family: "Segoe MDL2 Assets", "Segoe Fluent Icons", sans-serif; font-size: 10px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; }
 .win-btn:hover { background: #37373d; color: #fff; }
 .win-btn.close:hover { background: #c42b1c; color: #fff; }
@@ -26,7 +27,6 @@ body { margin: 0; }
 /* W4 : barre d'outils du rail (repli + nouvelle session), en HAUT façon CMUX */
 #rail-top { display: flex; align-items: center; gap: 2px; padding: 6px 6px; border-bottom: 1px solid #333; }
 #rail-top .rail-icon-btn { min-width: 26px; }
-#win-controls { margin-right: 2px; }
 .rail-icon-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 28px; padding: 0 6px; border: none; background: transparent; color: #9aa; cursor: pointer; border-radius: 5px; font-size: 17px; line-height: 1; }
 .rail-icon-btn:hover { background: #37373d; color: #fff; }
 #app.rail-collapsed #sessions, #app.rail-collapsed #rail-actions { display: none; }

@@ -11,11 +11,6 @@
     <div id="app">
       <aside id="rail">
         <div id="rail-top" data-tauri-drag-region>
-          <div id="win-controls">
-            <button id="win-min" class="win-btn" title="Réduire" aria-label="Réduire">&#xE921;</button>
-            <button id="win-max" class="win-btn" title="Agrandir" aria-label="Agrandir">&#xE922;</button>
-            <button id="win-close" class="win-btn close" title="Fermer" aria-label="Fermer">&#xE8BB;</button>
-          </div>
           <button id="rail-collapse" class="rail-icon-btn" title="Replier le panneau"></button>
           <button id="notif-bell" class="rail-icon-btn" title="Notifications"></button>
           <button id="new-session" class="rail-icon-btn" title="Nouvelle session">+</button>
@@ -29,7 +24,14 @@
         </div>
       </aside>
       <div id="workspace">
-        <div id="ws-header" data-tauri-drag-region></div>
+        <div id="ws-header" data-tauri-drag-region>
+          <div id="ws-breadcrumb"></div>
+          <div id="win-controls">
+            <button id="win-min" class="win-btn" title="Réduire" aria-label="Réduire">&#xE921;</button>
+            <button id="win-max" class="win-btn" title="Agrandir" aria-label="Agrandir">&#xE922;</button>
+            <button id="win-close" class="win-btn close" title="Fermer" aria-label="Fermer">&#xE8BB;</button>
+          </div>
+        </div>
         <div id="tabs"></div>
         <div id="terminal"></div>
       </div>

@@ -208,10 +208,9 @@ function ctrlButton(shape: string, title: string, onClick: () => void): HTMLElem
 }
 
 function updateWsHeader() {
-  const h = document.getElementById("ws-header")!;
+  const h = document.getElementById("ws-breadcrumb")!;
   h.replaceChildren();
-  if (!activeSession) { h.classList.add("empty"); return; }
-  h.classList.remove("empty");
+  if (!activeSession) return;
   h.append(icon(SVG.folder, "ws-ic"));
   const dto = lastSessions.find((s) => s.name === activeSession);
   const n = document.createElement("span");
