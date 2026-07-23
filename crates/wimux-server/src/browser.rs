@@ -293,25 +293,41 @@ struct Job {
     reply: tokio::sync::oneshot::Sender<Result<BrowserReply, String>>,
 }
 
+/// Options de configuration du navigateur, figées au lancement du moteur.
+#[derive(Clone, Copy)]
+pub struct BrowserOpts {
+    /// Sans fenêtre visible (fiabilité clavier). `false` = « vitrine ».
+    pub headless: bool,
+    /// Autorise eval/select/addscript. `false` = valve `browser-eval off`.
+    pub eval: bool,
+}
+
+impl Default for BrowserOpts {
+    fn default() -> Self {
+        BrowserOpts {
+            headless: true,
+            eval: true,
+        }
+    }
+}
+
 /// Pont synchrone → thread moteur asynchrone. Démarre le thread au premier appel.
 pub struct BrowserEngine {
     tx: Mutex<Option<tokio::sync::mpsc::Sender<Job>>>,
-    /// Sans fenêtre visible par défaut (fiabilité clavier — voir le commentaire
-    /// sur `Config::browser_headless`). `false` = fenêtre visible (« vitrine »).
-    headless: bool,
+    opts: BrowserOpts,
 }
 
 impl Default for BrowserEngine {
     fn default() -> Self {
-        Self::new(true)
+        Self::new(BrowserOpts::default())
     }
 }
 
 impl BrowserEngine {
-    pub fn new(headless: bool) -> BrowserEngine {
+    pub fn new(opts: BrowserOpts) -> BrowserEngine {
         BrowserEngine {
             tx: Mutex::new(None),
-            headless,
+            opts,
         }
     }
 
@@ -334,10 +350,10 @@ impl BrowserEngine {
             return tx.clone();
         }
         let (tx, rx) = tokio::sync::mpsc::channel::<Job>(32);
-        let headless = self.headless;
+        let opts = self.opts;
         std::thread::Builder::new()
             .name("wimux-browser".into())
-            .spawn(move || worker(rx, headless))
+            .spawn(move || worker(rx, opts))
             .expect("thread moteur navigateur");
         *g = Some(tx.clone());
         tx
@@ -355,7 +371,7 @@ struct Session {
 }
 
 /// Corps du thread moteur : un runtime tokio qui traite les commandes en série.
-fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>, headless: bool) {
+fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>, opts: BrowserOpts) {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -373,7 +389,7 @@ fn worker(mut rx: tokio::sync::mpsc::Receiver<Job>, headless: bool) {
     rt.block_on(async move {
         let mut sess: Option<Session> = None;
         while let Some(job) = rx.recv().await {
-            let res = dispatch(&mut sess, job.cmd, headless).await;
+            let res = dispatch(&mut sess, job.cmd, opts).await;
             let _ = job.reply.send(res);
         }
         // Canal fermé (BrowserEngine droppé) : `sess` est droppé -> Chrome fermé.
@@ -637,12 +653,12 @@ async fn insert_text(page: &chromiumoxide::Page, text: &str) -> Result<(), Strin
 async fn dispatch(
     sess: &mut Option<Session>,
     cmd: BrowserCommand,
-    headless: bool,
+    opts: BrowserOpts,
 ) -> Result<BrowserReply, String> {
     match cmd {
         BrowserCommand::Launch => {
             if sess.is_none() {
-                *sess = Some(launch_session(headless).await?);
+                *sess = Some(launch_session(opts.headless).await?);
             }
             Ok(BrowserReply::Ok)
         }
@@ -680,7 +696,7 @@ async fn dispatch(
             }
             // Lancement paresseux.
             if sess.is_none() {
-                *sess = Some(launch_session(headless).await?);
+                *sess = Some(launch_session(opts.headless).await?);
             }
             // Vidées AVANT la navigation (pas après) : les refs pointent le DOM
             // de l'ancienne page. Si `goto`/`wait_for_navigation` échoue ou
@@ -869,6 +885,9 @@ async fn dispatch(
             }
         }
         BrowserCommand::Eval { js } => {
+            if !opts.eval {
+                return Err("eval désactivé (browser-eval off)".into());
+            }
             use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
             let s = sess
                 .as_ref()
@@ -892,6 +911,9 @@ async fn dispatch(
             Ok(BrowserReply::Text(out))
         }
         BrowserCommand::Select { ref_, value } => {
+            if !opts.eval {
+                return Err("eval désactivé (browser-eval off)".into());
+            }
             use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ResolveNodeParams};
             use chromiumoxide::cdp::js_protocol::runtime::{
                 CallArgument, CallFunctionOnParams, ReleaseObjectParams,
@@ -967,6 +989,9 @@ async fn dispatch(
         // Note : le script reste enregistré pour toute la session du navigateur
         // (pas de verbe de retrait) ; un `close` (nouveau navigateur) les oublie.
         BrowserCommand::AddScript { js } => {
+            if !opts.eval {
+                return Err("eval désactivé (browser-eval off)".into());
+            }
             let s = sess
                 .as_ref()
                 .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
@@ -1147,7 +1172,7 @@ mod tests {
              <button onclick=\"document.getElementById('r').textContent='clické'\">Go</button>\
              <p id=r>vide</p>",
         );
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => t,
@@ -1171,7 +1196,7 @@ mod tests {
             eprintln!("aucun navigateur : test navigate_refuse ignoré");
             return;
         }
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         let err = engine
             .exec(BrowserCommand::Navigate("file:///C:/x".into()))
             .unwrap_err();
@@ -1186,7 +1211,7 @@ mod tests {
             return;
         }
         let (url, _srv) = servir_page_locale("<!doctype html><title>T</title><h1>Bonjour</h1>");
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         match engine.exec(BrowserCommand::Navigate(url.clone())).unwrap() {
             BrowserReply::Text(finale) => assert!(finale.starts_with("http://127.0.0.1:")),
             _ => panic!("Text attendu"),
@@ -1204,7 +1229,7 @@ mod tests {
             eprintln!("aucun Chrome/Edge : test launch_status_close ignoré");
             return;
         }
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         // Avant lancement : pas en cours.
         match engine.exec(BrowserCommand::Status).unwrap() {
             BrowserReply::Status { running, .. } => assert!(!running),
@@ -1425,7 +1450,7 @@ mod tests {
         }
         let (url, _srv) =
             servir_page_locale("<!doctype html><title>T</title><button>Continuer</button>");
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
 
         match engine.exec(BrowserCommand::Snapshot).unwrap() {
@@ -1465,7 +1490,7 @@ mod tests {
         }
         let (url, _srv) =
             servir_page_locale("<!doctype html><title>T</title><button>Continuer</button>");
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => {
@@ -1601,7 +1626,7 @@ mod tests {
              <input aria-label=Nom oninput=\"document.getElementById('m').textContent=this.value\">\
              <p id=m>vide</p>",
         );
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => t,
@@ -1647,7 +1672,7 @@ mod tests {
             "<!doctype html><title>T</title>\
              <input aria-label=Q onkeydown=\"location.hash=event.key\">",
         );
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => t,
@@ -1679,7 +1704,7 @@ mod tests {
             "<!doctype html><title>T</title><div style=height:3000px></div>\
              <button>EnBas</button>",
         );
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => t,
@@ -1718,7 +1743,7 @@ mod tests {
             "<!doctype html><title>T</title><p id=r>patiente</p>\
              <script>setTimeout(()=>{document.getElementById('r').textContent='PRÊT'},300)</script>",
         );
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         // Apparaît sous ~300ms : doit réussir avant le timeout de 10s.
         match engine
@@ -1760,7 +1785,7 @@ mod tests {
              <button onclick=\"document.getElementById('r').textContent='clické'\">Bas</button>\
              <p id=r>vide</p>",
         );
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => t,
@@ -1783,7 +1808,7 @@ mod tests {
         }
         let (url, _srv) =
             servir_page_locale("<!doctype html><title>TitreX</title><h1>Bonjour</h1>");
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         // expression arithmétique
         match engine
@@ -1842,7 +1867,7 @@ mod tests {
              <option value=a>Alpha</option><option value=b>Bravo</option><option value=c>Charlie</option>\
              </select>",
         );
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url)).unwrap();
         let snap = match engine.exec(BrowserCommand::Snapshot).unwrap() {
             BrowserReply::Text(t) => t,
@@ -1899,7 +1924,7 @@ mod tests {
             return;
         }
         let (url, _srv) = servir_page_locale("<!doctype html><title>T</title><h1>x</h1>");
-        let engine = BrowserEngine::new(true);
+        let engine = BrowserEngine::new(BrowserOpts::default());
         engine.exec(BrowserCommand::Navigate(url.clone())).unwrap();
         // Enregistre un script pour les FUTURS chargements.
         engine
@@ -1916,6 +1941,42 @@ mod tests {
             .unwrap()
         {
             BrowserReply::Text(t) => assert_eq!(t, "7"),
+            _ => panic!("Text"),
+        }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn valve_browser_eval_off_refuse_le_scripting() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test valve eval ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale("<!doctype html><title>T</title><button>B</button>");
+        let engine = BrowserEngine::new(BrowserOpts {
+            headless: true,
+            eval: false,
+        });
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        // eval / select / addscript refusés avec le message de valve
+        let e = engine
+            .exec(BrowserCommand::Eval { js: "1 + 1".into() })
+            .unwrap_err();
+        assert!(e.contains("browser-eval off"), "eval : {e}");
+        let e = engine
+            .exec(BrowserCommand::Select {
+                ref_: "e1".into(),
+                value: "x".into(),
+            })
+            .unwrap_err();
+        assert!(e.contains("browser-eval off"), "select : {e}");
+        let e = engine
+            .exec(BrowserCommand::AddScript { js: "1".into() })
+            .unwrap_err();
+        assert!(e.contains("browser-eval off"), "addscript : {e}");
+        // les autres verbes marchent toujours (la valve ne touche que le scripting)
+        match engine.exec(BrowserCommand::Snapshot).unwrap() {
+            BrowserReply::Text(t) => assert!(t.contains("button"), "snapshot : {t}"),
             _ => panic!("Text"),
         }
         let _ = engine.exec(BrowserCommand::Close);

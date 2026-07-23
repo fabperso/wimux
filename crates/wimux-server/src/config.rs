@@ -60,6 +60,9 @@ pub struct Config {
     /// les gestionnaires JS en mode « tête » lorsque le processus tourne en
     /// arrière-plan). Directive `set browser-headless off` pour la « vitrine ».
     pub browser_headless: bool,
+    /// Autorise l'exécution de JavaScript (eval/select/addscript). `false` =
+    /// valve `set browser-eval off` : le moteur refuse ces trois verbes.
+    pub browser_eval: bool,
 }
 
 impl Default for Config {
@@ -94,6 +97,7 @@ impl Default for Config {
             agent_templates: Vec::new(),
             agent_worktree_root: default_worktree_root(),
             browser_headless: true,
+            browser_eval: true,
         }
     }
 }
@@ -128,6 +132,9 @@ impl Config {
                 ["set", "mouse", value] => self.mouse = matches!(*value, "on" | "true" | "1"),
                 ["set", "browser-headless", value] => {
                     self.browser_headless = matches!(*value, "on" | "true" | "1")
+                }
+                ["set", "browser-eval", value] => {
+                    self.browser_eval = matches!(*value, "on" | "true" | "1")
                 }
                 ["set", "agent-idle-seconds", n] => {
                     if let Ok(v) = n.parse::<u64>() {
@@ -350,5 +357,15 @@ mod tests {
         assert!(!c.browser_headless);
         c.apply("set browser-headless on\n");
         assert!(c.browser_headless);
+    }
+
+    #[test]
+    fn directive_browser_eval() {
+        let mut c = Config::default();
+        assert!(c.browser_eval); // défaut = exécution JS autorisée
+        c.apply("set browser-eval off\n");
+        assert!(!c.browser_eval);
+        c.apply("set browser-eval on\n");
+        assert!(c.browser_eval);
     }
 }
