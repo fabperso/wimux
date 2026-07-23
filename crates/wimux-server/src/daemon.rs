@@ -784,15 +784,61 @@ fn reattach_active_window(
     let kg = Arc::clone(&keep_going);
     let gw = Arc::clone(gui_write);
     let handle = std::thread::spawn(move || {
+        use std::sync::mpsc::TryRecvError;
+        // Cap de fusion : borne le buffer sous flood continu (ex. un TUI qui
+        // redessine sans pause). 64 Kio couvre un redraw plein écran large.
+        const MAX_COALESCE: usize = 64 * 1024;
+        // Envoie un PaneOutput sous le verrou `gui_write`. `false` si l'écriture
+        // échoue (pipe fermé) -> on arrête la pompe.
+        let flush = |pane_id: u64, bytes: Vec<u8>| -> bool {
+            let mut w: &PipeConn = &conn_out;
+            let _g = gw.lock().unwrap();
+            send(&mut w, &ServerMessage::PaneOutput { pane_id, bytes }).is_ok()
+        };
         while kg.load(Ordering::Relaxed) {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                Ok((pane_id, bytes)) => {
-                    let mut w: &PipeConn = &conn_out;
-                    let sent = {
-                        let _g = gw.lock().unwrap();
-                        send(&mut w, &ServerMessage::PaneOutput { pane_id, bytes })
-                    };
-                    if sent.is_err() {
+                Ok((first_pane, first_bytes)) => {
+                    // COALESCING (cause racine du lag multi-volets) : draine tout
+                    // ce qui est immédiatement disponible et fusionne les octets
+                    // consécutifs d'un MÊME volet en un seul message. Un TUI qui
+                    // redessine vite (ex. Claude) produisait un `emit` Tauri par
+                    // petit chunk -> le thread JS unique saturait et la frappe
+                    // passait derrière. Ici on émet ~un message par volet et par
+                    // cycle de drainage.
+                    let mut cur = first_pane;
+                    let mut buf = first_bytes;
+                    let mut ok = true;
+                    loop {
+                        if buf.len() >= MAX_COALESCE {
+                            ok = flush(cur, std::mem::take(&mut buf));
+                            if !ok {
+                                break;
+                            }
+                        }
+                        match rx.try_recv() {
+                            Ok((p, b)) => {
+                                if p == cur {
+                                    buf.extend_from_slice(&b);
+                                } else {
+                                    ok = flush(cur, std::mem::take(&mut buf));
+                                    if !ok {
+                                        break;
+                                    }
+                                    cur = p;
+                                    buf = b;
+                                }
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok && !buf.is_empty() {
+                        ok = flush(cur, buf);
+                    }
+                    if !ok {
                         break;
                     }
                 }
