@@ -242,6 +242,10 @@ pub enum BrowserCommand {
         ms: Option<u64>,
         settle: bool,
     },
+    /// B2.3 : évalue une expression JS dans la page, renvoie le résultat JSON.
+    Eval {
+        js: String,
+    },
 }
 
 /// Nom de touche → (key, code, windows_virtual_key_code) pour CDP. `None` si
@@ -839,6 +843,29 @@ async fn dispatch(
             } else {
                 Err("wait : fournis --text, --ms ou --settle".into())
             }
+        }
+        BrowserCommand::Eval { js } => {
+            use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let params = EvaluateParams::builder()
+                .expression(js)
+                .return_by_value(true)
+                .await_promise(true)
+                .build()
+                .map_err(|e| format!("eval (params) : {e}"))?;
+            let res = s
+                .page
+                .evaluate_expression(params)
+                .await
+                .map_err(|e| format!("eval : {e}"))?;
+            // `value()` -> Option<&serde_json::Value> ; `undefined` -> None -> "null".
+            let out = match res.value() {
+                Some(v) => v.to_string(),
+                None => "null".to_string(),
+            };
+            Ok(BrowserReply::Text(out))
         }
     }
 }
@@ -1635,6 +1662,54 @@ mod tests {
             BrowserReply::Text(t) => assert!(t.contains("clické"), "après clic bas : {t}"),
             _ => panic!("Text"),
         }
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn eval_calcule_lit_le_dom_et_attend_les_promesses() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test eval ignoré");
+            return;
+        }
+        let (url, _srv) =
+            servir_page_locale("<!doctype html><title>TitreX</title><h1>Bonjour</h1>");
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        // expression arithmétique
+        match engine
+            .exec(BrowserCommand::Eval { js: "1 + 2".into() })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "3"),
+            _ => panic!("Text"),
+        }
+        // lecture du DOM -> chaîne JSON (avec guillemets)
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "document.title".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "\"TitreX\""),
+            _ => panic!("Text"),
+        }
+        // promesse résolue (prouve await_promise)
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "Promise.resolve(42)".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "42"),
+            _ => panic!("Text"),
+        }
+        // expression fautive -> erreur
+        let err = engine
+            .exec(BrowserCommand::Eval {
+                js: "definitivement.pas.defini".into(),
+            })
+            .unwrap_err();
+        assert!(!err.is_empty(), "erreur JS attendue");
         let _ = engine.exec(BrowserCommand::Close);
     }
 }

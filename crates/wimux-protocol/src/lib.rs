@@ -505,6 +505,10 @@ pub enum ClientMessage {
         ms: Option<u64>,
         settle: bool,
     },
+    /// B2.3 : évalue une expression JS, renvoie le résultat JSON.
+    BrowserEval {
+        js: String,
+    },
 }
 
 /// Messages serveur -> client.

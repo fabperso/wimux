@@ -432,6 +432,14 @@ mod browser {
         }
         Ok(WaitArgs { text, ms, settle })
     }
+
+    /// Premier argument non-`--` (l'expression JS de `eval`/`addscript`).
+    pub fn parse_js(args: &[String], usage: &'static str) -> io::Result<String> {
+        args.iter()
+            .find(|a| !a.starts_with("--"))
+            .cloned()
+            .ok_or_else(|| io::Error::other(usage))
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -1317,8 +1325,11 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
                 settle: a.settle,
             })
         }
+        Some("eval") => browser_text(ClientMessage::BrowserEval {
+            js: browser::parse_js(&args[1..], "usage : wimux browser eval \"<expression js>\"")?,
+        }),
         _ => Err(io::Error::other(
-            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait> …",
+            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait|eval> …",
         )),
     }
 }
