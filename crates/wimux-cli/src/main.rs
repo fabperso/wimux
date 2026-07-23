@@ -1349,8 +1349,11 @@ fn cmd_browser(args: &[String]) -> io::Result<()> {
                 value: a.value,
             })
         }
+        Some("addscript") => browser_text(ClientMessage::BrowserAddScript {
+            js: browser::parse_js(&args[1..], "usage : wimux browser addscript \"<js>\"")?,
+        }),
         _ => Err(io::Error::other(
-            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait|eval|select> …",
+            "usage : wimux browser <open|launch|close|status|navigate|url|snapshot|screenshot|click|type|press|scroll|wait|eval|select|addscript> …",
         )),
     }
 }
@@ -1793,6 +1796,17 @@ mod browser_tests {
         assert_eq!(a.value, "b");
         assert!(parse_select(&["--ref".into(), "e2".into()]).is_err()); // --value manquant
         assert!(parse_select(&["--value".into(), "b".into()]).is_err()); // --ref manquant
+    }
+
+    #[test]
+    fn parse_js_prend_le_premier_argument_non_flag() {
+        assert_eq!(parse_js(&["1 + 2".into()], "u").unwrap(), "1 + 2");
+        // saute les flags, prend le premier positionnel
+        assert_eq!(
+            parse_js(&["--x".into(), "document.title".into()], "u").unwrap(),
+            "document.title"
+        );
+        assert!(parse_js(&[], "usage attendu").is_err()); // aucun argument
     }
 }
 

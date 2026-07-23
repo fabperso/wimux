@@ -514,6 +514,10 @@ pub enum ClientMessage {
         ref_: String,
         value: String,
     },
+    /// B2.3 : enregistre un script persistant (exécuté au chargement).
+    BrowserAddScript {
+        js: String,
+    },
 }
 
 /// Messages serveur -> client.

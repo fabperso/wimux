@@ -251,6 +251,10 @@ pub enum BrowserCommand {
         ref_: String,
         value: String,
     },
+    /// B2.3 : enregistre un script exécuté au début de chaque futur document.
+    AddScript {
+        js: String,
+    },
 }
 
 /// Nom de touche → (key, code, windows_virtual_key_code) pour CDP. `None` si
@@ -942,6 +946,17 @@ async fn dispatch(
                     .to_string();
                 Err(format!("select : {reason}"))
             }
+        }
+        BrowserCommand::AddScript { js } => {
+            let s = sess
+                .as_ref()
+                .ok_or_else(|| "aucun navigateur : lance-le ou navigue d'abord".to_string())?;
+            let id = s
+                .page
+                .evaluate_on_new_document(js)
+                .await
+                .map_err(|e| format!("addscript : {e}"))?;
+            Ok(BrowserReply::Text(id.inner().clone()))
         }
     }
 }
@@ -1848,6 +1863,35 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.contains("select"), "err : {err}");
+        let _ = engine.exec(BrowserCommand::Close);
+    }
+
+    #[test]
+    fn addscript_sexecute_au_chargement_suivant() {
+        if !navigateur_dispo() {
+            eprintln!("aucun navigateur : test addscript ignoré");
+            return;
+        }
+        let (url, _srv) = servir_page_locale("<!doctype html><title>T</title><h1>x</h1>");
+        let engine = BrowserEngine::new(true);
+        engine.exec(BrowserCommand::Navigate(url.clone())).unwrap();
+        // Enregistre un script pour les FUTURS chargements.
+        engine
+            .exec(BrowserCommand::AddScript {
+                js: "window.__wimux = 7".into(),
+            })
+            .unwrap();
+        // Re-navigue : le script s'exécute au début du nouveau document.
+        engine.exec(BrowserCommand::Navigate(url)).unwrap();
+        match engine
+            .exec(BrowserCommand::Eval {
+                js: "window.__wimux".into(),
+            })
+            .unwrap()
+        {
+            BrowserReply::Text(t) => assert_eq!(t, "7"),
+            _ => panic!("Text"),
+        }
         let _ = engine.exec(BrowserCommand::Close);
     }
 }
