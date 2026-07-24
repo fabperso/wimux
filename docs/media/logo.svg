@@ -1,0 +1,23 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="t" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+  <title id="t">wimux logo</title>
+  <!-- app-icon background -->
+  <rect width="256" height="256" rx="56" fill="#0d1117"/>
+  <!-- terminal window -->
+  <rect x="40" y="56" width="176" height="144" rx="18" fill="#161b22" stroke="#30363d" stroke-width="2.5"/>
+  <circle cx="60" cy="74" r="4" fill="#30363d"/>
+  <circle cx="76" cy="74" r="4" fill="#30363d"/>
+  <circle cx="92" cy="74" r="4" fill="#30363d"/>
+  <line x1="40" y1="90" x2="216" y2="90" stroke="#21262d" stroke-width="2"/>
+  <!-- split -->
+  <line x1="128" y1="90" x2="128" y2="200" stroke="#21262d" stroke-width="2"/>
+  <!-- left pane: prompt -->
+  <text x="54" y="128" font-size="20" fill="#3fb950">&#10095;</text>
+  <rect x="76" y="114" width="8" height="15" rx="1.5" fill="#3fb950"/>
+  <rect x="54" y="144" width="56" height="6" rx="3" fill="#3d444d"/>
+  <rect x="54" y="160" width="40" height="6" rx="3" fill="#3d444d"/>
+  <!-- right pane: panes/agent -->
+  <rect x="142" y="112" width="60" height="6" rx="3" fill="#3d444d"/>
+  <rect x="142" y="128" width="48" height="6" rx="3" fill="#3d444d"/>
+  <rect x="142" y="144" width="64" height="6" rx="3" fill="#2dd4bf"/>
+  <rect x="142" y="160" width="44" height="6" rx="3" fill="#3d444d"/>
+</svg>

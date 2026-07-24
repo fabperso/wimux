@@ -1,0 +1,64 @@
+<svg viewBox="0 0 1200 380" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="t d" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+  <title id="t">wimux</title>
+  <desc id="d">wimux — the terminal multiplexer Windows never had. A stylized dark terminal with split panes and an agent pane.</desc>
+
+  <!-- background -->
+  <rect width="1200" height="380" rx="20" fill="#0d1117"/>
+
+  <!-- ===== left: wordmark ===== -->
+  <text x="72" y="102" font-size="14" letter-spacing="3.5" font-weight="600" fill="#2dd4bf">NATIVE WINDOWS TERMINAL MULTIPLEXER</text>
+
+  <text x="68" y="208" font-size="98" font-weight="700" letter-spacing="1">
+    <tspan fill="#e6edf3">wi</tspan><tspan fill="#2dd4bf">mux</tspan>
+  </text>
+  <!-- cursor block -->
+  <rect x="368" y="142" width="26" height="66" rx="2" fill="#3fb950"/>
+  <!-- accent underline -->
+  <rect x="72" y="228" width="300" height="4" rx="2" fill="#2dd4bf" opacity="0.85"/>
+
+  <text x="72" y="270" font-size="23" fill="#8b949e">The terminal multiplexer Windows never had.</text>
+  <text x="72" y="308" font-size="16.5" fill="#adbac7">persistent sessions&#160;&#160;·&#160;&#160;native GUI&#160;&#160;·&#160;&#160;driveable browser&#160;&#160;·&#160;&#160;AI agents</text>
+
+  <!-- ===== right: terminal window with split panes ===== -->
+  <g>
+    <rect x="700" y="56" width="428" height="268" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <!-- title bar -->
+    <circle cx="722" cy="74" r="5" fill="#30363d"/>
+    <circle cx="740" cy="74" r="5" fill="#30363d"/>
+    <circle cx="758" cy="74" r="5" fill="#30363d"/>
+    <text x="914" y="79" font-size="13" text-anchor="middle" fill="#6e7681">wimux — dev</text>
+    <line x1="700" y1="92" x2="1128" y2="92" stroke="#21262d" stroke-width="1.5"/>
+
+    <!-- split dividers -->
+    <line x1="914" y1="92" x2="914" y2="324" stroke="#21262d" stroke-width="1.5"/>
+    <line x1="700" y1="208" x2="914" y2="208" stroke="#21262d" stroke-width="1.5"/>
+
+    <!-- left-top pane: a shell prompt -->
+    <text x="720" y="126" font-size="15" fill="#3fb950">&#10095;</text>
+    <rect x="738" y="116" width="112" height="8" rx="4" fill="#6e7681"/>
+    <rect x="858" y="114" width="9" height="12" rx="1.5" fill="#3fb950"/>
+    <rect x="720" y="146" width="150" height="7" rx="3.5" fill="#3d444d"/>
+    <rect x="720" y="166" width="96"  height="7" rx="3.5" fill="#3d444d"/>
+    <rect x="720" y="186" width="128" height="7" rx="3.5" fill="#3d444d"/>
+
+    <!-- left-bottom pane: tests passing -->
+    <rect x="720" y="230" width="15" height="8" rx="2" fill="#3fb950"/>
+    <rect x="742" y="230" width="118" height="8" rx="4" fill="#6e7681"/>
+    <rect x="720" y="252" width="160" height="7" rx="3.5" fill="#3d444d"/>
+    <rect x="720" y="272" width="104" height="7" rx="3.5" fill="#3d444d"/>
+    <rect x="720" y="292" width="140" height="7" rx="3.5" fill="#3d444d"/>
+
+    <!-- right pane: agent -->
+    <rect x="926" y="104" width="188" height="24" rx="6" fill="#0e2e2a"/>
+    <text x="938" y="120" font-size="12.5" fill="#2dd4bf">agent</text>
+    <circle cx="1102" cy="116" r="4" fill="#3fb950"/>
+    <rect x="926" y="146" width="170" height="7" rx="3.5" fill="#3d444d"/>
+    <rect x="926" y="164" width="150" height="7" rx="3.5" fill="#3d444d"/>
+    <rect x="926" y="182" width="176" height="7" rx="3.5" fill="#3d444d"/>
+    <rect x="926" y="200" width="120" height="7" rx="3.5" fill="#2dd4bf"/>
+    <rect x="926" y="226" width="162" height="7" rx="3.5" fill="#3d444d"/>
+    <rect x="926" y="244" width="138" height="7" rx="3.5" fill="#3d444d"/>
+    <text x="926" y="292" font-size="15" fill="#3fb950">&#10095;</text>
+    <rect x="944" y="280" width="9" height="12" rx="1.5" fill="#3fb950"/>
+  </g>
+</svg>
