@@ -9,6 +9,7 @@
 Persistent sessions, a native GUI, a driveable browser, and AI sub‑agent orchestration — built for PowerShell and Windows Terminal, in Rust.
 
 [![CI](https://github.com/fabperso/wimux/actions/workflows/ci.yml/badge.svg)](https://github.com/fabperso/wimux/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/wimux.svg)](https://crates.io/crates/wimux)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-CE422B?logo=rust&logoColor=white)
@@ -53,7 +54,13 @@ Then it goes further than a tmux clone:
 
 ### Install (Windows 10/11, x64)
 
-**With [Scoop](https://scoop.sh)** — recommended, and it keeps wimux updated:
+**With Cargo** — CLI + daemon, straight from crates.io:
+
+```powershell
+cargo install wimux wimux-server
+```
+
+**With [Scoop](https://scoop.sh)** — CLI, daemon *and* the GUI, kept up to date:
 
 ```powershell
 scoop bucket add wimux https://github.com/fabperso/wimux
