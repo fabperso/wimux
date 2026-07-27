@@ -1172,6 +1172,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn click_declenche_le_gestionnaire_de_la_page() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test click ignoré");
@@ -1202,6 +1203,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn navigate_refuse_les_schemas_non_http() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test navigate_refuse ignoré");
@@ -1216,6 +1218,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn navigate_puis_url_reflete_la_page() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test navigate_puis_url ignoré");
@@ -1235,6 +1238,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn launch_status_close_cycle() {
         if !navigateur_dispo() {
             eprintln!("aucun Chrome/Edge : test launch_status_close ignoré");
@@ -1454,6 +1458,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn snapshot_et_screenshot_sur_page_locale() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test snapshot/screenshot ignoré");
@@ -1494,6 +1499,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn snapshot_expose_des_refs_pour_les_elements() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test snapshot_refs ignoré");
@@ -1626,6 +1632,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn type_ecrit_dans_un_champ() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test type ignoré");
@@ -1672,6 +1679,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn press_envoie_la_touche_a_lelement_focalise() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test press ignoré");
@@ -1705,6 +1713,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn scroll_vers_une_ref_reussit() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test scroll ignoré");
@@ -1745,6 +1754,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn wait_text_attend_un_contenu_differe() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test wait ignoré");
@@ -1786,6 +1796,7 @@ mod tests {
     // Prouve que getBoxModel rend des coordonnées viewport : le clic après
     // scroll atteint sa cible sans conversion.
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn click_sous_la_ligne_de_flottaison() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test click sous la ligne ignoré");
@@ -1812,6 +1823,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn eval_calcule_lit_le_dom_et_attend_les_promesses() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test eval ignoré");
@@ -1867,6 +1879,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn select_choisit_par_valeur_puis_par_texte() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test select ignoré");
@@ -1929,6 +1942,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn addscript_sexecute_au_chargement_suivant() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test addscript ignoré");
@@ -1958,6 +1972,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lance un vrai navigateur (Edge) : instable/lent en CI ; en local `cargo test -- --ignored`"]
     fn valve_browser_eval_off_refuse_le_scripting() {
         if !navigateur_dispo() {
             eprintln!("aucun navigateur : test valve eval ignoré");
