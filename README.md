@@ -8,11 +8,11 @@
 
 Persistent sessions, a native GUI, a driveable browser, and AI sub‑agent orchestration — built for PowerShell and Windows Terminal, in Rust.
 
+[![CI](https://github.com/fabperso/wimux/actions/workflows/ci.yml/badge.svg)](https://github.com/fabperso/wimux/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-CE422B?logo=rust&logoColor=white)
 ![GUI: Tauri](https://img.shields.io/badge/GUI-Tauri%20v2-24C8DB?logo=tauri&logoColor=white)
-<!-- TODO: add a CI badge once GitHub Actions is set up -->
 
 </div>
 
