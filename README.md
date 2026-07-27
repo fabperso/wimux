@@ -53,7 +53,37 @@ Then it goes further than a tmux clone:
 
 ### Install (Windows 10/11, x64)
 
-Download the latest installer from the [**Releases**](../../releases) page and run it. wimux starts its background server automatically the first time you launch the app — nothing else to set up.
+**With [Scoop](https://scoop.sh)** — recommended, and it keeps wimux updated:
+
+```powershell
+scoop bucket add wimux https://github.com/fabperso/wimux
+scoop install wimux
+```
+
+**Or download it** from the [**Releases**](../../releases) page: the installer (`…-setup.exe`) or the portable zip. wimux starts its background server automatically the first time you launch the app — nothing else to set up.
+
+<details>
+<summary><b>“Windows protected your PC” — why, and how to verify the download</b></summary>
+
+<br>
+
+The binaries are **not code‑signed**: a publicly trusted certificate costs money every year, which is hard to justify for a free project. So Windows SmartScreen shows a warning on first run — click **More info → Run anyway**.
+
+You don't have to take my word that the file is intact. Every release ships a `SHA256SUMS.txt`; compare it with your download:
+
+```powershell
+Get-FileHash .\wimux-<version>-x64-setup.exe -Algorithm SHA256
+```
+
+Better still, each binary carries a **build provenance attestation**, so you can verify it was built by this repository's workflow — not by someone else:
+
+```powershell
+gh attestation verify .\wimux-<version>-x64-setup.exe --repo fabperso/wimux
+```
+
+Installing through Scoop sidesteps the SmartScreen prompt entirely (it downloads and verifies the hash itself).
+
+</details>
 
 ### Or build from source
 

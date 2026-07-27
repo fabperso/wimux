@@ -1,0 +1,138 @@
+name: Release
+
+# Publie une version : installeur NSIS + archive portable + empreintes SHA-256,
+# avec attestation de provenance du build. Déclenché en poussant une étiquette
+# `vX.Y.Z` ; le déclenchement manuel construit tout SANS rien publier (répétition).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write      # créer la release (et pousser le manifeste Scoop)
+  id-token: write      # attestation de provenance
+  attestations: write
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  release:
+    name: Build & publication (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: wimux-gui/package-lock.json
+
+      - name: Version (depuis l'étiquette, sinon 0.0.0-dev)
+        id: v
+        run: |
+          $ref = "${{ github.ref_name }}"
+          $version = if ("${{ github.ref_type }}" -eq "tag") { $ref.TrimStart("v") } else { "0.0.0-dev" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Output "version = $version"
+
+      - name: Build CLI + daemon
+        run: cargo build --release --workspace
+
+      # Le daemon est EMBARQUÉ dans l'installeur (la GUI le démarre au lancement) :
+      # il doit être en place avant `tauri build` (cf. bundle.resources).
+      - name: Embarquer le daemon dans le bundle GUI
+        run: |
+          New-Item -ItemType Directory -Force wimux-gui/src-tauri/binaries | Out-Null
+          Copy-Item target/release/wimux-server.exe wimux-gui/src-tauri/binaries/ -Force
+
+      - name: Build GUI + installeur NSIS
+        working-directory: wimux-gui
+        run: |
+          npm ci
+          npm run tauri build -- --bundles nsis
+
+      - name: Assembler les livrables
+        id: pack
+        run: |
+          $v = "${{ steps.v.outputs.version }}"
+          New-Item -ItemType Directory -Force dist, staging | Out-Null
+
+          # Archive portable : les trois binaires à plat (Scoop s'appuie dessus).
+          Copy-Item target/release/wimux.exe, target/release/wimux-server.exe staging/
+          Copy-Item wimux-gui/src-tauri/target/release/wimux-gui.exe staging/
+          Copy-Item README.md, LICENSE staging/
+          Compress-Archive -Path staging/* -DestinationPath "dist/wimux-$v-x64-portable.zip" -Force
+
+          # Installeur (le nom porte la version de tauri.conf.json : on renomme
+          # sur la version de l'étiquette pour que tout soit cohérent).
+          $setup = Get-ChildItem wimux-gui/src-tauri/target/release/bundle/nsis/*-setup.exe |
+                   Select-Object -First 1
+          Copy-Item $setup.FullName "dist/wimux-$v-x64-setup.exe"
+
+          # Empreintes : permettent de vérifier un téléchargement, et Scoop s'en sert.
+          Get-ChildItem dist | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)"
+          } | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+          Get-Content dist/SHA256SUMS.txt
+
+      # Provenance vérifiable des binaires (`gh attestation verify`).
+      # Non bloquant : sur les plans gratuits, ce service n'est disponible que
+      # pour les dépôts PUBLICS — l'étape s'activera d'elle-même au passage en public.
+      - name: Attestation de provenance
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*.zip
+
+      - name: "Artefacts (déclenchement manuel : aucune publication)"
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wimux-dist
+          path: dist/*
+
+      - name: Publier la release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = Get-ChildItem dist | ForEach-Object { $_.FullName }
+          gh release create "${{ github.ref_name }}" $files `
+            --title "wimux ${{ github.ref_name }}" `
+            --generate-notes
+
+      # Le manifeste Scoop doit pointer l'archive de CETTE version, avec son
+      # empreinte : on le met à jour automatiquement pour qu'il ne dérive jamais.
+      - name: Mettre à jour le manifeste Scoop
+        if: github.ref_type == 'tag'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.v.outputs.version }}"
+          $zip = "wimux-$v-x64-portable.zip"
+          $hash = ((Get-Content dist/SHA256SUMS.txt | Where-Object { $_ -match [regex]::Escape($zip) }) -split '\s+')[0]
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          $m = Get-Content bucket/wimux.json -Raw | ConvertFrom-Json
+          $m.version = $v
+          $m.architecture.'64bit'.url = "https://github.com/${{ github.repository }}/releases/download/v$v/$zip"
+          $m.architecture.'64bit'.hash = $hash
+          $m | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 bucket/wimux.json
+          git add bucket/wimux.json
+          git commit -m "chore(scoop): manifeste $v"
+          git push origin main
