@@ -425,6 +425,11 @@ async fn launch_session(headless: bool) -> Result<Session, String> {
     let config = builder
         .chrome_executable(bin)
         .user_data_dir(&profile_dir)
+        // Timeout de requête CDP relevé à 60 s (défaut chromiumoxide : 30 s) :
+        // le tout premier `goto` sur un navigateur lancé À FROID (runner CI,
+        // Edge cold start) dépasse parfois 30 s → « Request timed out » (flake
+        // observé en CI sur `select_choisit_par_valeur_puis_par_texte`).
+        .request_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| format!("config navigateur : {e}"))?;
     let (browser, mut handler) = Browser::launch(config)
@@ -711,9 +716,11 @@ async fn dispatch(
             // Borne de temps : le worker est strictement sériel. Une page qui ne
             // déclenche jamais `load` bloquerait TOUTES les commandes suivantes
             // (y compris Close/Status) de tous les clients, sans reprise possible
-            // sinon tuer le daemon. Au-delà de 30 s -> Error (comportement attendu
+            // sinon tuer le daemon. Au-delà de 60 s -> Error (comportement attendu
             // par la spec B2.1 : « timeout de navigation → Error avec raison »).
-            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            // 60 s (et non 30) : marge pour un lancement à froid en CI, cf. le
+            // `request_timeout` aligné côté BrowserConfig.
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
                 page.goto(url)
                     .await
                     .map_err(|e| format!("navigation : {e}"))?;
@@ -723,7 +730,7 @@ async fn dispatch(
                 Ok::<(), String>(())
             })
             .await
-            .map_err(|_| "navigation : délai dépassé (30 s)".to_string())??;
+            .map_err(|_| "navigation : délai dépassé (60 s)".to_string())??;
             let finale = sess
                 .as_ref()
                 .unwrap()
