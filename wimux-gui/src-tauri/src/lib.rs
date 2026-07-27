@@ -590,10 +590,59 @@ fn rename_window(index: u32, name: String, bridge: State<Bridge>) -> Result<(), 
     send_persistent(&bridge, &ClientMessage::RenameWindow { index, name })
 }
 
+/// Démarre le daemon `wimux-server` embarqué (ressource de l'app) s'il n'est
+/// pas déjà joignable sur le pipe nommé. Best-effort : en cas d'échec (ex.
+/// lancement dev sans ressource empaquetée), on laisse la GUI se lancer — elle
+/// affichera « serveur wimux introuvable » comme avant, sans planter.
+///
+/// Le daemon est lancé DÉTACHÉ et sans fenêtre console : il survit à la GUI
+/// (comportement habituel de wimux — le serveur persiste entre attaches) et ne
+/// fait pas clignoter de console au démarrage.
+fn ensure_daemon(app: &AppHandle) {
+    // Déjà lancé ? Le pipe répond → rien à faire.
+    if connect(&user_pipe_name()).is_ok() {
+        return;
+    }
+    // Binaire embarqué à côté de l'app (cf. `bundle.resources`).
+    let exe = match app
+        .path()
+        .resolve("binaries/wimux-server.exe", tauri::path::BaseDirectory::Resource)
+    {
+        Ok(p) if p.exists() => p,
+        _ => return, // pas de ressource (dev) : on abandonne silencieusement
+    };
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("serve");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    if cmd.spawn().is_err() {
+        return;
+    }
+    // Attendre que le daemon ouvre son pipe (démarrage à froid, max ~5 s).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if connect(&user_pipe_name()).is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            // Autonomie de l'installeur : si aucun daemon ne tourne, on lance
+            // celui empaqueté avec l'app avant que le frontend ne tente son
+            // premier `attach_session`.
+            ensure_daemon(app.handle());
+            Ok(())
+        })
         .manage(Bridge::default())
         .invoke_handler(tauri::generate_handler![
             attach_session,

@@ -62,10 +62,12 @@ Download the latest installer from the [**Releases**](../../releases) page and r
 cargo build --release
 target\release\wimux --help
 
-# GUI (Tauri v2 — needs Node.js)
-cd wimux-gui
-npm install
-npm run tauri build          # produces a release .exe + installer
+# GUI + self-contained installer (Tauri v2 — needs Node.js)
+cargo build --release -p wimux-server        # the daemon, bundled into the installer
+New-Item -ItemType Directory -Force wimux-gui/src-tauri/binaries | Out-Null
+Copy-Item target/release/wimux-server.exe wimux-gui/src-tauri/binaries/
+cd wimux-gui; npm install
+npm run tauri build          # bundles GUI + daemon → installer that auto-starts the daemon
 ```
 
 ### First steps
