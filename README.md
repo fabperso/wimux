@@ -41,10 +41,10 @@ Then it goes further than a tmux clone:
 
 ## Demo
 
-<!-- TODO: record docs/media/wimux-demo.gif (hero GIF — see the shot list) -->
 ![wimux in action](docs/media/wimux-demo.gif)
 
-<!-- TODO: replace with real screenshots of the running app -->
+*One session: a shell, a live dev‑server preview, and an AI sub‑agent answering in its own pane — then switch workspaces, everything keeps running.*
+
 | GUI — panes & tabs | Agent orchestration | Browser pane |
 | :---: | :---: | :---: |
 | ![](docs/media/gui.png) | ![](docs/media/agents.png) | ![](docs/media/browser.png) |
@@ -185,9 +185,10 @@ See the full reference in [docs/usage.md](docs/usage.md).
 
 <!--
 BEFORE MAKING THE REPO PUBLIC — remove this comment and complete:
-  [ ] Add a LICENSE file (MIT) at the repo root
-  [ ] Record docs/media/wimux-demo.gif (hero) + docs/media/{gui,agents,browser}.png
-  [ ] Confirm the real repo URL and fix Cargo.toml `repository` (currently a placeholder)
-  [ ] Set up GitHub Actions (Windows build + cargo test) and add the CI badge
-  [ ] Fix the known first-keystroke focus papercut before any public launch
+  [x] Add a LICENSE file (MIT) at the repo root
+  [x] Record docs/media/wimux-demo.gif (hero) + docs/media/{gui,agents,browser}.png
+  [x] Confirm the real repo URL and fix Cargo.toml `repository`
+  [x] Set up GitHub Actions (Windows build + cargo test) and add the CI badge
+  [x] Fix the first-keystroke focus papercut
+  [ ] Consider signing the installer (SmartScreen) before a wide launch
 -->
