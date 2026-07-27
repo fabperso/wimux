@@ -1,38 +1,38 @@
 {
-    "##": "Manifeste Scoop. version/url/hash sont mis a jour automatiquement a chaque release par .github/workflows/release.yml (etape « Mettre a jour le manifeste Scoop »).",
-    "version": "0.0.0",
-    "description": "Native Windows terminal multiplexer: persistent sessions, native GUI, driveable browser and AI sub-agent orchestration.",
-    "homepage": "https://github.com/fabperso/wimux",
-    "license": "MIT",
-    "notes": [
-        "wimux est installe : la CLI `wimux` est dans le PATH, et `wimux-gui` lance l'interface graphique.",
-        "Le serveur (wimux-server) demarre tout seul au premier lancement de la GUI."
-    ],
-    "architecture": {
-        "64bit": {
-            "url": "https://github.com/fabperso/wimux/releases/download/v0.0.0/wimux-0.0.0-x64-portable.zip",
-            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
-        }
-    },
-    "bin": [
-        "wimux.exe",
-        "wimux-gui.exe"
-    ],
-    "shortcuts": [
-        [
-            "wimux-gui.exe",
-            "wimux"
-        ]
-    ],
-    "checkver": "github",
-    "autoupdate": {
-        "architecture": {
-            "64bit": {
-                "url": "https://github.com/fabperso/wimux/releases/download/v$version/wimux-$version-x64-portable.zip"
-            }
-        },
-        "hash": {
-            "url": "$baseurl/SHA256SUMS.txt"
-        }
+  "##": "Manifeste Scoop. version/url/hash sont mis a jour automatiquement a chaque release par .github/workflows/release.yml (etape « Mettre a jour le manifeste Scoop »).",
+  "version": "0.1.0",
+  "description": "Native Windows terminal multiplexer: persistent sessions, native GUI, driveable browser and AI sub-agent orchestration.",
+  "homepage": "https://github.com/fabperso/wimux",
+  "license": "MIT",
+  "notes": [
+    "wimux est installe : la CLI `wimux` est dans le PATH, et `wimux-gui` lance l'interface graphique.",
+    "Le serveur (wimux-server) demarre tout seul au premier lancement de la GUI."
+  ],
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/fabperso/wimux/releases/download/v0.1.0/wimux-0.1.0-x64-portable.zip",
+      "hash": "7286711db7b4ea0a32cac23d2b0695b0bc44642ea1c056abd3037c64c51d0723"
     }
+  },
+  "bin": [
+    "wimux.exe",
+    "wimux-gui.exe"
+  ],
+  "shortcuts": [
+    [
+      "wimux-gui.exe",
+      "wimux"
+    ]
+  ],
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/fabperso/wimux/releases/download/v$version/wimux-$version-x64-portable.zip"
+      }
+    },
+    "hash": {
+      "url": "$baseurl/SHA256SUMS.txt"
+    }
+  }
 }
