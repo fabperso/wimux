@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "wimux-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "crossterm",
  "wimux-client",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "wimux-client"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "clipboard-win",
  "crossterm",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "wimux-protocol"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "postcard",
  "serde",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "wimux-server"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chromiumoxide",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "wimux-vt"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "unicode-width",
