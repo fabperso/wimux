@@ -70,9 +70,113 @@ let activeSession: string | null = null;
 let activePaneId: number | null = null;
 
 // Disposition + flux serveur -> volets.
+// --- Repli clavier : ne jamais perdre une frappe -----------------------------
+// Le rail et les onglets sont de simples `div` (non focalisables) : cliquer
+// dessus fait tomber le focus du document sur `<body>`. Or une bascule de
+// session ne focalise le terminal du nouveau volet qu'au RETOUR du serveur
+// (aller-retour de ~300 à 450 ms, mesuré). Tout ce qui était tapé dans cet
+// intervalle partait dans le vide — avec le bip Windows d'une touche envoyée à
+// un élément non éditable. C'est le bug « la 1re touche ne s'affiche pas, je
+// dois réappuyer ».
+//
+// Règle : dans une application terminal, une frappe alors qu'aucun champ n'a le
+// focus appartient au terminal actif. Si le volet cible n'existe pas encore
+// (bascule en cours), on la met en attente et on la rejoue dès son arrivée.
+let switchingSince = 0;
+let pendingInput: string[] = [];
+/// Vrai tant que `attach_session` n'a pas répondu. Une disposition reçue
+/// pendant ce laps est encore celle de l'ANCIENNE session : la prendre pour
+/// fin de bascule enverrait la frappe en attente au volet qu'on vient de
+/// quitter (observé en test). On n'accepte donc que la disposition d'après.
+let attacheEnCours = false;
+
+function basculeEnCours(): boolean {
+  return switchingSince !== 0 && Date.now() - switchingSince < 3000;
+}
+
+function envoyerAuVolet(paneId: number, texte: string) {
+  const bytes = Array.from(new TextEncoder().encode(texte));
+  invoke("pane_input", { paneId, bytes }).catch(() => {});
+}
+
+/// Ouvre la fenêtre de mise en attente. À appeler dès le CLIC qui va changer de
+/// volet — pas seulement quand la bascule part : le rail diffère `switchTo` de
+/// 200 ms (désambiguïsation du double-clic de renommage) alors que le focus,
+/// lui, tombe sur `<body>` immédiatement.
+/// `attendAttache` : vrai pour un changement de SESSION (il faut ignorer les
+/// dispositions tant que `attach_session` n'a pas répondu — ce sont encore
+/// celles de l'ancienne session) ; faux pour un changement d'ONGLET, dont la
+/// prochaine disposition reçue est déjà la bonne.
+function armerBascule(attendAttache = true) {
+  switchingSince = Date.now();
+  attacheEnCours = attendAttache;
+}
+
+/// La bascule n'aura finalement pas lieu (double-clic de renommage) : ce qui a
+/// été tapé revient au volet actif plutôt que d'être jeté.
+function annulerBascule() {
+  if (switchingSince === 0) return;
+  switchingSince = 0;
+  attacheEnCours = false;
+  const texte = pendingInput.join("");
+  pendingInput = [];
+  if (texte !== "" && activePaneId !== null) envoyerAuVolet(activePaneId, texte);
+}
+
+/// Rejoue les frappes mises en attente pendant une bascule, sur le volet
+/// désormais actif. Appelé à l'arrivée de la disposition.
+function flushPendingInput(paneId: number) {
+  if (switchingSince === 0 || attacheEnCours) return;
+  switchingSince = 0;
+  if (pendingInput.length === 0) return;
+  const texte = pendingInput.join("");
+  pendingInput = [];
+  envoyerAuVolet(paneId, texte);
+  paneManager.focus(paneId);
+}
+
+/// Traduit une touche en octets à envoyer au PTY. `null` = touche non
+/// concernée (on la laisse au reste de l'application : Échap, F1, etc.).
+function toucheVersTexte(ev: KeyboardEvent): string | null {
+  if (ev.ctrlKey || ev.altKey || ev.metaKey) return null;
+  if (ev.key.length === 1) return ev.key;
+  if (ev.key === "Enter") return "\r";
+  if (ev.key === "Backspace") return "\x7f";
+  if (ev.key === "Tab") return "\t";
+  return null;
+}
+
+document.addEventListener(
+  "keydown",
+  (ev) => {
+    // Un terminal, un champ de saisie ou un bouton a le focus : rien à faire.
+    if (document.activeElement !== document.body) return;
+    const texte = toucheVersTexte(ev);
+    if (texte === null) return;
+    // Consommer la touche ici évite aussi le bip système (WebView2 signale
+    // sinon une frappe non traitée).
+    ev.preventDefault();
+    if (basculeEnCours()) {
+      pendingInput.push(texte);
+      return;
+    }
+    // Bascule armée mais jamais conclue (serveur muet) : on rend ce qui est en
+    // attente au volet actif plutôt que de le laisser en suspens.
+    if (switchingSince !== 0) annulerBascule();
+    // Hors bascule (clic sur une zone inerte de l'interface) : le volet actif
+    // existe déjà, on lui rend le focus et on lui livre la frappe.
+    if (activePaneId !== null) {
+      envoyerAuVolet(activePaneId, texte);
+      paneManager.focus(activePaneId);
+    }
+  },
+  true,
+);
+
 listen<[LayoutNode, number]>("window-layout", (e) => {
   activePaneId = e.payload[1];
   paneManager.renderLayout(e.payload[0], e.payload[1]);
+  flushPendingInput(e.payload[1]);
 });
 listen<[number, number[]]>("pane-snapshot", (e) => {
   paneManager.write(e.payload[0], new Uint8Array(e.payload[1]));
@@ -150,6 +254,7 @@ function renderTabs(windows: WindowInfo[], active: number) {
     label.ondblclick = (ev) => {
       ev.stopPropagation();
       if (clickTimer !== null) { clearTimeout(clickTimer); clickTimer = null; }
+      annulerBascule(); // la bascule armée au 1er clic n'aura pas lieu
       startTabRename(tab, i, win.name ?? "");
     };
     // Le `×` est masqué s'il ne reste qu'une fenêtre (fermeture interdite).
@@ -165,6 +270,9 @@ function renderTabs(windows: WindowInfo[], active: number) {
     }
     tab.onclick = () => {
       if (clickTimer !== null) return; // 2e clic d'un double-clic : laisse ondblclick
+      // Changer d'onglet reconstruit les volets : même trou de focus que le
+      // rail, on met donc les frappes en attente dès le clic.
+      if (i !== active) armerBascule(false);
       clickTimer = window.setTimeout(() => {
         clickTimer = null;
         invoke("select_window", { index: i }).catch(() => {});
@@ -265,6 +373,11 @@ type AgentTemplateDto = { name: string };
 
 async function switchTo(name: string) {
   if (name === activeSession) return;
+  // Les volets de la nouvelle session n'existeront qu'au retour du serveur :
+  // les frappes de cet intervalle sont mises en attente (cf. repli clavier).
+  // `pendingInput` n'est PAS vidé : les frappes déjà mises en attente depuis le
+  // clic (cf. `armerBascule`) appartiennent à la session qu'on rejoint.
+  armerBascule();
   activeSession = name;
   lastLayoutRev = -1; // nouvelle session active : on resondera son layout_rev au prochain refresh (A1.5)
   // Effacement optimiste : la session qu'on regarde n'a plus d'indicateur, sans
@@ -280,6 +393,7 @@ async function switchTo(name: string) {
   await invoke("attach_session", { session: name }).catch((e) =>
     console.error("attach:", e),
   );
+  attacheEnCours = false; // les dispositions suivantes sont celles de `name`
   renderRail(lastSessions);
   updateWsHeader();
 }
@@ -575,6 +689,7 @@ function renderSession(s: SessionDto): HTMLElement {
   name.ondblclick = (ev) => {
     ev.stopPropagation();
     if (clickTimer !== null) { clearTimeout(clickTimer); clickTimer = null; }
+    annulerBascule(); // la bascule armée au 1er clic n'aura pas lieu
     startRename(el, s.name);
   };
   const close = document.createElement("span");
@@ -583,6 +698,9 @@ function renderSession(s: SessionDto): HTMLElement {
   close.onclick = async (ev) => { ev.stopPropagation(); await invoke("kill_session", { name: s.name }).catch(() => {}); await refresh(); };
   el.onclick = () => {
     if (clickTimer !== null) return; // 2e clic d'un double-clic : ignore, laisse ondblclick gerer
+    // Armé DÈS le clic : le focus tombe sur `<body>` maintenant, alors que la
+    // bascule ne partira que dans 200 ms (et le nouveau volet, que bien après).
+    if (s.name !== activeSession) armerBascule();
     clickTimer = window.setTimeout(() => { clickTimer = null; switchTo(s.name); }, 200);
   };
   // Glisser-déposer : réordonner les workspaces dans le rail.

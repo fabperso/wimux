@@ -162,6 +162,17 @@ export class PaneManager {
     }, 50);
   }
 
+  /// Redonne le focus clavier au terminal d'un volet, s'il existe encore.
+  /// Utilisé par le repli clavier de `main.ts` : cliquer une zone non
+  /// focalisable de l'interface (rail, onglets — de simples `div`) fait tomber
+  /// le focus du document sur `<body>`, où les frappes se perdent.
+  focus(paneId: number): boolean {
+    const v = this.views.get(paneId);
+    if (!v) return false;
+    v.term.focus();
+    return true;
+  }
+
   write(paneId: number, data: Uint8Array) {
     const v = this.views.get(paneId);
     if (!v) return;
