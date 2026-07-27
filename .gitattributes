@@ -8,4 +8,7 @@
 
 # Binaire : ne jamais convertir.
 *.png binary
+*.gif binary
 *.ico binary
+*.icns binary
+*.exe binary
