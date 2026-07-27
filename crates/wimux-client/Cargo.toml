@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Client-side attach logic for wimux, the native Windows terminal multiplexer."
+keywords = ["terminal", "multiplexer", "tmux", "windows", "tui"]
+categories = ["command-line-interface", "os::windows-apis"]
 
 [dependencies]
 wimux-protocol.workspace = true

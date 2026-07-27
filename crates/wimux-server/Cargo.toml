@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Daemon for wimux: owns the sessions, drives ConPTY children, emulates the terminals and serves clients over a named pipe."
+keywords = ["terminal", "multiplexer", "tmux", "conpty", "windows"]
+categories = ["command-line-utilities", "os::windows-apis"]
 
 [[bin]]
 name = "wimux-server"

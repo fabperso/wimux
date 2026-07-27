@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Terminal/VT emulation engine used by wimux, the native Windows terminal multiplexer."
+keywords = ["terminal", "vt100", "ansi", "emulation", "tui"]
+categories = ["command-line-interface", "emulators"]
 
 [dependencies]
 serde.workspace = true

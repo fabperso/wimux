@@ -1588,7 +1588,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wimux-cli"
+name = "wimux"
 version = "0.1.0"
 dependencies = [
  "crossterm",

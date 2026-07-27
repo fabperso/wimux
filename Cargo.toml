@@ -18,9 +18,9 @@ authors = ["Fabrice Andy"]
 
 [workspace.dependencies]
 # Crates internes
-wimux-protocol = { path = "crates/wimux-protocol" }
-wimux-vt = { path = "crates/wimux-vt" }
-wimux-client = { path = "crates/wimux-client" }
+wimux-protocol = { version = "0.1.0", path = "crates/wimux-protocol" }
+wimux-vt = { version = "0.1.0", path = "crates/wimux-vt" }
+wimux-client = { version = "0.1.0", path = "crates/wimux-client" }
 
 # Dépendances externes partagées
 serde = { version = "1", features = ["derive"] }
