@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Test d'intégration du jalon J2 : une session survit au détachement du client.
 //!
 //! Scénario : créer une session, y exécuter une commande dont la sortie est

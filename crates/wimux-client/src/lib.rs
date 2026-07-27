@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Client TUI `wimux` : s'exécute dans n'importe quel terminal VT, se connecte
 //! au serveur, affiche la grille reçue et transmet les entrées clavier. Le
 //! client est « jetable » : le fermer (ou `Ctrl-b d`) revient à se détacher, la

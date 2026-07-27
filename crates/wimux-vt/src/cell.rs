@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Modèle d'une cellule de terminal : caractère, couleurs, attributs, largeur.
 
 use serde::{Deserialize, Serialize};

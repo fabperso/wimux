@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 use std::sync::Arc;
 use std::sync::Mutex;
 

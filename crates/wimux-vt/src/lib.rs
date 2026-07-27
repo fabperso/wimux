@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Émulation de terminal (grille + scrollback) pour un volet.
 //!
 //! Chaque volet possède sa propre instance de [`Terminal`] : le serveur y injecte

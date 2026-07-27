@@ -14,7 +14,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/fabperso/wimux"
-authors = ["Fabrice"]
+authors = ["Fabrice Andy"]
 
 [workspace.dependencies]
 # Crates internes

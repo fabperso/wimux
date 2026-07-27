@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Gestion des worktrees git pour l'orchestration fan-out (M3). Chaque agent d'un
 //! lot tourne dans un worktree git isolé d'un repo de base, sur une branche
 //! dédiée. Les commandes git passent par `std::process::Command` (git doit être

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Diagnostic ConPTY chronométré : isole précisément l'étape qui bloque.
 //! Lance : `cargo run -p wimux-server --example conpty_diag`
 

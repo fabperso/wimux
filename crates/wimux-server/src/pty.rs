@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Enveloppe ConPTY : lancer un processus enfant dans une pseudo-console et
 //! échanger avec lui. C'est la brique de dé-risquage de la phase 1.
 //!

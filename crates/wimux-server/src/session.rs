@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Une session : un ensemble de fenêtres, chacune contenant un arbre de volets.
 //! La session est **la source de vérité** : ses volets tournent en continu, et à
 //! chaque changement les clients attachés sont réveillés puis reçoivent une

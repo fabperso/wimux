@@ -211,7 +211,9 @@ See the full reference in [docs/usage.md](docs/usage.md).
 
 ## License
 
-[MIT](LICENSE) © Fabrice
+[MIT](LICENSE) © 2026 Fabrice Andy — free to use, modify and redistribute, **provided the copyright notice is kept**.
+
+The MIT license covers the **code**. The name **wimux** and the wimux logo are unregistered trademarks of Fabrice Andy: forks are welcome, but please pick your own name and logo so users can tell the projects apart.
 
 <!--
 BEFORE MAKING THE REPO PUBLIC — remove this comment and complete:

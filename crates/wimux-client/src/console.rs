@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Configuration du mode console d'entrée sous Windows.
 //!
 //! Pour recevoir l'entrée clavier sous forme de séquences VT brutes (et non de

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Un volet (`Pane`) : une pseudo-console ConPTY exécutant un shell, plus le
 //! terminal virtuel (`wimux-vt`) qui en reflète l'affichage. C'est l'unité de
 //! base ; une fenêtre en dispose plusieurs selon un arbre de découpes.

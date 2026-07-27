@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Une fenêtre = un arbre binaire de découpes dont les feuilles sont des volets.
 //! La fenêtre calcule la disposition (rectangles + bordures) dans une zone
 //! donnée, redimensionne ses volets en conséquence, et se compose dans une

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Interpréteur de commandes textuelles, partagé par l'invite (`Ctrl-b :`) et la
 //! CLI scriptable (`wimux <commande> -t <session>`). Syntaxe façon tmux.
 

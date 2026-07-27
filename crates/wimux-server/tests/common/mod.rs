@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Helpers partagés par les tests d'intégration du démon (client de test minimal
 //! par-dessus le protocole : démarrage, connexion, handshake, lecture asynchrone).
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Tests d'intégration ConPTY (phase 1, dé-risquage).
 //!
 //! Ils lancent de vrais processus Windows à travers une pseudo-console et

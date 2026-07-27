@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Moteur navigateur pilotable par CDP (B2.1) : un Chromium externe visible,
 //! possédé par le daemon via un thread tokio dédié, piloté par `chromiumoxide`.
 //!

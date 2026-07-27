@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Grille de cellules de taille fixe (le viewport visible d'un volet).
 
 use serde::{Deserialize, Serialize};

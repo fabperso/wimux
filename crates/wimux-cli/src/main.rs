@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Binaire `wimux` : point d'entrée utilisateur. Analyse la ligne de commande,
 //! démarre le serveur détaché s'il est absent, puis lance un client TUI (attach)
 //! ou envoie une commande de contrôle au serveur.

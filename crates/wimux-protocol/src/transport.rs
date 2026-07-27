@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Transport IPC : Named Pipe Windows duplex, en I/O **overlapped**.
 //!
 //! Point crucial : un handle ouvert en I/O synchrone sérialise les opérations.

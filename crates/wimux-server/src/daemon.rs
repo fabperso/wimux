@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Démon : boucle d'acceptation des clients sur le Named Pipe, gestion des
 //! sessions et dialogue avec chaque client (un thread par connexion, plus un
 //! thread émetteur de frames par attachement).

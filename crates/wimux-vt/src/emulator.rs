@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Moteur d'émulation VT : consomme le flux d'octets d'un volet et maintient une
 //! grille à jour. S'appuie sur `vte` (machine à états d'Alacritty) pour le
 //! parsing ; toute la sémantique « écran » (curseur, impression, effacements,

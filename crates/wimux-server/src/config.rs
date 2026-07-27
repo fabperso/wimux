@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Configuration du serveur, chargée au démarrage depuis un fichier optionnel.
 //!
 //! Format proche de tmux, une directive par ligne (`#` pour les commentaires) :

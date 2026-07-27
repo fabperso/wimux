@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Démon `wimux-server` : détient les sessions, pilote les ConPTY, maintient les
 //! grilles VT et sert les clients via Named Pipe. Un seul serveur par
 //! utilisateur, détaché du terminal qui l'a lancé (il survit à sa fermeture).

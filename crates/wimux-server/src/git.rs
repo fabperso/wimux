@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Détermination de la branche git d'un répertoire, par **lecture de fichier
 //! uniquement** (sans lancer `git`). On remonte les dossiers parents depuis le
 //! cwd jusqu'à trouver un dossier contenant un `.git` répertoire (car

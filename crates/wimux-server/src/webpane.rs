@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! État d'un volet NAVIGATEUR (B1) : l'URL courante et la pile d'historique.
 //! Aucun processus, aucune I/O — c'est de l'état pur, possédé par le serveur pour
 //! que le volet et son URL survivent au redémarrage de la GUI.

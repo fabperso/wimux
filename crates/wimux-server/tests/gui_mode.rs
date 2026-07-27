@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Test d'intégration du mode GUI : un client GUI s'attache à une session
 //! existante, reçoit un `PaneSnapshot` puis un flux de `PaneOutput`, et peut
 //! injecter des frappes via `PaneInput`.

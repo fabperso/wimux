@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Opérations git/`gh` de la revue de lot (M4) : collecte des résultats d'un
 //! agent (strictement NON MUTANTE — ni index ni arbre de travail touchés, un
 //! agent peut encore tourner) et intégration du gagnant par Pull Request.

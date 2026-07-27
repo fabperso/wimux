@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fabrice Andy
 //! Protocole RPC partagé entre le client `wimux` et le démon `wimux-server`.
 //!
 //! Transport : Named Pipe Windows. Cadrage des messages : préfixe de longueur
