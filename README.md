@@ -195,6 +195,8 @@ flowchart TB
 
 Design decisions are recorded as ADRs in [`docs/adr/`](docs/adr/) — language choice, ConPTY lessons, VT emulation, overlapped‑IO IPC, config format.
 
+📝 **[Three bugs my AI agents couldn't fix](https://dev.to/fabperso/three-bugs-my-ai-agents-couldnt-fix-13bn)** — most of this code was written by AI agents; this is a write‑up of the three bugs they couldn't, and how each one was tracked down.
+
 ## Configuration
 
 wimux reads `%USERPROFILE%\.wimux.conf` at startup (tmux‑style syntax):
